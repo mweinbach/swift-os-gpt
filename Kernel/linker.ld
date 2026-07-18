@@ -9,6 +9,8 @@ STACK_GUARD_SIZE = 4K;
 DMA_SCRATCH_SIZE = 4K;
 TERMINAL_STORAGE_SIZE = 8K;
 FRAMEBUFFER_SIZE = 800 * 600 * 4;
+CLASSIFIED_FREE_RUN_STORAGE_SIZE = 24K;
+CLASSIFIED_ALLOCATION_LEDGER_SIZE = 24K;
 FINAL_L2_TABLE_COUNT = 32;
 FINAL_L3_TABLE_COUNT = 96;
 
@@ -151,6 +153,12 @@ SECTIONS
         . += 4K;
         __page_allocator_storage = .;
         . += 8K;
+        __classified_free_run_storage = .;
+        . += CLASSIFIED_FREE_RUN_STORAGE_SIZE;
+        __classified_free_run_storage_end = .;
+        __classified_allocation_ledger_storage = .;
+        . += CLASSIFIED_ALLOCATION_LEDGER_SIZE;
+        __classified_allocation_ledger_storage_end = .;
         __memory_metadata_end = .;
     }
 
@@ -195,6 +203,10 @@ ASSERT(((__bss_end - __bss_start) & 15) == 0, "BSS clear span must be 16-byte al
 ASSERT((__dma_scratch_start & 4095) == 0, "DMA scratch must be page aligned")
 ASSERT((__terminal_storage_start & 4095) == 0, "terminal storage must be page aligned")
 ASSERT((__framebuffer_start & 4095) == 0, "framebuffer must be page aligned")
+ASSERT((__classified_free_run_storage & 15) == 0,
+       "classified free-run metadata must be 16-byte aligned")
+ASSERT((__classified_allocation_ledger_storage & 15) == 0,
+       "classified allocation ledger must be 16-byte aligned")
 ASSERT(__kernel_end < 0x42000000, "early kernel exceeds reserved 32 MiB window")
 ASSERT(__user_entry_physical >= __user_text_start,
        "user entry precedes isolated user text")

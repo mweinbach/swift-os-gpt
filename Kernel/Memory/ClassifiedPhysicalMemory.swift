@@ -256,6 +256,45 @@ struct ClassifiedPhysicalMemoryAllocator {
         return allocationStorage[index]
     }
 
+    /// Atomically replaces free-run state with an already normalized physical
+    /// memory map. Active ownership prevents replacement; callers must never
+    /// be able to make allocated pages free by reloading discovery metadata.
+    @discardableResult
+    mutating func load(
+        from memoryMap: PhysicalMemoryMap,
+        classification: PhysicalMemoryClassification
+    ) -> Bool {
+        guard activeAllocationCount == 0,
+              memoryMap.count <= freeStorage.count
+        else {
+            return false
+        }
+
+        // Validate the complete source before touching the destination.
+        var index = 0
+        while index < memoryMap.count {
+            guard memoryMap.range(at: index) != nil else {
+                return false
+            }
+            index += 1
+        }
+
+        index = 0
+        while index < memoryMap.count {
+            freeStorage[index] = ClassifiedPhysicalPageRange(
+                range: memoryMap.range(at: index)!,
+                classification: classification
+            )
+            index += 1
+        }
+        while index < freeRunCount {
+            freeStorage[index] = .empty
+            index += 1
+        }
+        freeRunCount = memoryMap.count
+        return true
+    }
+
     /// Adds discovered memory. Same-class overlaps and adjacency normalize;
     /// differently classified overlaps are rejected before any state changes.
     @discardableResult

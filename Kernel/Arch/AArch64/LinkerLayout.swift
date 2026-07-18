@@ -68,6 +68,18 @@ enum KernelLinkerLayout {
     static var schedulerCurrentIndices: UInt64 { archSchedulerCurrentIndices() }
     static var memoryMapStorage: UInt64 { archMemoryMapStorage() }
     static var pageAllocatorStorage: UInt64 { archPageAllocatorStorage() }
+    static var classifiedFreeRunStorage: LinkerRegion {
+        LinkerRegion(
+            start: archClassifiedFreeRunStorage(),
+            end: archClassifiedFreeRunStorageEnd()
+        )
+    }
+    static var classifiedAllocationLedgerStorage: LinkerRegion {
+        LinkerRegion(
+            start: archClassifiedAllocationLedgerStorage(),
+            end: archClassifiedAllocationLedgerStorageEnd()
+        )
+    }
     static var smpTopologyStorage: UInt64 { archSMPTopologyStorage() }
     static var smpTargetStorage: UInt64 { archSMPTargetStorage() }
     static var smpStateStorage: UInt64 { archSMPStateStorage() }
@@ -141,6 +153,14 @@ extension AArch64 {
 @_silgen_name("arch_scheduler_current_indices") private func archSchedulerCurrentIndices() -> UInt64
 @_silgen_name("arch_memory_map_storage") private func archMemoryMapStorage() -> UInt64
 @_silgen_name("arch_page_allocator_storage") private func archPageAllocatorStorage() -> UInt64
+@_silgen_name("arch_classified_free_run_storage")
+private func archClassifiedFreeRunStorage() -> UInt64
+@_silgen_name("arch_classified_free_run_storage_end")
+private func archClassifiedFreeRunStorageEnd() -> UInt64
+@_silgen_name("arch_classified_allocation_ledger_storage")
+private func archClassifiedAllocationLedgerStorage() -> UInt64
+@_silgen_name("arch_classified_allocation_ledger_storage_end")
+private func archClassifiedAllocationLedgerStorageEnd() -> UInt64
 @_silgen_name("arch_smp_topology_storage") private func archSMPTopologyStorage() -> UInt64
 @_silgen_name("arch_smp_target_storage") private func archSMPTargetStorage() -> UInt64
 @_silgen_name("arch_smp_state_storage") private func archSMPStateStorage() -> UInt64

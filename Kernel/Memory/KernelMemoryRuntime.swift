@@ -10,9 +10,23 @@ struct KernelMemoryActivation {
 enum KernelMemoryRuntime {
     static let memoryReadyMarker: StaticString = "SWIFTOS:MEMORY_READY\n"
     static let pagingReadyMarker: StaticString = "SWIFTOS:PAGING_READY\n"
+    static let defaultSystemMemoryDomain = PhysicalMemoryAllocationDomain(1)
+    /// Boot-discovered system DRAM is CPU/device accessible and coherent as an
+    /// allocation class. Per-device DMA addressability and coherency remain
+    /// separate contracts supplied by device discovery and `DMAMapping`.
+    static let defaultSystemMemoryClassification =
+        PhysicalMemoryClassification(
+            allocationDomain: defaultSystemMemoryDomain,
+            capabilities: PhysicalMemoryCapabilities.cpuAccessible
+                .union(.deviceAccessible)
+                .union(.cacheCoherent),
+            proximityDomain: PhysicalMemoryProximityDomain(0)
+        )
 
     private static let memoryMapCapacity = 256
-    private static let allocatorCapacity = 512
+    private static let bootstrapAllocatorCapacity = 512
+    private static let classifiedFreeRunCapacity = 512
+    private static let classifiedActiveAllocationCapacity = 512
     private static let kernelReadOnlyCapacity = 2
     private static let kernelDataCapacity = 6
     private static let userStackCapacity = 2
@@ -30,13 +44,13 @@ enum KernelMemoryRuntime {
 
     private nonisolated(unsafe) static var ownedMemoryMap:
         PhysicalMemoryMap?
-    private nonisolated(unsafe) static var ownedPageAllocator:
-        PhysicalPageAllocator?
+    private nonisolated(unsafe) static var ownedClassifiedPageAllocator:
+        ClassifiedPhysicalMemoryAllocator?
     private nonisolated(unsafe) static var activeTables:
         FinalTranslationTables?
 
     static var isReady: Bool {
-        ownedMemoryMap != nil && ownedPageAllocator != nil
+        ownedMemoryMap != nil && ownedClassifiedPageAllocator != nil
             && activeTables != nil
     }
 
@@ -45,6 +59,7 @@ enum KernelMemoryRuntime {
         console: EarlyConsole
     ) -> KernelMemoryActivation? {
         guard !isReady,
+              storageBoundsAreValid(),
               let mapStorage: UnsafeMutableBufferPointer<PhysicalPageRange>
                 = fixedBuffer(
                     at: KernelLinkerLayout.memoryMapStorage,
@@ -53,9 +68,21 @@ enum KernelMemoryRuntime {
               let allocatorStorage:
                 UnsafeMutableBufferPointer<PhysicalPageRange> = fixedBuffer(
                     at: KernelLinkerLayout.pageAllocatorStorage,
-                    count: allocatorCapacity
+                    count: bootstrapAllocatorCapacity
                 ),
-              storageBoundsAreValid(),
+              let classifiedFreeStorage:
+                UnsafeMutableBufferPointer<ClassifiedPhysicalPageRange>
+                = fixedBuffer(
+                    at: KernelLinkerLayout.classifiedFreeRunStorage.start,
+                    count: classifiedFreeRunCapacity
+                ),
+              let classifiedAllocationStorage:
+                UnsafeMutableBufferPointer<ClassifiedPageAllocationToken>
+                = fixedBuffer(
+                    at: KernelLinkerLayout
+                        .classifiedAllocationLedgerStorage.start,
+                    count: classifiedActiveAllocationCapacity
+                ),
               let tablePoolRange = translationTablePoolRange(),
               let explicitReservations = explicitReservationStorage(),
               let kernelReservation = PhysicalByteSpan(
@@ -72,7 +99,13 @@ enum KernelMemoryRuntime {
             count: 1
         )
         var memoryMap = PhysicalMemoryMap(storage: mapStorage)
-        var allocator = PhysicalPageAllocator(storage: allocatorStorage)
+        var bootstrapAllocator = PhysicalPageAllocator(
+            storage: allocatorStorage
+        )
+        var classifiedAllocator = ClassifiedPhysicalMemoryAllocator(
+            freeStorage: classifiedFreeStorage,
+            allocationStorage: classifiedAllocationStorage
+        )
         let bootstrap = RuntimePhysicalMemoryBootstrap.initialize(
             platform: platform,
             layout: RuntimeMemoryBootstrapLayout(
@@ -80,9 +113,15 @@ enum KernelMemoryRuntime {
                 translationTablePool: tablePoolRange
             ),
             memoryMap: &memoryMap,
-            allocator: &allocator
+            allocator: &bootstrapAllocator
         )
         guard case let .ready(memorySummary) = bootstrap,
+              classifiedAllocator.load(
+                  from: memoryMap,
+                  classification: defaultSystemMemoryClassification
+              ),
+              classifiedAllocator.totalFreePageCount
+                == memorySummary.usablePageCount,
               let userMappings = KernelEL0Runtime.addressSpaceMappings(),
               scrubUserStackBacking(),
               let layout = finalLayout(
@@ -116,7 +155,7 @@ enum KernelMemoryRuntime {
         // Publish allocator ownership before changing tables. The metadata and
         // every page it describes are retained by the final identity map.
         ownedMemoryMap = memoryMap
-        ownedPageAllocator = allocator
+        ownedClassifiedPageAllocator = classifiedAllocator
         activeTables = tables
         console.write(memoryReadyMarker)
         console.write("SWIFTOS:USABLE_PAGES=")
@@ -148,14 +187,50 @@ enum KernelMemoryRuntime {
         pageCount: UInt64,
         alignmentInPages: UInt64 = 1
     ) -> PageAllocationResult {
-        guard var allocator = ownedPageAllocator else {
+        let result = allocateClassifiedPages(
+            ClassifiedPageAllocationConstraints(
+                pageCount: pageCount,
+                alignmentInPages: alignmentInPages,
+                requiredCapabilities: .cpuAccessible,
+                domainSelection: .preferred(
+                    defaultSystemMemoryDomain,
+                    fallback: .disallowed
+                )
+            )
+        )
+        switch result {
+        case let .allocated(token):
+            // The classified allocator retains the token in its ownership
+            // ledger even though this compatibility API exposes only a range.
+            return .allocated(token.range)
+        case .invalidRequest:
+            return .invalidRequest
+        case .outOfMemory:
+            return .outOfMemory
+        case .metadataExhausted:
+            return .metadataExhausted
+        }
+    }
+
+    static func allocateClassifiedPages(
+        _ constraints: ClassifiedPageAllocationConstraints
+    ) -> ClassifiedPageAllocationResult {
+        guard var allocator = ownedClassifiedPageAllocator else {
             return .outOfMemory
         }
-        let result = allocator.allocate(
-            pageCount: pageCount,
-            alignmentInPages: alignmentInPages
-        )
-        ownedPageAllocator = allocator
+        let result = allocator.allocate(constraints)
+        ownedClassifiedPageAllocator = allocator
+        return result
+    }
+
+    static func releaseClassifiedPages(
+        _ token: ClassifiedPageAllocationToken
+    ) -> ClassifiedPageReleaseResult {
+        guard var allocator = ownedClassifiedPageAllocator else {
+            return .unknownAllocation
+        }
+        let result = allocator.release(token)
+        ownedClassifiedPageAllocator = allocator
         return result
     }
 
@@ -407,16 +482,34 @@ enum KernelMemoryRuntime {
     private static func storageBoundsAreValid() -> Bool {
         let mapStart = KernelLinkerLayout.memoryMapStorage
         let allocatorStart = KernelLinkerLayout.pageAllocatorStorage
+        let classifiedFree = KernelLinkerLayout.classifiedFreeRunStorage
+        let allocationLedger = KernelLinkerLayout
+            .classifiedAllocationLedgerStorage
         let following = AArch64.dmaScratchAddress
-        return allocatorStart >= mapStart
-            && following >= allocatorStart
-            && allocatorStart - mapStart >= requiredBytes(
+        guard allocatorStart >= mapStart,
+              classifiedFree.start >= allocatorStart,
+              classifiedFree.end >= classifiedFree.start,
+              allocationLedger.start >= classifiedFree.end,
+              allocationLedger.end >= allocationLedger.start,
+              following >= allocationLedger.end
+        else {
+            return false
+        }
+        return allocatorStart - mapStart >= requiredBytes(
                 PhysicalPageRange.self,
                 count: memoryMapCapacity
             )
-            && following - allocatorStart >= requiredBytes(
+            && classifiedFree.start - allocatorStart >= requiredBytes(
                 PhysicalPageRange.self,
-                count: allocatorCapacity
+                count: bootstrapAllocatorCapacity
+            )
+            && classifiedFree.length >= requiredBytes(
+                ClassifiedPhysicalPageRange.self,
+                count: classifiedFreeRunCapacity
+            )
+            && allocationLedger.length >= requiredBytes(
+                ClassifiedPageAllocationToken.self,
+                count: classifiedActiveAllocationCapacity
             )
     }
 

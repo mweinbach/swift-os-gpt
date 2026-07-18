@@ -2,12 +2,13 @@
 struct ClassifiedPhysicalMemoryTests {
     static func main() {
         testCapabilitiesModelCPUInaccessibleMemory()
+        testNormalizedMapLoadIsAtomicAndClassified()
         testClassificationControlsMergingAndOverlapValidation()
         testReservationsPreserveClassificationAndAreAtomic()
         testConstrainedAllocationAndExplicitDomainFallback()
         testMaximumAddressAndMetadataFailuresAreAtomic()
         testOwnershipTokensValidateRelease()
-        print("classified physical memory host tests: 6 groups passed")
+        print("classified physical memory host tests: 7 groups passed")
     }
 
     private static let systemDomain = PhysicalMemoryAllocationDomain(1)
@@ -62,6 +63,75 @@ struct ClassifiedPhysicalMemoryTests {
             graphicsMemory.proximityDomain == graphicsProximity,
             "proximity metadata was not retained"
         )
+    }
+
+    private static func testNormalizedMapLoadIsAtomicAndClassified() {
+        var mapStorage = Array(
+            repeating: PhysicalPageRange.empty,
+            count: 4
+        )
+        mapStorage.withUnsafeMutableBufferPointer { mapBuffer in
+            var map = PhysicalMemoryMap(storage: mapBuffer)
+            expect(
+                map.addDeviceTreeMemory(
+                    baseAddress: 0x1000,
+                    length: 0x4000
+                ),
+                "classified map low fixture"
+            )
+            expect(
+                map.addDeviceTreeMemory(
+                    baseAddress: 0x1_0000,
+                    length: 0x2000
+                ),
+                "classified map high fixture"
+            )
+
+            withAllocator(freeCapacity: 4, allocationCapacity: 2) {
+                allocator, _, _ in
+                expect(
+                    allocator.load(
+                        from: map,
+                        classification: systemMemory
+                    ),
+                    "normalized map load"
+                )
+                expect(allocator.freeRunCount == 2, "loaded map run count")
+                expect(
+                    allocator.totalFreePageCount == 6,
+                    "loaded map page accounting"
+                )
+                expect(
+                    allocator.freeRun(at: 0)?.classification == systemMemory,
+                    "loaded map classification"
+                )
+
+                _ = expectAllocation(
+                    allocator.allocate(
+                        ClassifiedPageAllocationConstraints(pageCount: 1)
+                    ),
+                    "loaded map allocation"
+                )
+                let runsBeforeRejectedLoad = snapshot(allocator)
+                let activeBeforeRejectedLoad = allocator.activeAllocation(at: 0)
+                expect(
+                    !allocator.load(
+                        from: map,
+                        classification: graphicsMemory
+                    ),
+                    "map reload revoked active allocation"
+                )
+                expect(
+                    snapshot(allocator) == runsBeforeRejectedLoad,
+                    "rejected map reload changed free runs"
+                )
+                expect(
+                    allocator.activeAllocation(at: 0)
+                        == activeBeforeRejectedLoad,
+                    "rejected map reload changed ownership"
+                )
+            }
+        }
     }
 
     private static func testClassificationControlsMergingAndOverlapValidation() {
