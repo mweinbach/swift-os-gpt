@@ -276,8 +276,21 @@ struct VirtIOGPU3DProtocolTests {
                     at: address,
                     byteCount: 40,
                     fenceID: header.fenceID
+                ) == VirtIOGPU3DCapsetInfo(
+                    id: 6,
+                    maximumVersion: 7,
+                    maximumByteCount: 4096
+                ),
+                "future capset ID was not preserved"
+            )
+            PhysicalBytes.writeLE32(0, at: address + 24)
+            expect(
+                VirtIOGPU3DProtocol.readCapsetInfoResponse(
+                    at: address,
+                    byteCount: 40,
+                    fenceID: header.fenceID
                 ) == nil,
-                "undefined capset ID was accepted"
+                "reserved zero capset ID was accepted"
             )
         }
     }

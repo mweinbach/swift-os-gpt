@@ -569,7 +569,10 @@ enum VirtIOGPU3DProtocol {
             return nil
         }
         let id = PhysicalBytes.readLE32(at: address + 24)
-        guard VirtIOGPU3DCapsetID.isDefined(id) else { return nil }
+        // Capset identifiers are an extensible VirtIO namespace. Preserve
+        // unknown nonzero IDs so a bounded selector can ignore capabilities it
+        // does not implement instead of rejecting an otherwise usable device.
+        guard id != 0 else { return nil }
         return VirtIOGPU3DCapsetInfo(
             id: id,
             maximumVersion: PhysicalBytes.readLE32(at: address + 28),
