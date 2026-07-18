@@ -123,6 +123,30 @@ struct VirGLCapabilityParserTests {
             expect(capabilities.capabilityBitsV2 == 0x0000_0200, "v2 bits")
             expect(capabilities.supportsB8G8R8X8RenderTarget, "render format")
             expect(capabilities.supportsB8G8R8X8Scanout, "scanout format")
+            expect(
+                capabilities.supportsB8G8R8A8SRGBRenderTarget,
+                "alpha sRGB render format"
+            )
+            expect(
+                capabilities.supportsB8G8R8A8SRGBScanout,
+                "alpha sRGB scanout format"
+            )
+            expect(
+                capabilities.supportsB8G8R8X8SRGBRenderTarget,
+                "opaque sRGB render format"
+            )
+            expect(
+                capabilities.supportsB8G8R8X8SRGBScanout,
+                "opaque sRGB scanout format"
+            )
+            expect(
+                VirGLCapabilityWire.formatB8G8R8A8SRGB == 100,
+                "alpha sRGB wire format"
+            )
+            expect(
+                VirGLCapabilityWire.formatB8G8R8X8SRGB == 101,
+                "opaque sRGB wire format"
+            )
             expect(capabilities.supportsR32G32FloatVertex, "vec2 vertex format")
             expect(
                 capabilities.supportsR32G32B32A32FloatVertex,
@@ -154,6 +178,22 @@ struct VirGLCapabilityParserTests {
             expect(capabilities.capabilityBits == 0, "invented v1 capability bits")
             expect(capabilities.capabilityBitsV2 == 0, "invented v1 v2 bits")
             expect(!capabilities.supportsB8G8R8X8Scanout, "invented v1 scanout")
+            expect(
+                capabilities.supportsB8G8R8A8SRGBRenderTarget,
+                "lost advertised v1 alpha sRGB render format"
+            )
+            expect(
+                capabilities.supportsB8G8R8X8SRGBRenderTarget,
+                "lost advertised v1 opaque sRGB render format"
+            )
+            expect(
+                !capabilities.supportsB8G8R8A8SRGBScanout,
+                "invented v1 alpha sRGB scanout"
+            )
+            expect(
+                !capabilities.supportsB8G8R8X8SRGBScanout,
+                "invented v1 opaque sRGB scanout"
+            )
             expect(
                 !capabilities.supportsTexture2D(width: 1, height: 1),
                 "legacy layout claimed an absent texture limit"
@@ -285,11 +325,57 @@ struct VirGLCapabilityParserTests {
             )
         }
         withValidPayload(for: selection) { bytes in
+            // Keep opaque format 101 set to prove it cannot substitute for
+            // alpha-preserving format 100 (word 17 + 100 / 32, bit 100 % 32).
+            writeLE32(UInt32(1) << 5, word: 20, bytes: bytes)
+            expectRejected(
+                parse(selection, bytes),
+                .unsupportedRenderTargetFormat,
+                "missing B8G8R8A8_SRGB render target"
+            )
+        }
+        withValidPayload(for: selection) { bytes in
             writeLE32(0, word: 156, bytes: bytes)
             expectRejected(
                 parse(selection, bytes),
                 .unsupportedScanoutFormat,
                 "missing B8G8R8X8 scanout"
+            )
+        }
+        withValidPayload(for: selection) { bytes in
+            // The scanout mask starts at word 156, so formats 100 and 101
+            // occupy bits 4 and 5 respectively in word 159.
+            writeLE32(UInt32(1) << 5, word: 159, bytes: bytes)
+            expectRejected(
+                parse(selection, bytes),
+                .unsupportedScanoutFormat,
+                "missing B8G8R8A8_SRGB scanout"
+            )
+        }
+        withValidPayload(for: selection) { bytes in
+            // Opaque sRGB support is reported, but is not mandatory once the
+            // alpha-preserving format is available for both uses.
+            writeLE32(UInt32(1) << 4, word: 20, bytes: bytes)
+            writeLE32(UInt32(1) << 4, word: 159, bytes: bytes)
+            guard case .capabilities(let capabilities) = parse(selection, bytes)
+            else {
+                fail("alpha-only sRGB payload was rejected")
+            }
+            expect(
+                capabilities.supportsB8G8R8A8SRGBRenderTarget,
+                "alpha sRGB render bit"
+            )
+            expect(
+                capabilities.supportsB8G8R8A8SRGBScanout,
+                "alpha sRGB scanout bit"
+            )
+            expect(
+                !capabilities.supportsB8G8R8X8SRGBRenderTarget,
+                "invented opaque sRGB render bit"
+            )
+            expect(
+                !capabilities.supportsB8G8R8X8SRGBScanout,
+                "invented opaque sRGB scanout bit"
             )
         }
         withValidPayload(for: selection) { bytes in
@@ -319,12 +405,22 @@ struct VirGLCapabilityParserTests {
                 bytes: bytes
             )
             writeLE32(UInt32(1) << 2, word: 17, bytes: bytes)
+            writeLE32(
+                (UInt32(1) << 4) | (UInt32(1) << 5),
+                word: 20,
+                bytes: bytes
+            )
             writeLE32(330, word: 66, bytes: bytes)
             writeLE32(4, word: 70, bytes: bytes)
             writeLE32(UInt32(1) << 4, word: 72, bytes: bytes)
             if selection.kind == .virgl2 {
                 writeLE32(16_384, word: 121, bytes: bytes)
                 writeLE32(UInt32(1) << 2, word: 156, bytes: bytes)
+                writeLE32(
+                    (UInt32(1) << 4) | (UInt32(1) << 5),
+                    word: 159,
+                    bytes: bytes
+                )
             }
             body(bytes)
         }

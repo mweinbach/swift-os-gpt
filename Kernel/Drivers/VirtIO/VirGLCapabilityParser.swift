@@ -180,8 +180,19 @@ struct VirGLRendererCapabilities: Equatable {
     let maximumTexture2DSize: UInt32?
     let capabilityBits: UInt32
     let capabilityBitsV2: UInt32
+    /// Legacy format 2 (`B8G8R8X8_UNORM`) support retained for the existing
+    /// scanout contract.
     let supportsB8G8R8X8RenderTarget: Bool
     let supportsB8G8R8X8Scanout: Bool
+    /// Alpha-preserving sRGB format 100. The GPU compositor requires this
+    /// format for both rendering and direct scanout so source-over contents
+    /// are not silently forced opaque.
+    let supportsB8G8R8A8SRGBRenderTarget: Bool
+    let supportsB8G8R8A8SRGBScanout: Bool
+    /// Opaque sRGB format 101 is reported separately. Its presence must not
+    /// satisfy the alpha-preserving compositor requirement.
+    let supportsB8G8R8X8SRGBRenderTarget: Bool
+    let supportsB8G8R8X8SRGBScanout: Bool
     let supportsR32G32FloatVertex: Bool
     let supportsR32G32B32A32FloatVertex: Bool
 
@@ -220,6 +231,8 @@ enum VirGLCapabilityWire {
 
     // virgl_formats wire values.
     static let formatB8G8R8X8UNorm: UInt32 = 2
+    static let formatB8G8R8A8SRGB: UInt32 = 100
+    static let formatB8G8R8X8SRGB: UInt32 = 101
     // PIPE_PRIM_TRIANGLES.
     static let trianglesPrimitive: UInt32 = 4
 
@@ -313,13 +326,20 @@ enum VirGLCapabilityParser {
             return .rejected(.impossibleRenderTargetLimit)
         }
 
-        let renderFormatMask = readLE32(
-            word: VirGLCapabilityWire.renderFormatMaskWord,
+        let supportsRenderTarget = formatIsSet(
+            VirGLCapabilityWire.formatB8G8R8X8UNorm,
+            inMaskAtWord: VirGLCapabilityWire.renderFormatMaskWord,
             payload: payload
         )
-        let supportsRenderTarget = bitIsSet(
-            bit: VirGLCapabilityWire.formatB8G8R8X8UNorm,
-            in: renderFormatMask
+        let supportsAlphaSRGBRenderTarget = formatIsSet(
+            VirGLCapabilityWire.formatB8G8R8A8SRGB,
+            inMaskAtWord: VirGLCapabilityWire.renderFormatMaskWord,
+            payload: payload
+        )
+        let supportsOpaqueSRGBRenderTarget = formatIsSet(
+            VirGLCapabilityWire.formatB8G8R8X8SRGB,
+            inMaskAtWord: VirGLCapabilityWire.renderFormatMaskWord,
+            payload: payload
         )
         guard supportsRenderTarget else {
             return .rejected(.unsupportedRenderTargetFormat)
@@ -329,6 +349,8 @@ enum VirGLCapabilityParser {
         let capabilityBits: UInt32
         let capabilityBitsV2: UInt32
         let supportsScanout: Bool
+        let supportsAlphaSRGBScanout: Bool
+        let supportsOpaqueSRGBScanout: Bool
         switch capset.kind {
         case .virgl:
             maximumTexture2DSize = nil
@@ -338,7 +360,15 @@ enum VirGLCapabilityParser {
             // directly scans out its 3D resource must require VIRGL2 rather
             // than infer support from the render-target mask.
             supportsScanout = false
+            supportsAlphaSRGBScanout = false
+            supportsOpaqueSRGBScanout = false
         case .virgl2:
+            // SwiftOS's compositor color attachment carries alpha. Opaque
+            // B8G8R8X8_SRGB (format 101) is intentionally insufficient even
+            // when the renderer advertises it in the neighboring mask bit.
+            guard supportsAlphaSRGBRenderTarget else {
+                return .rejected(.unsupportedRenderTargetFormat)
+            }
             let textureLimit = readLE32(
                 word: VirGLCapabilityWire.maximumTexture2DSizeWord,
                 payload: payload
@@ -360,14 +390,22 @@ enum VirGLCapabilityParser {
                 word: VirGLCapabilityWire.capabilityBitsV2Word,
                 payload: payload
             )
-            supportsScanout = bitIsSet(
-                bit: VirGLCapabilityWire.formatB8G8R8X8UNorm,
-                in: readLE32(
-                    word: VirGLCapabilityWire.scanoutFormatMaskWord,
-                    payload: payload
-                )
+            supportsScanout = formatIsSet(
+                VirGLCapabilityWire.formatB8G8R8X8UNorm,
+                inMaskAtWord: VirGLCapabilityWire.scanoutFormatMaskWord,
+                payload: payload
             )
-            guard supportsScanout else {
+            supportsAlphaSRGBScanout = formatIsSet(
+                VirGLCapabilityWire.formatB8G8R8A8SRGB,
+                inMaskAtWord: VirGLCapabilityWire.scanoutFormatMaskWord,
+                payload: payload
+            )
+            supportsOpaqueSRGBScanout = formatIsSet(
+                VirGLCapabilityWire.formatB8G8R8X8SRGB,
+                inMaskAtWord: VirGLCapabilityWire.scanoutFormatMaskWord,
+                payload: payload
+            )
+            guard supportsScanout, supportsAlphaSRGBScanout else {
                 return .rejected(.unsupportedScanoutFormat)
             }
         }
@@ -383,6 +421,12 @@ enum VirGLCapabilityParser {
                 capabilityBitsV2: capabilityBitsV2,
                 supportsB8G8R8X8RenderTarget: supportsRenderTarget,
                 supportsB8G8R8X8Scanout: supportsScanout,
+                supportsB8G8R8A8SRGBRenderTarget:
+                    supportsAlphaSRGBRenderTarget,
+                supportsB8G8R8A8SRGBScanout: supportsAlphaSRGBScanout,
+                supportsB8G8R8X8SRGBRenderTarget:
+                    supportsOpaqueSRGBRenderTarget,
+                supportsB8G8R8X8SRGBScanout: supportsOpaqueSRGBScanout,
                 // Plain non-fixed vertex formats are VIRGL baseline. The
                 // vertexbuffer mask advertises exceptional formats only.
                 supportsR32G32FloatVertex: true,
@@ -404,5 +448,21 @@ enum VirGLCapabilityParser {
 
     private static func bitIsSet(bit: UInt32, in word: UInt32) -> Bool {
         bit < 32 && word & (UInt32(1) << bit) != 0
+    }
+
+    /// VirGL format capability sets are arrays of 32-bit mask words. Keeping
+    /// the word selection here prevents extended formats (100 and 101) from
+    /// accidentally being tested against the first word that contains format
+    /// 2.
+    private static func formatIsSet(
+        _ format: UInt32,
+        inMaskAtWord firstWord: Int,
+        payload: UnsafeRawBufferPointer
+    ) -> Bool {
+        let word = firstWord + Int(format >> 5)
+        return bitIsSet(
+            bit: format & 31,
+            in: readLE32(word: word, payload: payload)
+        )
     }
 }
