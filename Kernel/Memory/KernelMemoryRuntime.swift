@@ -1,0 +1,548 @@
+struct KernelMemoryActivation {
+    let userMappings: KernelEL0AddressSpaceMappings
+    let usablePageCount: UInt64
+    let translationTablePageCount: Int
+}
+
+/// Converts firmware discovery into owned RAM and replaces the permissive
+/// bootstrap map with exact kernel/user/device mappings. Every metadata buffer
+/// is linker-owned, so this path has no dependency on a heap allocator.
+enum KernelMemoryRuntime {
+    static let memoryReadyMarker: StaticString = "SWIFTOS:MEMORY_READY\n"
+    static let pagingReadyMarker: StaticString = "SWIFTOS:PAGING_READY\n"
+
+    private static let memoryMapCapacity = 256
+    private static let allocatorCapacity = 512
+    private static let kernelReadOnlyCapacity = 2
+    private static let kernelDataCapacity = 6
+    private static let userStackCapacity = 2
+    private static let mmioCapacity = 4
+    private static let guardCapacity = 6
+
+    private enum LayoutOffset {
+        static let kernelReadOnly = 0
+        static let kernelData = 128
+        static let userStacks = 384
+        static let mmio = 512
+        static let guards = 768
+        static let explicitReservations = 1024
+    }
+
+    private nonisolated(unsafe) static var ownedMemoryMap:
+        PhysicalMemoryMap?
+    private nonisolated(unsafe) static var ownedPageAllocator:
+        PhysicalPageAllocator?
+    private nonisolated(unsafe) static var activeTables:
+        FinalTranslationTables?
+
+    static var isReady: Bool {
+        ownedMemoryMap != nil && ownedPageAllocator != nil
+            && activeTables != nil
+    }
+
+    static func activate(
+        platform: Platform,
+        console: EarlyConsole
+    ) -> KernelMemoryActivation? {
+        guard !isReady,
+              let mapStorage: UnsafeMutableBufferPointer<PhysicalPageRange>
+                = fixedBuffer(
+                    at: KernelLinkerLayout.memoryMapStorage,
+                    count: memoryMapCapacity
+                ),
+              let allocatorStorage:
+                UnsafeMutableBufferPointer<PhysicalPageRange> = fixedBuffer(
+                    at: KernelLinkerLayout.pageAllocatorStorage,
+                    count: allocatorCapacity
+                ),
+              storageBoundsAreValid(),
+              let tablePoolRange = translationTablePoolRange(),
+              let explicitReservations = explicitReservationStorage(),
+              let kernelReservation = PhysicalByteSpan(
+                  startAddress: KernelLinkerLayout.kernelImage.start,
+                  endAddress: KernelLinkerLayout.kernelImage.end
+              )
+        else {
+            return nil
+        }
+
+        explicitReservations[0] = kernelReservation
+        let immutableReservations = UnsafeBufferPointer(
+            start: explicitReservations.baseAddress,
+            count: 1
+        )
+        var memoryMap = PhysicalMemoryMap(storage: mapStorage)
+        var allocator = PhysicalPageAllocator(storage: allocatorStorage)
+        let bootstrap = RuntimePhysicalMemoryBootstrap.initialize(
+            platform: platform,
+            layout: RuntimeMemoryBootstrapLayout(
+                explicitReservations: immutableReservations,
+                translationTablePool: tablePoolRange
+            ),
+            memoryMap: &memoryMap,
+            allocator: &allocator
+        )
+        guard case let .ready(memorySummary) = bootstrap,
+              let userMappings = KernelEL0Runtime.addressSpaceMappings(),
+              let layout = finalLayout(
+                  platform: platform,
+                  userMappings: userMappings
+              ),
+              let tableStorage: UnsafeMutableBufferPointer<UInt64>
+                = fixedBuffer(
+                    at: tablePoolRange.baseAddress,
+                    count: Int(tablePoolRange.pageCount)
+                        * TranslationTableGeometry.entriesPerTable
+                ),
+              var tablePool = FinalTranslationTablePagePool(
+                  physicalBaseAddress: tablePoolRange.baseAddress,
+                  pageCount: Int(tablePoolRange.pageCount),
+                  mappedEntries: tableStorage
+              )
+        else {
+            return nil
+        }
+
+        let build = FinalTranslationTableBuilder.build(
+            availablePhysicalMemory: memoryMap,
+            layout: layout,
+            pool: &tablePool
+        )
+        guard case let .built(tables) = build else {
+            return nil
+        }
+
+        // Publish allocator ownership before changing tables. The metadata and
+        // every page it describes are retained by the final identity map.
+        ownedMemoryMap = memoryMap
+        ownedPageAllocator = allocator
+        activeTables = tables
+        console.write(memoryReadyMarker)
+        console.write("SWIFTOS:USABLE_PAGES=")
+        console.writeHex(memorySummary.usablePageCount)
+        console.write("\n")
+
+        AArch64.installTranslationTable(
+            rootPhysicalAddress: tables.addressSpace.rootTablePhysicalAddress,
+            addressSpaceIdentifier: tables.addressSpace.identifier.value
+        )
+        guard AArch64.translationTableBase
+                == tables.addressSpace.translationTableBaseRegisterValue
+        else {
+            return nil
+        }
+        console.write(pagingReadyMarker)
+        console.write("SWIFTOS:TABLE_PAGES=")
+        console.writeHex(UInt64(tables.summary.tablePageCount))
+        console.write("\n")
+
+        return KernelMemoryActivation(
+            userMappings: userMappings,
+            usablePageCount: memorySummary.usablePageCount,
+            translationTablePageCount: tables.summary.tablePageCount
+        )
+    }
+
+    static func allocatePages(
+        pageCount: UInt64,
+        alignmentInPages: UInt64 = 1
+    ) -> PageAllocationResult {
+        guard var allocator = ownedPageAllocator else {
+            return .outOfMemory
+        }
+        let result = allocator.allocate(
+            pageCount: pageCount,
+            alignmentInPages: alignmentInPages
+        )
+        ownedPageAllocator = allocator
+        return result
+    }
+
+    private static func finalLayout(
+        platform: Platform,
+        userMappings: KernelEL0AddressSpaceMappings
+    ) -> FinalAddressSpaceLayout? {
+        guard let kernelReadOnly:
+                UnsafeMutableBufferPointer<FinalMappingRegion> = layoutBuffer(
+                    offset: LayoutOffset.kernelReadOnly,
+                    count: kernelReadOnlyCapacity
+                ),
+              let kernelData:
+                UnsafeMutableBufferPointer<FinalMappingRegion> = layoutBuffer(
+                    offset: LayoutOffset.kernelData,
+                    count: kernelDataCapacity
+                ),
+              let userStacks:
+                UnsafeMutableBufferPointer<FinalMappingRegion> = layoutBuffer(
+                    offset: LayoutOffset.userStacks,
+                    count: userStackCapacity
+                ),
+              let mmio: UnsafeMutableBufferPointer<FinalMappingRegion>
+                = layoutBuffer(
+                    offset: LayoutOffset.mmio,
+                    count: mmioCapacity
+                ),
+              let guards: UnsafeMutableBufferPointer<FinalGuardRegion>
+                = layoutBuffer(
+                    offset: LayoutOffset.guards,
+                    count: guardCapacity
+                ),
+              let kernelText = identityMapping(
+                  KernelLinkerLayout.kernelText,
+                  role: .kernelText
+              ),
+              let kernelRO = identityMapping(
+                  KernelLinkerLayout.kernelReadOnlyData,
+                  role: .kernelReadOnlyData
+              ),
+              let deviceTreeRO = byteSpanIdentityMapping(
+                  baseAddress: platform.deviceTreeAddress,
+                  length: platform.deviceTreeSize,
+                  role: .kernelReadOnlyData
+              )
+        else {
+            return nil
+        }
+
+        var readOnlyCount = 0
+        guard append(kernelRO, to: kernelReadOnly, count: &readOnlyCount),
+              append(
+                  deviceTreeRO,
+                  to: kernelReadOnly,
+                  count: &readOnlyCount
+              )
+        else {
+            return nil
+        }
+
+        var dataCount = 0
+        var guardCount = 0
+        let data = KernelLinkerLayout.kernelData
+        let bootStack = KernelLinkerLayout.bootStack
+        let secondaryStacks = KernelLinkerLayout.secondaryStacks
+        guard appendIdentityData(
+                  start: data.start,
+                  end: bootStack.start,
+                  to: kernelData,
+                  count: &dataCount
+              ),
+              append(
+                  FinalGuardRegion(
+                      virtualBaseAddress: bootStack.start,
+                      pageCount: 1
+                  ),
+                  to: guards,
+                  count: &guardCount
+              ),
+              appendIdentityData(
+                  start: bootStack.start + MemoryPageGeometry.pageSize,
+                  end: secondaryStacks.start,
+                  to: kernelData,
+                  count: &dataCount
+              ),
+              secondaryStacks.length % 3 == 0
+        else {
+            return nil
+        }
+
+        let secondaryStackSize = secondaryStacks.length / 3
+        guard secondaryStackSize > MemoryPageGeometry.pageSize,
+              MemoryPageGeometry.isPageAligned(secondaryStackSize)
+        else {
+            return nil
+        }
+        var secondaryIndex: UInt64 = 0
+        while secondaryIndex < 3 {
+            let stackBase = secondaryStacks.start
+                + secondaryIndex * secondaryStackSize
+            guard append(
+                      FinalGuardRegion(
+                          virtualBaseAddress: stackBase,
+                          pageCount: 1
+                      ),
+                      to: guards,
+                      count: &guardCount
+                  ),
+                  appendIdentityData(
+                      start: stackBase + MemoryPageGeometry.pageSize,
+                      end: stackBase + secondaryStackSize,
+                      to: kernelData,
+                      count: &dataCount
+                  )
+            else {
+                return nil
+            }
+            secondaryIndex += 1
+        }
+        guard appendIdentityData(
+                  start: secondaryStacks.end,
+                  end: data.end,
+                  to: kernelData,
+                  count: &dataCount
+              )
+        else {
+            return nil
+        }
+
+        // User stack count is separate from the privileged data count.
+        userStacks[0] = userMappings.firstUserStack
+        userStacks[1] = userMappings.secondUserStack
+        guard append(
+                  userMappings.firstUserStackGuard,
+                  to: guards,
+                  count: &guardCount
+              ),
+              append(
+                  userMappings.secondUserStackGuard,
+                  to: guards,
+                  count: &guardCount
+              )
+        else {
+            return nil
+        }
+
+        var mmioCount = 0
+        guard appendDevice(
+                  platform.serial,
+                  to: mmio,
+                  count: &mmioCount
+              )
+        else {
+            return nil
+        }
+        switch platform.interruptController {
+        case let .gicV2(distributor, cpuInterface):
+            guard appendDevice(
+                      distributor,
+                      to: mmio,
+                      count: &mmioCount
+                  ),
+                  appendDevice(
+                      cpuInterface,
+                      to: mmio,
+                      count: &mmioCount
+                  )
+            else {
+                return nil
+            }
+        case let .gicV3(distributor, redistributor):
+            guard appendDevice(
+                      distributor,
+                      to: mmio,
+                      count: &mmioCount
+                  ),
+                  appendDevice(
+                      redistributor,
+                      to: mmio,
+                      count: &mmioCount
+                  )
+            else {
+                return nil
+            }
+        }
+        if let firmware = platform.firmwareConfiguration,
+           !appendDevice(firmware, to: mmio, count: &mmioCount) {
+            return nil
+        }
+
+        return FinalAddressSpaceLayout(
+            kind: .user,
+            identifier: AddressSpaceIdentifier(value: 1, generation: 0),
+            kernelText: kernelText,
+            kernelReadOnlyDataRegions: immutable(
+                kernelReadOnly,
+                count: readOnlyCount
+            ),
+            kernelDataRegions: immutable(kernelData, count: dataCount),
+            userText: userMappings.userText,
+            userReadOnlyData: userMappings.userReadOnlyData,
+            userStacks: immutable(userStacks, count: userStackCapacity),
+            mmioRegions: immutable(mmio, count: mmioCount),
+            guardRegions: immutable(guards, count: guardCount)
+        )
+    }
+
+    private static func translationTablePoolRange() -> PhysicalPageRange? {
+        let start = KernelLinkerLayout.finalLevel1Table.start
+        let end = KernelLinkerLayout.finalLevel3Tables.end
+        guard end > start,
+              MemoryPageGeometry.isPageAligned(start),
+              MemoryPageGeometry.isPageAligned(end)
+        else {
+            return nil
+        }
+        return PhysicalPageRange(
+            baseAddress: start,
+            pageCount: (end - start) / MemoryPageGeometry.pageSize
+        )
+    }
+
+    private static func storageBoundsAreValid() -> Bool {
+        let mapStart = KernelLinkerLayout.memoryMapStorage
+        let allocatorStart = KernelLinkerLayout.pageAllocatorStorage
+        let following = AArch64.dmaScratchAddress
+        return allocatorStart >= mapStart
+            && following >= allocatorStart
+            && allocatorStart - mapStart >= requiredBytes(
+                PhysicalPageRange.self,
+                count: memoryMapCapacity
+            )
+            && following - allocatorStart >= requiredBytes(
+                PhysicalPageRange.self,
+                count: allocatorCapacity
+            )
+    }
+
+    private static func explicitReservationStorage()
+        -> UnsafeMutableBufferPointer<PhysicalByteSpan>? {
+        layoutBuffer(
+            offset: LayoutOffset.explicitReservations,
+            count: 1
+        )
+    }
+
+    private static func identityMapping(
+        _ region: LinkerRegion,
+        role: MemoryRegionRole
+    ) -> FinalMappingRegion? {
+        guard region.length > 0,
+              MemoryPageGeometry.isPageAligned(region.start),
+              let end = MemoryPageGeometry.alignUp(region.end),
+              end > region.start
+        else {
+            return nil
+        }
+        return FinalMappingRegion(
+            virtualBaseAddress: region.start,
+            physicalBaseAddress: region.start,
+            byteCount: end - region.start,
+            role: role
+        )
+    }
+
+    private static func byteSpanIdentityMapping(
+        baseAddress: UInt64,
+        length: UInt64,
+        role: MemoryRegionRole
+    ) -> FinalMappingRegion? {
+        guard length > 0,
+              length <= UInt64.max - baseAddress,
+              let end = MemoryPageGeometry.alignUp(baseAddress + length)
+        else {
+            return nil
+        }
+        let start = MemoryPageGeometry.alignDown(baseAddress)
+        return FinalMappingRegion(
+            virtualBaseAddress: start,
+            physicalBaseAddress: start,
+            byteCount: end - start,
+            role: role
+        )
+    }
+
+    private static func appendIdentityData(
+        start: UInt64,
+        end: UInt64,
+        to storage: UnsafeMutableBufferPointer<FinalMappingRegion>,
+        count: inout Int
+    ) -> Bool {
+        guard end >= start else { return false }
+        if end == start { return true }
+        guard let region = FinalMappingRegion(
+            virtualBaseAddress: start,
+            physicalBaseAddress: start,
+            byteCount: end - start,
+            role: .kernelData
+        ) else {
+            return false
+        }
+        return append(region, to: storage, count: &count)
+    }
+
+    private static func appendDevice(
+        _ resource: DeviceResource,
+        to storage: UnsafeMutableBufferPointer<FinalMappingRegion>,
+        count: inout Int
+    ) -> Bool {
+        guard let mapping = byteSpanIdentityMapping(
+            baseAddress: resource.baseAddress,
+            length: resource.length,
+            role: .device
+        ) else {
+            return false
+        }
+        return append(mapping, to: storage, count: &count)
+    }
+
+    private static func append<T>(
+        _ value: T?,
+        to storage: UnsafeMutableBufferPointer<T>,
+        count: inout Int
+    ) -> Bool {
+        guard let value else { return false }
+        guard count < storage.count else { return false }
+        storage[count] = value
+        count += 1
+        return true
+    }
+
+    private static func immutable<T>(
+        _ storage: UnsafeMutableBufferPointer<T>,
+        count: Int
+    ) -> UnsafeBufferPointer<T> {
+        UnsafeBufferPointer(start: storage.baseAddress, count: count)
+    }
+
+    private static func layoutBuffer<T>(
+        offset: Int,
+        count: Int
+    ) -> UnsafeMutableBufferPointer<T>? {
+        let region = KernelLinkerLayout.pagingLayoutStorage
+        guard offset >= 0,
+              count > 0,
+              let bytes = byteCount(T.self, count: count),
+              UInt64(offset) <= region.length,
+              bytes <= region.length - UInt64(offset),
+              region.start <= UInt64(UInt.max) - UInt64(offset)
+        else {
+            return nil
+        }
+        return fixedBuffer(at: region.start + UInt64(offset), count: count)
+    }
+
+    private static func fixedBuffer<T>(
+        at address: UInt64,
+        count: Int
+    ) -> UnsafeMutableBufferPointer<T>? {
+        guard address != 0,
+              address <= UInt64(UInt.max),
+              count > 0,
+              address % UInt64(MemoryLayout<T>.alignment) == 0,
+              let pointer = UnsafeMutablePointer<T>(
+                  bitPattern: UInt(address)
+              )
+        else {
+            return nil
+        }
+        return UnsafeMutableBufferPointer(start: pointer, count: count)
+    }
+
+    private static func requiredBytes<T>(
+        _ type: T.Type,
+        count: Int
+    ) -> UInt64 {
+        UInt64(MemoryLayout<T>.stride) * UInt64(count)
+    }
+
+    private static func byteCount<T>(
+        _ type: T.Type,
+        count: Int
+    ) -> UInt64? {
+        guard count > 0,
+              UInt64(count) <= UInt64.max / UInt64(MemoryLayout<T>.stride)
+        else {
+            return nil
+        }
+        return UInt64(MemoryLayout<T>.stride) * UInt64(count)
+    }
+}

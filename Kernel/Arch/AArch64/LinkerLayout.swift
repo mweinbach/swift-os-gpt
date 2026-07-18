@@ -72,6 +72,12 @@ enum KernelLinkerLayout {
     static var smpTargetStorage: UInt64 { archSMPTargetStorage() }
     static var smpStateStorage: UInt64 { archSMPStateStorage() }
     static var smpReportStorage: UInt64 { archSMPReportStorage() }
+    static var pagingLayoutStorage: LinkerRegion {
+        LinkerRegion(
+            start: archPagingLayoutStorage(),
+            end: archPagingLayoutStorageEnd()
+        )
+    }
     static var userEntryPhysicalAddress: UInt64 { archUserEntryPhysical() }
 }
 
@@ -81,7 +87,7 @@ extension AArch64 {
         addressSpaceIdentifier: UInt16
     ) {
         archInstallTTBR0(
-            rootPhysicalAddress | UInt64(addressSpaceIdentifier) << 48
+            rootPhysicalAddress | UInt64(addressSpaceIdentifier) << 56
         )
     }
 
@@ -139,6 +145,8 @@ extension AArch64 {
 @_silgen_name("arch_smp_target_storage") private func archSMPTargetStorage() -> UInt64
 @_silgen_name("arch_smp_state_storage") private func archSMPStateStorage() -> UInt64
 @_silgen_name("arch_smp_report_storage") private func archSMPReportStorage() -> UInt64
+@_silgen_name("arch_paging_layout_storage") private func archPagingLayoutStorage() -> UInt64
+@_silgen_name("arch_paging_layout_storage_end") private func archPagingLayoutStorageEnd() -> UInt64
 @_silgen_name("arch_user_entry_physical") private func archUserEntryPhysical() -> UInt64
 @_silgen_name("arch_secondary_entry_address") private func archSecondaryEntryAddress() -> UInt64
 @_silgen_name("arch_install_ttbr0") private func archInstallTTBR0(_ value: UInt64)

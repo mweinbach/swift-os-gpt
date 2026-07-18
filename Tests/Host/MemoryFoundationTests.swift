@@ -461,7 +461,7 @@ struct MemoryFoundationTests {
                 rootTablePhysicalAddress: 0x4200_0000,
                 identifier: wrapped.identifier
             )?.translationTableBaseRegisterValue
-                == (UInt64(1) << 48 | 0x4200_0000),
+                == (UInt64(1) << 56 | 0x4200_0000),
             "user TTBR encoding"
         )
         expect(

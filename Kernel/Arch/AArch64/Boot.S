@@ -193,7 +193,7 @@ _secondary_start:
     orr     x1, x1, x2
     msr     tcr_el1, x1
     ldr     x1, =__final_l1_table
-    mov     x2, #(1 << 48)
+    mov     x2, #(1 << 56)          /* 8-bit ASID 1; TCR_EL1.AS is clear */
     orr     x1, x1, x2
     msr     ttbr0_el1, x1
     msr     ttbr1_el1, xzr
@@ -655,6 +655,8 @@ ADDRESS_ACCESSOR arch_smp_topology_storage, __smp_topology_storage
 ADDRESS_ACCESSOR arch_smp_target_storage, __smp_target_storage
 ADDRESS_ACCESSOR arch_smp_state_storage, __smp_state_storage
 ADDRESS_ACCESSOR arch_smp_report_storage, __smp_report_storage
+ADDRESS_ACCESSOR arch_paging_layout_storage, __paging_layout_storage
+ADDRESS_ACCESSOR arch_paging_layout_storage_end, __paging_layout_storage_end
 ADDRESS_ACCESSOR arch_user_entry_physical, __user_entry_physical
 ADDRESS_ACCESSOR arch_secondary_entry_address, _secondary_start
 

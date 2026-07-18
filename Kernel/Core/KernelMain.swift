@@ -74,6 +74,14 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
     }
     console.write("SWIFTOS:FDT_OK\n")
 
+    guard let memory = KernelMemoryRuntime.activate(
+        platform: platform,
+        console: console
+    ) else {
+        console.write("SWIFTOS:PANIC:MEMORY\n")
+        park()
+    }
+
     guard InterruptSubsystem.exceptionVectorsInstalled else {
         console.write("SWIFTOS:PANIC:VECTORS\n")
         park()
@@ -88,17 +96,28 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
 
     switch platform.kind {
     case .qemuVirt:
-        runQEMUDesktop(console: console, platform: platform)
+        runQEMUDesktop(
+            console: console,
+            platform: platform,
+            memory: memory
+        )
     case .raspberryPi5:
         console.write("SWIFTOS:SERIAL_ONLY\n")
-        proveTimerInterrupts(console: console)
         console.write("SWIFTOS:SWIFT_OK\n")
-        console.write("SWIFTOS:READY\n")
-        park()
+        proveTimerInterrupts(console: console)
+        runScheduledOrPark(
+            console: console,
+            platform: platform,
+            memory: memory
+        )
     }
 }
 
-private func runQEMUDesktop(console: EarlyConsole, platform: Platform) -> Never {
+private func runQEMUDesktop(
+    console: EarlyConsole,
+    platform: Platform,
+    memory: KernelMemoryActivation
+) -> Never {
     guard let firmwareConfiguration = platform.firmwareConfiguration else {
         console.write("SWIFTOS:PANIC:FW_CFG\n")
         park()
@@ -128,8 +147,42 @@ private func runQEMUDesktop(console: EarlyConsole, platform: Platform) -> Never 
     console.write("SWIFTOS:SWIFT_OK\n")
 
     proveTimerInterrupts(console: console)
+    if platform.processorCount > 1 {
+        runScheduledOrPark(
+            console: console,
+            platform: platform,
+            memory: memory
+        )
+    }
     console.write("SWIFTOS:READY\n")
     monitor.run()
+}
+
+private func runScheduledOrPark(
+    console: EarlyConsole,
+    platform: Platform,
+    memory: KernelMemoryActivation
+) -> Never {
+    guard platform.processorCount > 1 else {
+        console.write("SWIFTOS:READY\n")
+        park()
+    }
+    guard KernelSMP.start(platform: platform, console: console) else {
+        console.write("SWIFTOS:PANIC:SMP\n")
+        park()
+    }
+    let frequency = AArch64.counterFrequency
+    let period = frequency / 100
+    guard period > 0 else {
+        console.write("SWIFTOS:PANIC:TIMER_PERIOD\n")
+        park()
+    }
+    console.write("SWIFTOS:READY\n")
+    KernelEL0Runtime.launch(
+        console: console,
+        mappings: memory.userMappings,
+        timerPeriodTicks: period
+    )
 }
 
 private func proveTimerInterrupts(console: EarlyConsole) {
@@ -160,6 +213,7 @@ private func proveTimerInterrupts(console: EarlyConsole) {
         }
         if reported < 3 { AArch64.waitForInterrupt() }
     }
+    InterruptSubsystem.stopPhysicalTimer()
 }
 
 private func park() -> Never {

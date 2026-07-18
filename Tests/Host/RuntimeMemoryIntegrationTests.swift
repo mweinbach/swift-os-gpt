@@ -261,7 +261,7 @@ struct RuntimeMemoryIntegrationTests {
                                             .translationTableBaseRegisterValue
                                             == tables.addressSpace
                                                 .rootTablePhysicalAddress
-                                                | UInt64(7) << 48,
+                                                | UInt64(7) << 56,
                                         "TTBR ASID encoding"
                                     )
                                     expect(

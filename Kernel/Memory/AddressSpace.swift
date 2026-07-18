@@ -81,7 +81,8 @@ struct AddressSpaceMetadata: Equatable {
                 return nil
             }
         } else {
-            guard identifier.value != 0 else {
+            // TCR_EL1.AS remains zero, so TTBR0 uses its 8-bit ASID field.
+            guard identifier.value != 0, identifier.value <= 0xff else {
                 return nil
             }
         }
@@ -90,9 +91,9 @@ struct AddressSpaceMetadata: Equatable {
         self.identifier = identifier
     }
 
-    /// TTBR value for a 48-bit output address and the architectural ASID field.
+    /// TTBR value for a 48-bit output address and an 8-bit ASID in [63:56].
     var translationTableBaseRegisterValue: UInt64 {
-        rootTablePhysicalAddress | UInt64(identifier.value) << 48
+        rootTablePhysicalAddress | UInt64(identifier.value) << 56
     }
 }
 

@@ -43,14 +43,14 @@ QEMU_FLAGS := \
 	-machine virt,gic-version=3 \
 	-cpu cortex-a72 \
 	-accel tcg \
-	-smp 1 \
+	-smp 4 \
 	-m 512M \
 	-device ramfb,id=ramfb0 \
 	-monitor none \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke test host-test userland-test qemu-fdt-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke smp-el0-smoke test host-test userland-test qemu-fdt-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -252,7 +252,10 @@ frame-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/frame_smoke.py \
 		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-frame.ppm
 
-test: toolchain-check source-check host-test userland-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke
+smp-el0-smoke: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py $(KERNEL_BIN)
+
+test: toolchain-check source-check host-test userland-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke smp-el0-smoke rpi5-inspect
 
 clean:
 	rm -rf $(BUILD_DIR)

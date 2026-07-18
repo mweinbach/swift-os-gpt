@@ -138,6 +138,13 @@ SECTIONS
         __smp_storage_end = .;
     }
 
+    .paging_layout_storage (NOLOAD) : ALIGN(4K)
+    {
+        __paging_layout_storage = .;
+        . += 4K;
+        __paging_layout_storage_end = .;
+    }
+
     .memory_metadata (NOLOAD) : ALIGN(4K)
     {
         __memory_map_storage = .;
