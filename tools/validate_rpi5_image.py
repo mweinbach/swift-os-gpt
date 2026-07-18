@@ -48,7 +48,6 @@ def main() -> int:
 
     descriptor_contract = {
         "RPI5_BCM_HIGH_MMIO_L1_DESCRIPTOR": 0x0060001040000401,
-        "RPI5_RP1_MMIO_L1_DESCRIPTOR": 0x0060001F00000401,
     }
     for name, expected in descriptor_contract.items():
         match = re.search(

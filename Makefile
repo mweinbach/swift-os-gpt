@@ -51,7 +51,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke smp-el0-smoke test host-test userland-test qemu-fdt-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke smp-el0-smoke test host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -134,6 +134,8 @@ rpi5-inspect: rpi5-build
 rpi5-package: rpi5-inspect
 	@test -n "$(RPI5_FIRMWARE)" || \
 		(echo "RPI5_FIRMWARE must name a pinned raspberrypi/firmware checkout" >&2; exit 2)
+	$(MAKE) rpi5-fdt-test \
+		RPI5_DTB=$(RPI5_FIRMWARE)/boot/bcm2712-rpi-5-b.dtb
 	Boards/RaspberryPi5/package-boot.sh $(RPI5_KERNEL_IMAGE) \
 		$(RPI5_FIRMWARE) $(RPI5_BUILD_DIR)/boot
 
@@ -236,6 +238,20 @@ qemu-fdt-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/libQEMUDeviceTreeProbe.dylib
 	$(PYTHON) Tests/Host/qemu_fdt_probe.py \
 		$(BUILD_DIR)/libQEMUDeviceTreeProbe.dylib $(BUILD_DIR)/qemu-virt.dtb
+
+rpi5-fdt-test: | $(BUILD_DIR)
+	@test -n "$(RPI5_DTB)" || \
+		(echo "RPI5_DTB must name a Raspberry Pi 5 firmware DTB" >&2; exit 2)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		-emit-library \
+		Kernel/Platform/FlattenedDeviceTree.swift \
+		Kernel/Platform/Platform.swift \
+		Tests/Host/RaspberryPi5DeviceTreeProbe.swift \
+		-o $(BUILD_DIR)/libRaspberryPi5DeviceTreeProbe.dylib
+	$(PYTHON) Tests/Host/rpi5_fdt_probe.py \
+		$(BUILD_DIR)/libRaspberryPi5DeviceTreeProbe.dylib $(RPI5_DTB)
 
 inspect: build
 	LLVM_NM=$(LLVM_NM) LLVM_OBJDUMP=$(LLVM_OBJDUMP) \

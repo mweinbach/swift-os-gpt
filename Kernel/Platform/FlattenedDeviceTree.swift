@@ -276,7 +276,8 @@ struct FlattenedDeviceTree {
         var propertyMatches = matchingPropertyName == nil
         var enabled = true
         var resource: DeviceResource?
-        var childTranslation = parentTranslation
+        var rangesOffset: UInt?
+        var rangesLength: UInt = 0
 
         while cursor < structureEnd {
             guard let token = readStructureWord(at: cursor) else {
@@ -287,6 +288,19 @@ struct FlattenedDeviceTree {
             switch token {
             case Self.beginNode:
                 cursor -= 4
+                let childTranslation: AddressTranslation
+                if let rangesOffset {
+                    childTranslation = decodeTranslation(
+                        at: rangesOffset,
+                        length: rangesLength,
+                        childAddressCells: childAddressCells,
+                        parentAddressCells: inheritedAddressCells,
+                        sizeCells: childSizeCells,
+                        parentTranslation: parentTranslation
+                    ) ?? parentTranslation
+                } else {
+                    childTranslation = parentTranslation
+                }
                 if let found = scanNode(
                     cursor: &cursor,
                     inheritedAddressCells: childAddressCells,
@@ -374,14 +388,10 @@ struct FlattenedDeviceTree {
                         translation: parentTranslation
                     )
                 } else if propertyName(at: UInt(nameOffset), equals: "ranges") {
-                    childTranslation = decodeTranslation(
-                        at: valueOffset,
-                        length: valueLength,
-                        childAddressCells: childAddressCells,
-                        parentAddressCells: inheritedAddressCells,
-                        sizeCells: childSizeCells,
-                        parentTranslation: parentTranslation
-                    ) ?? parentTranslation
+                    // Property order is not semantic in DT. Decode only when a
+                    // child begins, after this node's cell widths are known.
+                    rangesOffset = valueOffset
+                    rangesLength = valueLength
                 }
                 if let matchingPropertyName,
                    propertyName(

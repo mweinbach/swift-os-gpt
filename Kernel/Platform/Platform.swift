@@ -15,6 +15,7 @@ enum InterruptControllerDescription: Equatable {
 
 struct Platform {
     static let physicalTimerInterruptID: UInt32 = 30
+    private static let raspberryPi5DebugUART: UInt64 = 0x10_7d00_1000
 
     let kind: BoardKind
     let serial: DeviceResource
@@ -27,9 +28,7 @@ struct Platform {
     private let deviceTree: FlattenedDeviceTree
 
     static func discover(deviceTreeAddress: UInt64) -> Platform? {
-        guard let tree = FlattenedDeviceTree(address: deviceTreeAddress),
-              let serial = tree.resource(compatibleWith: "arm,pl011")
-        else {
+        guard let tree = FlattenedDeviceTree(address: deviceTreeAddress) else {
             return nil
         }
 
@@ -45,6 +44,15 @@ struct Platform {
         } else {
             return nil
         }
+
+        let serial: DeviceResource?
+        switch kind {
+        case .qemuVirt:
+            serial = tree.resource(compatibleWith: "arm,pl011")
+        case .raspberryPi5:
+            serial = raspberryPi5DebugSerial(in: tree)
+        }
+        guard let serial else { return nil }
 
         let interruptController: InterruptControllerDescription
         if let distributor = tree.resource(
@@ -100,6 +108,27 @@ struct Platform {
             deviceTreeSize: tree.blobSize,
             deviceTree: tree
         )
+    }
+
+    private static func raspberryPi5DebugSerial(
+        in tree: FlattenedDeviceTree
+    ) -> DeviceResource? {
+        // The board DT enables UART10 for the dedicated debug connector. Until
+        // alias/stdout-path resolution lands, require that exact translated DT
+        // resource instead of silently binding Bluetooth or an RP1 PL011.
+        var nodeIndex = 0
+        while nodeIndex < 64,
+              let candidate = tree.resource(
+                  compatibleWith: "arm,pl011",
+                  nodeIndex: nodeIndex
+              ) {
+            if candidate.baseAddress == raspberryPi5DebugUART,
+               candidate.length >= 0x200 {
+                return candidate
+            }
+            nodeIndex += 1
+        }
+        return nil
     }
 
     func memoryRegion(at index: Int) -> DeviceResource? {

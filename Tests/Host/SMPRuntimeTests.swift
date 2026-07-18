@@ -221,9 +221,6 @@ func mockLoadAcquire(
     address.pointee
 }
 
-@_cdecl("arch_smp_publication_barrier")
-func mockPublicationBarrier() {}
-
 @_cdecl("arch_smp_relax")
 func mockRelax() {
     relaxCount += 1

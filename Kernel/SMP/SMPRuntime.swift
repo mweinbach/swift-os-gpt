@@ -1,6 +1,7 @@
-private nonisolated(unsafe) var publishedProcessorStateBase:
-    UnsafeMutablePointer<UInt64>?
-private nonisolated(unsafe) var publishedProcessorStateCount: UInt64 = 0
+// Low three bits encode count - 1. Publishing one packed word means a
+// secondary's acquire load happens before it derives or dereferences the state
+// buffer; there is no separately raced Swift pointer/count registry.
+private nonisolated(unsafe) var publishedProcessorStateRegistry: UInt64 = 0
 
 /// Executes a PSCI SMP startup plan. All buffers must have static or otherwise
 /// kernel-lifetime storage because a secondary processor publishes through the
@@ -18,7 +19,9 @@ struct SMPRuntime {
         stateStorage: UnsafeMutableBufferPointer<UInt64>,
         reportStorage: UnsafeMutableBufferPointer<SecondaryProcessorStartReport>
     ) {
-        guard stateStorage.count >= plan.processorCount,
+        guard plan.processorCount > 0,
+              plan.processorCount <= 8,
+              stateStorage.count >= plan.processorCount,
               reportStorage.count >= plan.secondaryProcessorCount,
               let stateBase = stateStorage.baseAddress,
               UInt(bitPattern: stateBase) & 0x7 == 0
@@ -78,9 +81,9 @@ struct SMPRuntime {
             )
             logicalID += 1
         }
-        publishedProcessorStateBase = stateBase
-        publishedProcessorStateCount = UInt64(plan.processorCount)
-        archSMPPublicationBarrier()
+        let registry = UInt64(UInt(bitPattern: stateBase))
+            | UInt64(plan.processorCount - 1)
+        archSMPStoreRelease(&publishedProcessorStateRegistry, registry)
 
         var onlineProcessorCount = 1
         var alreadyOnCount = 0
@@ -207,9 +210,16 @@ struct SMPRuntime {
 /// or UInt64.max when x0 did not contain a valid pending context ID.
 @_cdecl("swiftos_smp_publish_online")
 func swiftOSSMPPublishOnline(_ contextID: UInt64) -> UInt64 {
-    guard contextID > 0,
-          contextID < publishedProcessorStateCount,
-          let stateBase = publishedProcessorStateBase,
+    let registry = archSMPLoadAcquire(&publishedProcessorStateRegistry)
+    let stateBaseAddress = registry & ~UInt64(0x7)
+    let processorCount = (registry & 0x7) + 1
+    guard registry != 0,
+          contextID > 0,
+          contextID < processorCount,
+          stateBaseAddress <= UInt64(UInt.max),
+          let stateBase = UnsafeMutablePointer<UInt64>(
+              bitPattern: UInt(stateBaseAddress)
+          ),
           contextID <= UInt64(Int.max)
     else {
         return UInt64.max
@@ -254,10 +264,6 @@ private func archSMPStoreRelease(
 private func archSMPLoadAcquire(
     _ address: UnsafePointer<UInt64>
 ) -> UInt64
-
-/// DMB ISHST after publishing the state-buffer registry and before CPU_ON.
-@_silgen_name("arch_smp_publication_barrier")
-private func archSMPPublicationBarrier()
 
 /// A bounded nonblocking pause, expected to be one AArch64 YIELD instruction.
 @_silgen_name("arch_smp_relax")

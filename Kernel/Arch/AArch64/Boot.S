@@ -28,6 +28,7 @@ _start:
 .Ldrop_from_el2:
     mov     x1, #(1 << 31)          /* EL1 executes AArch64 */
     msr     hcr_el2, x1
+    msr     cptr_el2, xzr           /* never inherit an FP/SIMD trap */
     mov     x1, #3                  /* EL1 physical counter and timer access */
     msr     cnthctl_el2, x1
     msr     cntvoff_el2, xzr
@@ -51,6 +52,7 @@ _start:
 
 .Lenter_el1:
     msr     daifset, #0xf
+    msr     spsel, #1               /* kernel exceptions and code use SP_EL1 */
     ldr     x1, =__boot_stack_top
     mov     sp, x1
 
@@ -74,10 +76,7 @@ _start:
     b       .Lclear_bss
 .Lbss_done:
 
-    /*
-     * Boot-time 4 KiB-granule identity map for the low device GiB and first
-     * RAM GiB. It remains active until the future owned-memory milestone.
-     */
+    /* Bootstrap-only identity map, replaced by owned final page tables. */
     ldr     x1, =__early_l1_table
     mov     x2, #0
     mov     x3, #(4096 / 16)
@@ -88,13 +87,18 @@ _start:
 
     ldr     x1, =__early_l1_table
 #if defined(SWIFTOS_RPI5)
-    /* BCM2712 executes in low RAM and exposes its main MMIO windows high. */
-    ldr     x2, =0x0000000000000705 /* normal WB, inner-shareable, AF */
-    str     x2, [x1, #0]
+    /* Cover all 8 GiB so firmware may place its DTB in any reported bank. */
+    mov     x3, #0
+    ldr     x4, =0x0000000000000705 /* normal WB, inner-shareable, AF */
+.Lrpi5_map_ram:
+    lsl     x2, x3, #30
+    orr     x2, x2, x4
+    str     x2, [x1, x3, lsl #3]
+    add     x3, x3, #1
+    cmp     x3, #8
+    b.lo    .Lrpi5_map_ram
     ldr     x2, =RPI5_BCM_HIGH_MMIO_L1_DESCRIPTOR
     str     x2, [x1, #(65 * 8)]     /* 0x10_40000000...0x10_7fffffff */
-    ldr     x2, =RPI5_RP1_MMIO_L1_DESCRIPTOR
-    str     x2, [x1, #(124 * 8)]    /* RP1 CPU aperture at 0x1f_00000000 */
 #else
     ldr     x2, =0x0060000000000401 /* device, AF, privileged XN */
     str     x2, [x1, #0]
@@ -166,6 +170,7 @@ _secondary_start:
 .Lsecondary_drop_el2:
     mov     x1, #(1 << 31)
     msr     hcr_el2, x1
+    msr     cptr_el2, xzr
     mov     x1, #3
     msr     cnthctl_el2, x1
     msr     cntvoff_el2, xzr
@@ -177,6 +182,7 @@ _secondary_start:
 
 .Lsecondary_el1:
     msr     daifset, #0xf
+    msr     spsel, #1
     ldr     x1, =__secondary_stacks_start
     add     x1, x1, x19, lsl #16
     mov     sp, x1
@@ -775,12 +781,6 @@ arch_smp_store_release:
 .type arch_smp_load_acquire, %function
 arch_smp_load_acquire:
     ldar    x0, [x0]
-    ret
-
-.global arch_smp_publication_barrier
-.type arch_smp_publication_barrier, %function
-arch_smp_publication_barrier:
-    dmb     ishst
     ret
 
 .global arch_smp_relax
