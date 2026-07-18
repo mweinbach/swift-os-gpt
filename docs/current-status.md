@@ -1,78 +1,124 @@
 # Current status
 
 This file is the line between what the guest demonstrably does and what remains
-architecture work. A screenshot is not evidence for a subsystem unless a guest
-driver and a repeatable test sit behind it.
+architecture work. A serial marker or screenshot is not subsystem evidence
+unless a guest implementation and a repeatable test sit behind it.
 
-## Implemented and verified
+## Implemented and verified on QEMU `virt`
 
-- AArch64 ELF and raw boot image produced by Swift 6.2 Embedded Swift.
-- Reset entry that accepts EL2 or EL1, parks secondary CPUs, selects EL1h,
-  enables FP/SIMD, installs early vectors, clears `.bss`, and owns its stack.
-- An enabled 4 KiB-granule identity MMU map with separate Device and Normal
-  memory attributes plus instruction and data caches.
-- Swift volatile MMIO and PL011 transmit/receive support.
-- A bounded, heap-free flattened-device-tree parser that discovers PL011 and
-  `fw_cfg`; hand-built fixtures and a live QEMU DTB exercise the same source.
-- QEMU `fw_cfg` directory discovery and DMA writes to the writable `etc/ramfb`
-  item, with all guest structures serialized explicitly in big-endian format.
-- A linker-owned 800 x 600 XRGB8888 framebuffer, software rectangle/text
-  rasterizer, bitmap font, desktop chrome, terminal window, and status panels.
-- A fixed-capacity terminal buffer and interactive kernel monitor. `help`,
-  `uname`, `status`, `clear`, `about`, and `uptime` execute in guest Swift; input
-  and output travel through PL011 while the framebuffer updates. This monitor
-  is linked into the kernel and executes at EL1; it is not userland.
-- Freestanding Swift implementations of the memory primitives currently needed
-  by compiler-generated code.
+- A static AArch64 ELF and raw boot image produced by Swift 6.2 Embedded Swift,
+  with no Darwin or Apple-framework dependency.
+- Reset entry from EL1 or EL2, EL1h setup, FP/SIMD enablement, `.bss` clearing,
+  bootstrap translation, cache enablement, and linker-owned boot/per-CPU stacks.
+- Full EL1 vector veneers and typed 832-byte exception frames preserving general
+  registers, FP/SIMD state, ELR/SPSR/ESR/FAR, `SP_EL0`, and `TPIDR_EL0` before
+  bounded dispatch in Swift.
+- Device-tree discovery of memory, reservations, CPUs, PL011, `fw_cfg`, PSCI,
+  and GIC resources, including multiple `reg` tuples, disabled-node filtering,
+  and the range translation required by the current board fixtures.
+- Device-tree-selected GICv3 initialization on QEMU, physical timer PPI delivery,
+  acknowledgement/end-of-interrupt, rearming, and repeated IRQ evidence. A
+  GICv2 implementation is linked for the Pi board contract, but has not been
+  exercised on physical Pi hardware.
+- Range-based physical-memory ownership derived from all discovered RAM banks,
+  minus firmware reservation-map entries, `/reserved-memory`, the DTB, kernel,
+  and final-table pool. A fixed-capacity page allocator owns the remaining
+  ranges and is covered for overlap, alignment, exhaustion, and allocation.
+- Final 4 KiB translation tables with separate executable text, read-only data,
+  writable non-executable data, user text/data/stacks, and Device mappings.
+  Unmapped guards protect the boot stack, all three secondary stacks, and both
+  EL0 stacks. The kernel switches from the bootstrap table to this final root.
+- DT-selected PSCI `CPU_ON`, using HVC in the direct-EL1 QEMU configuration and
+  SMC in the virtualization/EL2 configuration, brings three secondaries into a
+  dedicated assembly entry and then Swift on distinct stacks. CPU0 verifies
+  release/acquire online publication for all four selected processors.
+- A separately compiled and linked Embedded Swift user image. It executes at
+  EL0 with a high virtual alias and two isolated guarded stacks, reports through
+  a deliberately narrow SVC ABI, and contains no kernel object dependency.
+- Two fixed-capacity CPU0-pinned EL0 threads with complete exception-context
+  switching. Physical timer interrupts preempt the threads, and evidence is
+  accepted only after both thread identities report and both resume following a
+  switch.
+- Swift volatile MMIO, PL011 transmit/receive, QEMU `fw_cfg` DMA publication,
+  and a linker-owned 800 x 600 XRGB8888 framebuffer with software rasterization.
+- A fixed-capacity interactive EL1 kernel monitor in single-CPU mode. `help`,
+  `uname`, `status`, `clear`, `about`, and `uptime` use PL011 input/output while
+  updating the rendered terminal.
+
+The QEMU SMP proof means that four processors reached Swift kernel code. It does
+not mean user work is balanced across them: the three secondary CPUs publish
+online state and park, while both preempted EL0 threads remain pinned to CPU0.
+
+## Operating modes
+
+`make run` uses four CPUs by default and proceeds through memory activation,
+timer IRQ proof, PSCI startup, and the EL0 preemption proof. The ramfb desktop is
+published before entering user scheduling, but there is not yet an EL0 window
+system or graphical input path.
+
+Use `QEMU_CPUS=1 make run` for monitor mode. The single-CPU boot retains the
+interactive EL1 monitor after the same memory, exception, GIC, timer, and ramfb
+stages; it intentionally does not enter the multicore/EL0 acceptance path.
 
 ## Verification gates
 
-`make test` currently requires all of the following:
+`make test` requires all of the following:
 
-1. every explicit guest import in `Kernel/` is on a minimal allowlist;
-2. host tests for malformed/valid FDT parsing and monitor command parsing;
-3. parser success against a DTB emitted by the installed QEMU;
-4. a static AArch64 ELF at `0x40080000` with no unresolved symbols;
-5. three ordered cold boots from EL1 plus one EL2-to-EL1 handoff, all through
-   MMU, DTB, ramfb publication, and timer probes;
-6. eight interactive monitor operations driven over the emulated PL011 device,
-   including editing input across a rendered line wrap;
-7. a framebuffer/render smoke test with exact 800 x 600 dimensions, expected
-   guest-rendered color regions, and deterministic text glyphs, which rejects
-   QEMU's unconfigured black fallback surface and a blank rasterizer.
+1. a freestanding source-boundary audit for `Kernel/` and `Userland/`;
+2. host tests for FDT parsing, monitor parsing, run-queue behavior, exception
+   layout, memory-map/page-allocation foundations, final-table integration,
+   preemptive EL0 scheduling, PSCI topology, and SMP publication/runtime logic;
+3. separate user-image compilation/link inspection and a parser probe against a
+   DTB emitted by the installed QEMU;
+4. static ELF inspection proving AArch64 architecture, the expected entry/link
+   contract, and no unresolved symbols;
+5. three ordered EL1 cold boots plus an EL2-to-EL1 boot in single-CPU mode,
+   including final paging, exception/GIC setup, ramfb publication, and timer IRQs;
+6. interactive single-CPU monitor and exact framebuffer/render smoke tests;
+7. four-CPU SMP/EL0 boots from both EL1 and EL2, requiring ordered evidence for
+   owned memory, final tables, three online secondaries, both user threads, SVC
+   reporting, context switches, and timer-driven preemption;
+8. static Raspberry Pi 5 Image inspection, including its standard header,
+   physical entry/reset addresses, 4 KiB page flags, BCM2712 high-MMIO bootstrap
+   descriptor, architecture, and unresolved-symbol contract.
 
-The last visual artifact is written to `.build/swiftos-frame.ppm`. It proves a
-rendered GUI-shaped frame, not a compositor, window system, or graphical input.
+The rendered visual artifact is `.build/swiftos-frame.ppm`. It proves a
+guest-rendered GUI-shaped frame, not a compositor, window system, or graphical
+input stack.
 
 ## Not implemented yet
 
-- diagnostic exception frames, GIC interrupt delivery, and timer IRQs;
-- physical page ownership, a kernel heap, guard pages, and final page tables;
-- a preemptive scheduler, SMP, EL0 address spaces, syscalls, or executable loader;
-- persistent block storage, a VFS, filesystem recovery, or permissions;
-- virtio keyboard, pointer, GPU, block, entropy, and network drivers;
-- application processes or a stable system library/ABI;
-- a physical-board port, including Apple Silicon boot and device drivers.
+- scheduling user or general kernel work across CPUs other than CPU0, per-CPU
+  interrupt/timer scheduling, migration, load balancing, and scheduler locking;
+- an executable loader, process creation/destruction, demand paging, copy-on-
+  write, signals, or a stable user system library and syscall ABI;
+- persistent block storage, VFS, filesystem, permissions, or recovery;
+- virtio/RP1 keyboard, pointer, GPU, block, entropy, USB, and network drivers;
+- a compositor, window/surface protocol, graphical applications, or graphical
+  input routing;
+- physical Raspberry Pi 5 execution and a Raspberry Pi 5 GUI;
+- an Apple Silicon board port or its machine-specific drivers.
 
-The current device-tree resource lookup supports the QEMU `virt` root resources
-used by this board contract. It does not yet translate a device address through
-non-identity ancestor `ranges`, so nested physical-bus ports must add that before
-claiming support.
+The only current SVC contract is the proof-oriented user-thread report call. It
+must not be described as a general syscall layer. The current renderer and EL1
+monitor must not be described as a compositor or user desktop.
 
-The status panels deliberately label future work as `NEXT`; they do not claim
-that IRQ timers, graphical input, or EL0 tasks already exist.
+## Raspberry Pi 5 boundary
 
-## Next kernel milestone
+`make rpi5-inspect` builds and statically validates
+`.build/raspberry-pi-5/kernel8.img`. With a caller-supplied pinned firmware
+checkout, `make rpi5-package` creates the boot-partition file set and hashes.
+Packaging also runs the parser against that checkout's real Pi 5 DTB and requires
+UART10 at `0x107d001000`, the GICv2 distributor/CPU-interface resources, PSCI
+`smc`, four affinities, and the ATF reservation. These gates prove an artifact
+and unpatched source-DTB contract only. No physical Raspberry Pi 5 boot, UART,
+GICv2 timer delivery, PSCI startup, firmware-patched 8 GB allocator exercise,
+framebuffer, input, or GUI path has been verified.
 
-The next coherent gate is exceptions plus owned memory:
+## Next coherent milestone
 
-1. install full EL1 vector veneers that save a typed register frame and report
-   ESR/FAR/ELR/SPSR through Swift panic handling;
-2. discover and initialize the interrupt controller and ARM generic timer;
-3. prove repeated timer IRQ delivery and bounded interrupt dispatch;
-4. derive usable RAM from the device tree, reserve every kernel/DTB/DMA range,
-   and pass allocator overlap/exhaustion tests;
-5. replace the coarse boot map with permissioned final page tables and guard the
-   exception and kernel stacks.
-
-Only then should the project add preemptive threads and the first EL0 process.
+The next crossing should turn the proof scheduler into an operating-system
+execution model: per-CPU scheduler state and interrupt interfaces, runnable work
+on secondaries, a versioned syscall ABI, executable loading, and a minimal VFS.
+Storage and input drivers can then support a real terminal-first user session;
+the compositor follows after surface ownership and graphical input are defined.

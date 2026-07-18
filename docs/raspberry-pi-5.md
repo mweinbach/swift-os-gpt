@@ -1,7 +1,8 @@
 # Raspberry Pi 5 board target
 
-> **Hardware status: unverified and not supported.** This is a clean-room board
-> contract and packaging scaffold. It has not booted on a Raspberry Pi 5, and
+> **Hardware status: unverified and not supported.** SwiftOS now builds and
+> statically inspects a Raspberry Pi 5 firmware image, but that image has not
+> booted on a Raspberry Pi 5. Physical execution and a Pi GUI remain unverified;
 > no hardware-support claim is permitted until the validation gate below passes.
 
 The initial physical research target is Raspberry Pi 5 Model B with 8 GB RAM.
@@ -9,10 +10,12 @@ The board uses BCM2712, four Cortex-A76 cores, and the RP1 I/O controller. The
 guest remains freestanding Embedded Swift: Raspberry Pi OS, Linux code, Apple
 frameworks, SwiftUI, Metal, and Darwin are not part of the boot artifact.
 
-This package deliberately does not alter the QEMU target. The current reset
-path maps QEMU `virt` RAM and MMIO, assumes its GICv3 topology, parks all
-secondary CPUs, and reaches a QEMU-specific early UART. Those are known blockers,
-not Raspberry Pi 5 implementations.
+The board target has its own standard Image header, link address, high-MMIO
+bootstrap descriptors, firmware configuration, and packaging contract. Shared
+Swift code discovers QEMU GICv3 or Pi GICv2, owns DT-described RAM, builds final
+permissioned mappings, and selects HVC or SMC PSCI by the DT. Those mechanisms
+are proven by QEMU tests only; compiling them into `kernel8.img` is not evidence
+that BCM2712 UART, GICv2, timer, PSCI, or 8 GB memory behavior works on hardware.
 
 ## Boot partition and firmware handoff
 
@@ -25,9 +28,9 @@ Raspberry Pi 5 keeps its boot firmware in EEPROM. It does not use
 | --- | --- |
 | `config.txt` | Selects the 64-bit image and debug handoff. |
 | `kernel8.img` | Raw SwiftOS AArch64 Image with a 4 KiB-page header. |
-| `bcm2712-rpi-5-b.dtb` | Firmware-patched hardware description. |
+| `bcm2712-rpi-5-b.dtb` | Source hardware description, patched by firmware at boot. |
 | `BOOT-MANIFEST.txt` | Human-readable, explicitly unverified manifest. |
-| `BUILD-METADATA.txt` | Input hashes and exact firmware Git revision. |
+| `BUILD-METADATA.txt` | Input hashes, SwiftOS revision/dirty state, and firmware-repository revision. |
 | `SHA256SUMS` | Stable byte-level hashes of all preceding files. |
 
 The firmware normally prefers `kernel_2712.img` on BCM2712 and falls back to
@@ -38,18 +41,24 @@ and the board linker aligns executable and mapping storage to 4 KiB.
 
 The DTB comes from `boot/bcm2712-rpi-5-b.dtb` in a caller-supplied, pinned
 checkout of [raspberrypi/firmware](https://github.com/raspberrypi/firmware).
-The packager records its exact commit and refuses to overwrite a non-empty
-directory. Given identical kernel bytes, DTB checkout, and board files, the
-listed file bytes and `SHA256SUMS` are reproducible. A reproducible FAT or disk
-image must additionally normalize allocation order, timestamps, and volume ID.
+The packager records its exact repository commit and refuses to overwrite a
+non-empty directory. That value identifies the `raspberrypi/firmware` file set,
+not the board's EEPROM bootloader revision; physical evidence must record the
+EEPROM build separately. Given identical kernel bytes, DTB checkout, and board
+files, the listed file bytes and `SHA256SUMS` are reproducible. A reproducible
+FAT or disk image must additionally normalize allocation order, timestamps, and
+volume ID.
 
-Example packaging flow after a future Pi 5 link target produces the raw image:
+Build and statically inspect the Pi image with:
 
 ```sh
-Boards/RaspberryPi5/package-boot.sh \
-  .build/raspberry-pi-5/kernel8.img \
-  /path/to/pinned/raspberrypi-firmware \
-  .build/raspberry-pi-5/boot
+make rpi5-inspect
+```
+
+Package it with a pinned firmware checkout:
+
+```sh
+RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware make rpi5-package
 ```
 
 Copy the resulting directory contents to an empty FAT boot partition. Do not
@@ -82,10 +91,21 @@ The firmware-to-kernel register contract is:
 - non-secure EL2 preferred, or EL1;
 - `CNTFRQ` initialized and `CNTVOFF` consistent across CPUs.
 
-The entry path must preserve `x0` until Swift can validate the FDT header and
-must treat every address in it as physical until board page tables are live.
-The current boot assembly already preserves `x0`, but its one-table QEMU map
-cannot reach BCM2712's high MMIO addresses and must not be used for this target.
+The entry path preserves `x0` until Swift validates the FDT header and treats
+its addresses as physical until board page tables are live. The Pi build uses a
+bootstrap-only identity map for `0...8 GiB` so the 8 GB target's firmware may
+place the DTB in any RAM bank, plus one identity descriptor for the BCM2712 high
+MMIO window containing UART10 and GICv2. `make rpi5-inspect` checks that MMIO
+descriptor together with the Image entry/reset addresses, AArch64 identity,
+4 KiB flags, and absence of unresolved symbols. The broad normal-memory map is
+replaced by owned final tables after DT parsing; it still maps holes and reserved
+areas during bootstrap and therefore remains a physical-hardware validation item.
+
+The Pi ELF contains the same range-based memory runtime, final permissioned
+tables and guards, PSCI startup code, and separately linked EL0 Swift image used
+by the QEMU milestone. Their presence proves the freestanding link contract only;
+none of those paths, including the two CPU0-pinned preempted user threads, has
+executed on a Pi.
 
 ## Device-tree contract
 
@@ -103,79 +123,72 @@ The required parser work is broader than finding nodes by name:
 4. Ignore disabled nodes and bind by `compatible`, not by unit-address spelling.
 5. Preserve 64-bit physical addresses throughout discovery and mapping.
 
-The current parser does not yet implement the complete nested-range and
-interrupt-controller contract. A parse success on QEMU does not clear this Pi 5
-blocker.
+The current parser handles enabled-node filtering, compatibility and device-type
+matching, multi-tuple `reg`, memory/reservation enumeration, CPU affinities, and
+recursive translation using the first `ranges` tuple on each traversed bus. The
+package gate probes the actual pinned Pi DTB and requires translated UART10 at
+`0x107d001000`, GICD at `0x107fff9000`, GICC at `0x107fffa000`, PSCI `smc`, four
+affinities, and the ATF reservation. It does not yet resolve `/aliases` plus
+`/chosen/stdout-path`, support every tuple in a multi-window bus, or decode the
+complete interrupt-parent/specifier graph. That parser proof is not hardware
+execution.
 
 ## Eight-gigabyte memory ownership
 
-The source DTS intentionally leaves the `/memory` size for firmware to fill.
-SwiftOS must not hard-code an 8 GB contiguous range and must not set `total_mem`
-in `config.txt`. Instead, it must:
+The source DTS intentionally leaves the `/memory` size for firmware to fill, so
+the final ownership model does not assume one contiguous 8 GB range and does not
+set `total_mem` in `config.txt`. The shared memory runtime enumerates every
+enabled memory tuple as checked `UInt64` ranges, requires the complete DTB span
+to lie inside described RAM, subtracts FDT reservation-map and
+`/reserved-memory` spans, and reserves the kernel and final-table pool before
+publishing pages to its allocator. The final map gives text/data/user/device
+regions distinct permissions and leaves boot, secondary, and user stack guards
+unmapped.
 
-- decode every enabled `/memory` `reg` tuple using the root's two address and
-  two size cells;
-- retain addresses and lengths as checked `UInt64` values, including RAM above
-  4 GiB and split banks;
-- subtract the FDT reservation map and enabled `/reserved-memory` children,
-  including the no-map ATF region;
-- reserve the kernel's full `[__image_start, __image_end)` span, DTB bytes,
-  bootstrap tables, per-CPU stacks, and DMA allocations before publishing pages;
-- reject overflow, overlap, truncation, and a DTB outside described usable RAM;
-- allocate DMA only within constraints declared by each device and bus.
+Those ownership and table transitions are exercised on QEMU, including host
+tests for split ranges, overlap, permissions, and guards. They have not been run
+against a firmware-patched 8 GB Pi memory map, have not allocated above 4 GiB on
+Pi, and do not yet enforce device-specific DMA constraints. Hardware acceptance
+still requires proving every reported byte is usable, reserved, or owned with no
+overflow, alias, or truncation.
 
-The 4 KiB page-table implementation should begin with the smallest safe identity
-map: executing image, bootstrap stack/tables, validated DTB pages, UART10, GIC,
-and timer resources. It should then construct owned mappings from the sanitized
-memory map. Identity-mapping all reported 8 GB as a bootstrap shortcut would
-hide aliasing and reserved-memory mistakes.
+## Early serial: BCM2712 UART10 only
 
-## Early serial: BCM2712 and RP1
+The only early-debug route is the PL011-compatible UART10 on Raspberry Pi 5's
+dedicated three-pin debug connector. Until alias/stdout-path resolution lands,
+Pi discovery enumerates enabled PL011 resources, translates them through DT
+`ranges`, and accepts only the UART10 physical address `0x107d001000` with a
+sufficient register span. The actual pinned firmware-DTB probe enforces that
+translation rather than selecting the first PL011 node.
 
-The primary early-debug route is the PL011-compatible UART10 on Raspberry Pi
-5's dedicated three-pin debug connector. Discovery order is:
-
-1. Read `/chosen/stdout-path` (the board DT selects `serial10:115200n8`).
-2. Resolve `serial10` through `/aliases`.
-3. Require an enabled PL011-compatible node.
-4. Translate its `reg` through the parent `ranges` chain and map it as device
-   memory before the first access.
-
-Raspberry Pi documents `0x107d001000` at 115200 as the Pi 5 debug-header early
-console address. That constant is allowed only as a narrowly gated emergency
-fallback after matching the Pi 5 compatible string; the normal path must obtain
-the same address from the firmware DT.
-
-The second route is RP1 UART0 on GPIO14/15. In the checked Pi 5 DT composition,
-RP1 UART0's internal `0xc0_4003_0000` resource translates through the RP1 and
-PCIe `ranges` windows to CPU physical `0x1f_0003_0000`. `enable_rp1_uart=1` asks
-firmware to initialize it to 115200, while `pciex4_reset=0` preserves the
-bootloader's RP1 PCIe setup. This is inherited early-debug state, not an RP1
-driver. SwiftOS must still calculate and verify `0x1f_0003_0000` from the patched
-DT/assigned BAR before access, then eventually own RP1 reset, PCIe enumeration,
-clocks, pinmux, and UART configuration. It must never treat an RP1-internal
-register offset as a fixed BCM2712 physical address.
+`enable_uart=1` and `uart_2ndstage=1` are explicit boot preconditions. The
+current PL011 driver does not program UART10 clocks, baud, pinmux, or control
+registers and has no bounded timeout when TX remains full, so physical bring-up
+still depends on firmware leaving the dedicated debug UART operational. RP1
+UART/PCIe preservation is deliberately disabled: the bootstrap and final tables
+do not map the RP1 aperture, and SwiftOS does not yet own or quiesce RP1/PCIe DMA.
 
 ## Interrupt controller and timer
 
 BCM2712's DT describes an `arm,gic-400` GICv2, while the QEMU reference board
-uses GICv3. The board implementation must select the controller by `compatible`,
-translate all `reg` regions, respect `#interrupt-cells`, and create a GICv2
-driver instance. Reusing the QEMU addresses or GICv3 system-register path is an
-invalid port.
+uses GICv3. Platform discovery now selects the controller by `compatible` and
+constructs the matching Swift driver from discovered `reg` resources. Repeating
+architectural physical-timer PPI delivery, acknowledgement, EOI, and rearming
+are proven on QEMU GICv3.
 
-The architectural timer node is compatible with `arm,armv8-timer`. SwiftOS must
-decode its PPI tuples through the resolved interrupt parent rather than compile
-in Linux interrupt numbers. It must verify `CNTFRQ`, program a per-CPU physical
-or virtual timer consistently with the entry EL, register the chosen PPI with
-the discovered GIC, and prove interrupt acknowledgement and end-of-interrupt.
+The Pi GICv2 path is linked but hardware-unverified. The current timer contract
+uses architectural PPI 30; complete Pi validation still requires decoding the
+timer interrupt tuple through its resolved interrupt parent, checking `CNTFRQ`,
+and proving repeating delivery through the real distributor and CPU interface.
+Reusing QEMU addresses or treating the linked GICv2 path as executed evidence
+would be an invalid support claim.
 
 ## Multicore bring-up
 
 The four enabled CPU nodes are Cortex-A76 cores with DT affinity values `0x000`,
 `0x100`, `0x200`, and `0x300`, each with `enable-method = "psci"`. The DT's PSCI
-node advertises PSCI 1.0/0.2 using the `smc` conduit. The clean bring-up contract
-is:
+node advertises PSCI 1.0/0.2 using the `smc` conduit. The implemented bring-up
+contract is:
 
 1. Enumerate enabled CPU nodes and decode each 64-bit `reg` affinity.
 2. Match the boot CPU using the affinity fields from `MPIDR_EL1`, not only Aff0.
@@ -183,23 +196,29 @@ is:
    distinct aligned stack are ready.
 4. Invoke the standard PSCI `CPU_ON` call through `smc` for each target affinity,
    passing a SwiftOS-owned physical secondary-entry address and context value.
-5. At secondary entry, establish the same translation/coherency regime, install
-   per-CPU state and timer/GIC interface, then publish an online flag with the
-   required barriers.
+5. At secondary entry, establish the same translation/coherency regime and a
+   unique stack, enter Swift, then publish an online flag with release semantics.
 6. Time out and report each failed PSCI return; never silently reduce the CPU
    count or assume spin-table release addresses.
 
-The current `_start` parks any non-boot CPU forever and has no PSCI call surface.
-Until that changes and all four cores report independently, Pi 5 SMP is absent.
+This path is proven in QEMU through the DT-selected HVC conduit for direct EL1
+entry and SMC conduit for the virtualization/EL2 scenario: CPU1-CPU3 enter Swift,
+publish independently, and then park. The Pi SMC path and Pi affinity values are
+present in the artifact but have not run on a Pi. There is no per-secondary
+GIC/timer scheduling yet, and both preempted EL0 threads remain pinned to CPU0;
+four online CPUs is not a multicore scheduler.
 
 ## Hardware validation gate
 
 The target remains **unverified and unsupported** until one exact build passes
-all of the following on an 8 GB Raspberry Pi 5 Model B. Retain the serial log,
-firmware revision, image/DTB hashes, and test build revision as evidence.
+all of the following on an 8 GB Raspberry Pi 5 Model B. Retain the complete
+serial log, exact SwiftOS commit and dirty state, firmware-repository revision,
+separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 
 - Cold-boot firmware log names and hashes the expected kernel and DTB.
 - `_start` validates the DTB passed in `x0` before using any discovered address.
+- The log records `x0`, the full DTB span, every discovered memory/reservation
+  interval, actual secondary MPIDRs and stack addresses, and repeated IRQ counts.
 - UART10 prints stable stage markers before and after enabling the 4 KiB MMU.
 - The parsed memory report accounts for every byte as usable, reserved, or owned,
   including all RAM above 4 GiB, with no overlap or arithmetic truncation.
