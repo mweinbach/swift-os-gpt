@@ -361,6 +361,12 @@ host-test:
 	$(BUILD_DIR)/gpu-frame-scheduler-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/Runtime/GraphicsWorkerMailbox.swift \
+		Tests/Host/GraphicsWorkerMailboxTests.swift \
+		-o $(BUILD_DIR)/graphics-worker-mailbox-host-tests
+	$(BUILD_DIR)/graphics-worker-mailbox-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Graphics/Geometry.swift \
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/DisplayViewport.swift \
