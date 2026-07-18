@@ -8,7 +8,67 @@ struct DisplayViewportTests {
         testSmallModeCropping()
         testScaledFramebufferCanvas()
         testInvalidInputsAndOverflowSafety()
-        print("display viewport host tests: 7 groups passed")
+        testScaledBlendAndDamageMapping()
+        print("display viewport host tests: 8 groups passed")
+    }
+
+    private static func testScaledBlendAndDamageMapping() {
+        let mode = requireMode(width: 1_600, height: 1_200)
+        guard let viewport = DisplayViewport(mode: mode) else {
+            fatalError("scaled blend viewport")
+        }
+        let pixelCount = Int(mode.widthInPixels * mode.heightInPixels)
+        let pixels = UnsafeMutableBufferPointer<UInt32>.allocate(
+            capacity: pixelCount
+        )
+        pixels.initialize(repeating: PixelColor.wallpaper.xrgb)
+        defer {
+            pixels.deinitialize()
+            pixels.deallocate()
+        }
+        let framebuffer = LinearFramebuffer(
+            baseAddress: UInt(bitPattern: pixels.baseAddress!),
+            width: Int(mode.widthInPixels),
+            height: Int(mode.heightInPixels),
+            strideInPixels: Int(mode.widthInPixels)
+        )
+        guard let canvas = ScaledFramebufferCanvas(
+                  framebuffer: framebuffer,
+                  viewport: viewport
+              )
+        else {
+            fatalError("scaled blend canvas")
+        }
+        expect(
+            canvas.blend(
+                Rectangle(x: 10, y: 20, width: 8, height: 6),
+                color: .cyan,
+                opacity: 255,
+                cornerRadius: 2
+            ),
+            "scaled blend rejected"
+        )
+        expect(
+            pixels[(42 * 1_600) + 24] == PixelColor.cyan.xrgb,
+            "scaled blend did not map logical coordinates"
+        )
+        expect(
+            pixels[(40 * 1_600) + 20] == PixelColor.wallpaper.xrgb,
+            "scaled rounded corner was square"
+        )
+        expect(
+            canvas.damageRectangle(
+                for: Rectangle(x: 10, y: 20, width: 8, height: 6),
+                mode: mode
+            ) == DamageRectangle.clipped(
+                x: 20,
+                y: 40,
+                width: 16,
+                height: 12,
+                to: mode
+            ),
+            "logical damage did not map to physical pixels"
+        )
     }
 
     private static func testExactMode() {
@@ -89,7 +149,10 @@ struct DisplayViewportTests {
     }
 
     private static func testSmallModeCropping() {
-        let viewport = requireViewport(width: 640, height: 480)
+        let mode = requireMode(width: 640, height: 480)
+        guard let viewport = DisplayViewport(mode: mode) else {
+            fatalError("small viewport rejected")
+        }
         expect(viewport.scale == 1, "small mode scale")
         expect(viewport.origin.x == -80, "small mode crop x")
         expect(viewport.origin.y == -60, "small mode crop y")
@@ -109,6 +172,26 @@ struct DisplayViewportTests {
         expect(partial?.y == 0, "cropped rectangle y")
         expect(partial?.width == 20, "cropped rectangle width")
         expect(partial?.height == 40, "cropped rectangle height")
+
+        guard let canvas = ScaledFramebufferCanvas(
+                  framebuffer: LinearFramebuffer(
+                      baseAddress: 1,
+                      width: 640,
+                      height: 480,
+                      strideInPixels: 640
+                  ),
+                  viewport: viewport
+              )
+        else {
+            fatalError("small canvas rejected")
+        }
+        expect(
+            canvas.damageRectangle(
+                for: Rectangle(x: 774, y: 11, width: 12, height: 12),
+                mode: mode
+            ) == nil,
+            "fully cropped animation damage became physical damage"
+        )
     }
 
     private static func testScaledFramebufferCanvas() {

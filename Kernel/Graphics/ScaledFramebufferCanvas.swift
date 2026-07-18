@@ -45,6 +45,71 @@ struct ScaledFramebufferCanvas {
         )
     }
 
+    /// Source-over composition in logical coordinates. The uncut physical
+    /// frame is retained for correct rounded-corner geometry, while the
+    /// logical desktop and optional layer clip constrain actual writes.
+    @discardableResult
+    func blend(
+        _ rectangle: Rectangle,
+        color: PixelColor,
+        opacity: UInt8,
+        cornerRadius: Int = 0,
+        clippedTo logicalClip: Rectangle? = nil
+    ) -> Bool {
+        guard rectangle.width > 0,
+              rectangle.height > 0,
+              cornerRadius >= 0,
+              let physicalOrigin = viewport.transform(
+                  Point(x: rectangle.x, y: rectangle.y)
+              ),
+              let physicalWidth = viewport.scaledLength(rectangle.width),
+              let physicalHeight = viewport.scaledLength(rectangle.height),
+              let physicalRadius = viewport.scaledLength(cornerRadius)
+        else {
+            return false
+        }
+        let effectiveLogicalClip = logicalClip ?? viewport.logicalBounds
+        guard let physicalClip = viewport.transformClipped(
+                  effectiveLogicalClip
+              )
+        else {
+            return true
+        }
+        return framebuffer.blend(
+            Rectangle(
+                x: physicalOrigin.x,
+                y: physicalOrigin.y,
+                width: physicalWidth,
+                height: physicalHeight
+            ),
+            color: color,
+            opacity: opacity,
+            cornerRadius: physicalRadius,
+            clippedTo: physicalClip
+        )
+    }
+
+    /// Converts logical compositor damage to the physical scanout contract.
+    /// Returning nil means the logical damage is entirely offscreen.
+    func damageRectangle(
+        for logicalRectangle: Rectangle,
+        mode: DisplayMode
+    ) -> DamageRectangle? {
+        guard Int(mode.widthInPixels) == viewport.physicalWidth,
+              Int(mode.heightInPixels) == viewport.physicalHeight,
+              let physical = viewport.transformClipped(logicalRectangle)
+        else {
+            return nil
+        }
+        return DamageRectangle.clipped(
+            x: Int64(physical.x),
+            y: Int64(physical.y),
+            width: Int64(physical.width),
+            height: Int64(physical.height),
+            to: mode
+        )
+    }
+
     func drawText(
         _ text: StaticString,
         at origin: Point,
