@@ -673,6 +673,33 @@ ADDRESS_ACCESSOR arch_paging_layout_storage_end, __paging_layout_storage_end
 ADDRESS_ACCESSOR arch_user_entry_physical, __user_entry_physical
 ADDRESS_ACCESSOR arch_secondary_entry_address, _secondary_start
 
+.global arch_memory_allocator_lock
+.type arch_memory_allocator_lock, %function
+arch_memory_allocator_lock:
+    mrs     x3, daif
+    msr     daifset, #2
+1:
+    ldaxr   w1, [x0]
+    cbnz    w1, 2f
+    mov     w1, #1
+    stxr    w2, w1, [x0]
+    cbnz    w2, 1b
+    mov     x0, x3
+    ret
+2:
+    clrex
+    wfe
+    b       1b
+
+.global arch_memory_allocator_unlock
+.type arch_memory_allocator_unlock, %function
+arch_memory_allocator_unlock:
+    stlr    wzr, [x0]
+    sev
+    msr     daif, x1
+    isb
+    ret
+
 .global arch_install_ttbr0
 .type arch_install_ttbr0, %function
 arch_install_ttbr0:

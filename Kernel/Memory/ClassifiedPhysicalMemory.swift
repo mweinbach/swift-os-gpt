@@ -256,6 +256,22 @@ struct ClassifiedPhysicalMemoryAllocator {
         return allocationStorage[index]
     }
 
+    func activeAllocation(
+        matching range: PhysicalPageRange,
+        classification: PhysicalMemoryClassification
+    ) -> ClassifiedPageAllocationToken? {
+        var index = 0
+        while index < activeAllocationCount {
+            let token = allocationStorage[index]
+            if token.range == range,
+               token.classification == classification {
+                return token
+            }
+            index += 1
+        }
+        return nil
+    }
+
     /// Atomically replaces free-run state with an already normalized physical
     /// memory map. Active ownership prevents replacement; callers must never
     /// be able to make allocated pages free by reloading discovery metadata.

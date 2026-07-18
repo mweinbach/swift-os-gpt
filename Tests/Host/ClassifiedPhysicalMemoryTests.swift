@@ -495,6 +495,20 @@ struct ClassifiedPhysicalMemoryTests {
                 token.classification == systemMemory,
                 "allocation token lost classification"
             )
+            expect(
+                allocator.activeAllocation(
+                    matching: token.range,
+                    classification: systemMemory
+                ) == token,
+                "range lookup did not recover ownership token"
+            )
+            expect(
+                allocator.activeAllocation(
+                    matching: token.range,
+                    classification: graphicsMemory
+                ) == nil,
+                "range lookup crossed classifications"
+            )
 
             let wrongClass = ClassifiedPageAllocationToken(
                 identifier: token.identifier,

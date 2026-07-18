@@ -48,6 +48,7 @@ enum KernelMemoryRuntime {
         ClassifiedPhysicalMemoryAllocator?
     private nonisolated(unsafe) static var activeTables:
         FinalTranslationTables?
+    private nonisolated(unsafe) static var allocatorLockWord: UInt32 = 0
 
     static var isReady: Bool {
         ownedMemoryMap != nil && ownedClassifiedPageAllocator != nil
@@ -201,7 +202,7 @@ enum KernelMemoryRuntime {
         switch result {
         case let .allocated(token):
             // The classified allocator retains the token in its ownership
-            // ledger even though this compatibility API exposes only a range.
+            // ledger. `releasePages` resolves that token from this range.
             return .allocated(token.range)
         case .invalidRequest:
             return .invalidRequest
@@ -215,23 +216,62 @@ enum KernelMemoryRuntime {
     static func allocateClassifiedPages(
         _ constraints: ClassifiedPageAllocationConstraints
     ) -> ClassifiedPageAllocationResult {
+        let interruptState = lockAllocator()
         guard var allocator = ownedClassifiedPageAllocator else {
+            unlockAllocator(restoring: interruptState)
             return .outOfMemory
         }
         let result = allocator.allocate(constraints)
         ownedClassifiedPageAllocator = allocator
+        unlockAllocator(restoring: interruptState)
         return result
     }
 
     static func releaseClassifiedPages(
         _ token: ClassifiedPageAllocationToken
     ) -> ClassifiedPageReleaseResult {
+        let interruptState = lockAllocator()
         guard var allocator = ownedClassifiedPageAllocator else {
+            unlockAllocator(restoring: interruptState)
             return .unknownAllocation
         }
         let result = allocator.release(token)
         ownedClassifiedPageAllocator = allocator
+        unlockAllocator(restoring: interruptState)
         return result
+    }
+
+    /// Compatibility release for ranges returned by `allocatePages`. Token
+    /// lookup and release occur under the same lock, so another CPU cannot
+    /// change ownership between those operations.
+    @discardableResult
+    static func releasePages(_ range: PhysicalPageRange) -> Bool {
+        let interruptState = lockAllocator()
+        guard var allocator = ownedClassifiedPageAllocator,
+              let token = allocator.activeAllocation(
+                  matching: range,
+                  classification: defaultSystemMemoryClassification
+              )
+        else {
+            unlockAllocator(restoring: interruptState)
+            return false
+        }
+        let result = allocator.release(token)
+        ownedClassifiedPageAllocator = allocator
+        unlockAllocator(restoring: interruptState)
+        return result == .released
+    }
+
+    private static func lockAllocator() -> UInt64 {
+        withUnsafeMutablePointer(to: &allocatorLockWord) { lockWord in
+            archMemoryAllocatorLock(lockWord)
+        }
+    }
+
+    private static func unlockAllocator(restoring interruptState: UInt64) {
+        withUnsafeMutablePointer(to: &allocatorLockWord) { lockWord in
+            archMemoryAllocatorUnlock(lockWord, interruptState)
+        }
     }
 
     /// Runs while the bootstrap identity map still exposes the physical
@@ -666,3 +706,14 @@ enum KernelMemoryRuntime {
         return UInt64(MemoryLayout<T>.stride) * UInt64(count)
     }
 }
+
+@_silgen_name("arch_memory_allocator_lock")
+private func archMemoryAllocatorLock(
+    _ lockWord: UnsafeMutablePointer<UInt32>
+) -> UInt64
+
+@_silgen_name("arch_memory_allocator_unlock")
+private func archMemoryAllocatorUnlock(
+    _ lockWord: UnsafeMutablePointer<UInt32>,
+    _ interruptState: UInt64
+)
