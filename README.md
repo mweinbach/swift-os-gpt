@@ -22,10 +22,13 @@ ARM64 systems.
 
 The repository also builds and statically inspects a Raspberry Pi 5
 firmware-loadable kernel image. Its board package can retain a firmware-created
-Device Tree `simple-framebuffer`, map it into the final address space, and use
-the same Swift software renderer as QEMU with explicit cache maintenance. That
-image has **not** been run on physical hardware, so Pi 5 execution and HDMI
-output remain unverified and unsupported.
+Device Tree `simple-framebuffer` and map it into the final address space for an
+explicit diagnostic renderer. Device-tree discovery also identifies and maps
+the Pi 5 V3D VII renderer, HVS scanout, and required address-translation
+resources behind backend-neutral graphics contracts. No native Pi GPU, HVS,
+HDMI, IOMMU, EDID, or vblank driver is active yet. The image has **not** been
+run on physical hardware, so Pi 5 execution and HDMI output remain unverified
+and unsupported.
 
 Apple Silicon is a separate future board port. Booting directly on a modern Mac
 requires machine-specific firmware handoff, interrupt-controller, timer,
@@ -55,16 +58,31 @@ The verified QEMU path now includes:
    Cortex-A72 QEMU CPUs or two Cortex-A76 CPUs entering the same Swift path;
 4. a separately linked Embedded Swift EL0 image, two isolated user stacks, a
    narrow SVC report ABI, and two CPU0-pinned threads preempted by timer IRQs;
-5. a backend-independent software surface presented through QEMU ramfb or a
-   native Swift modern VirtIO-MMIO GPU 2D driver, a centered integer-scaled
-   logical desktop for arbitrary scanout sizes, and a retained compositor
-   foundation with bounded damage, source-over alpha, antialiased rounded
-   layers, fixed-point easing, and paced animation in the single-CPU monitor.
+5. a backend-independent diagnostic software surface presented through QEMU
+   ramfb or a native Swift modern VirtIO-MMIO GPU 2D driver, a centered
+   integer-scaled logical desktop for arbitrary scanout sizes, and a retained
+   scene foundation with bounded damage, source-over alpha, antialiased rounded
+   layers, fixed-point easing, and paced animation in the single-CPU monitor;
+6. the GPU-first architecture beneath the next live renderer: a bounded render
+   command model and retained-scene compiler, GPU frame-slot/fence scheduling,
+   a graphics-worker mailbox, strict production execution policy, VirtIO 3D
+   protocol/configuration/capability and VirGL command encoders, and Pi V3D/HVS
+   resource discovery and mapping.
 
-This is not yet a general-purpose OS. The next layers include multicore task
-scheduling, an executable loader, VFS/storage, input drivers, a user-facing
-surface/window protocol, networking, GPU acceleration, and a stable system
-library and syscall ABI.
+The production graphics invariant is now strict: CPUs may update retained scene
+state, compute animation and damage, and compile backend-neutral command buffers,
+but hardware GPU queues must produce every displayed pixel. The software
+rasterizer remains only as an explicit diagnostic path and reference oracle.
+The current QEMU boots and statically inspected Pi image path have not crossed
+that boundary yet: they still rasterize on the CPU and use ramfb, VirtIO-GPU 2D,
+or Pi simplefb for presentation. The GPU foundations above are host-tested
+infrastructure, not a claim of live accelerated rendering.
+
+This is not yet a general-purpose OS. The next layers include wiring the
+VirtIO/VirGL GPU execution session, a native Pi V3D/HVS/HDMI path, multicore
+task scheduling, an executable loader, VFS/storage, input drivers, a user-facing
+surface/window protocol, networking, and a stable system library and syscall
+ABI.
 
 See [Architecture](docs/architecture.md), [Renderer foundation](docs/renderer.md),
 and [Hardware roadmap](docs/hardware-roadmap.md) for the contracts behind those
@@ -104,13 +122,15 @@ EL1 kernel monitor; type monitor commands in the terminal that launched QEMU,
 and PL011 input updates both serial output and the guest terminal window.
 `make virtio-gpu-smoke` removes ramfb and proves the same surface plus a later
 monitor update through a modern VirtIO-MMIO GPU scanout. This is a real guest
-2D display driver against QEMU's device model, not 3D acceleration or evidence
-of a Raspberry Pi display driver.
+2D display driver against QEMU's device model, but the pixels in this smoke are
+still produced by the diagnostic CPU rasterizer. It is not 3D acceleration or
+evidence of a Raspberry Pi display driver.
 
 `make animation-smoke` captures two paced guest frames and proves that a
 retained rounded layer is alpha-composited while presentation remains confined
 to its mapped damage rectangle. The live loop currently runs in the single-CPU
-EL1 monitor; the same renderer is compiled for every display backend.
+EL1 monitor; the same retained-scene and diagnostic-renderer contracts compile
+for every display backend.
 
 The linked artifact is
 `.build/swiftos.elf`; it must identify as AArch64 ELF, never Mach-O. QEMU boots
@@ -143,7 +163,8 @@ publish online state and park. There is no loader, VFS, persistent storage,
 graphical input, user compositor/window protocol, or stable application ABI.
 Physical Raspberry Pi 5 execution remains unverified. The Pi path currently
 consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
-modesetting or VideoCore 3D. A bounded PSF2 font parser and glyph renderer are
-host-tested, but no font asset is packaged into the live desktop yet. The retained compositor is
-a kernel-side bootstrap renderer, not yet an EL0 window system. Each milestone
+modesetting or V3D VII rendering. A bounded PSF2 font parser and diagnostic
+glyph renderer are host-tested, but no font asset or GPU glyph atlas is packaged
+into the live desktop yet. The retained scene and diagnostic compositor remain
+kernel-side bootstrap infrastructure, not an EL0 window system. Each milestone
 must leave behind a repeatable boot or unit test rather than a mock UI.

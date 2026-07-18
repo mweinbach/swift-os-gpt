@@ -3,7 +3,9 @@
 > **Hardware status: unverified and not supported.** SwiftOS now builds and
 > statically inspects a Raspberry Pi 5 firmware image, but that image has not
 > booted on a Raspberry Pi 5. Physical execution and a Pi GUI remain unverified;
-> no hardware-support claim is permitted until the validation gate below passes.
+> native V3D VII rendering, HVS/HDMI scanout, EDID, refresh, and PPI handling are
+> not active. No hardware-support claim is permitted until the validation gate
+> below passes.
 
 The initial physical research target is Raspberry Pi 5 Model B with 8 GB RAM.
 The board uses BCM2712, four Cortex-A76 cores, and the RP1 I/O controller. The
@@ -219,11 +221,26 @@ not a multicore scheduler.
 
 ## Display and GPU boundary
 
-The generic renderer and scanout contract are no longer tied to ramfb. QEMU now
-boots without ramfb and is driven through a Swift modern VirtIO-MMIO GPU 2D
-driver, including resource backing, scanout, transfer, and flush. That device is
-part of the QEMU reference board and has no relationship to Raspberry Pi 5's
-VideoCore VII GPU, HVS, HDMI controllers, firmware interfaces, or display clocks.
+Production SwiftOS graphics require every displayed pixel to be produced by a
+hardware GPU. CPUs build retained scene state, animation, bounded damage, and
+backend-neutral render commands; they do not rasterize or composite a production
+frame. The software rasterizer remains an explicitly selected diagnostic/oracle
+path only.
+
+The generic graphics contracts are no longer tied to ramfb, VirtIO, or Pi. They
+separate a GPU rasterizer, display presenter, image-memory domain, command queue,
+fences, frame-slot lifetime, and scene publication. The shared retained-scene
+compiler can therefore feed the QEMU VirGL backend or native Pi V3D VII backend
+without duplicating UI policy. Neither backend's accelerated execution session
+is active in the current boot path.
+
+QEMU can boot without ramfb through a Swift modern VirtIO-MMIO GPU 2D driver,
+including resource backing, scanout, transfer, and flush, but its current pixels
+are still CPU-rasterized diagnostics. The VirtIO 3D configuration, capability,
+context/resource/submit, VirGL command, frame-scheduling, and graphics-worker
+foundations are host-tested but not yet submitted during boot. The QEMU device
+has no relationship to Raspberry Pi 5's V3D VII GPU, HVS, HDMI controllers,
+firmware interfaces, or display clocks.
 
 The packaged Pi configuration sets `disable_fw_kms_setup=0`, requests a 32-bit
 legacy framebuffer, and leaves firmware to read HDMI EDID and choose the boot
@@ -239,23 +256,32 @@ driver:
 5. cleans each presented damage range from the data cache with a system-scope
    completion barrier.
 
-QEMU and Pi therefore use the same renderer, retained-layer/damage model,
-software compositor, terminal, display-mode, DMA-mapping, and driver-resource
-contracts while retaining different hardware drivers. The logical desktop is
-800 x 600: a 1920 x 1080 scanout uses centered 1x rendering, while 3840 x 2160
-uses centered 3x rendering. Letterbox pixels are cleared by the shared canvas.
-The Pi image renders the retained indicator's initial state before the first
-full-frame presentation. Continuous animation is currently exercised only by
-the single-CPU QEMU monitor, not by the Pi multicore/EL0 path.
+This simplefb path shares retained-layer/damage, terminal, display-mode, DMA-
+mapping, and driver-resource contracts with QEMU, but it uses the diagnostic
+CPU compositor. The logical desktop is 800 x 600: a 1920 x 1080 scanout uses
+centered 1x rendering, while 3840 x 2160 uses centered 3x rendering. Letterbox
+pixels are cleared by the diagnostic canvas. The Pi image rasterizes the
+retained indicator's initial state before the first full-frame presentation.
+Continuous animation is currently exercised only by the single-CPU QEMU
+monitor, not by the Pi multicore/EL0 path.
 
-This first Pi backend consumes firmware-configured scanout. It does not program
-HVS, HDMI clocks/controllers, or VideoCore, and it is not a GPU-acceleration
-claim. Simple framebuffer reports neither refresh rate nor physical display
-dimensions, so refresh and PPI remain unknown until SwiftOS owns live EDID/DDC
-or equivalent firmware metadata. A bounded PSF2 loader and glyph rasterizer are
-host-tested, but no font asset or live font-selection path is packaged yet.
-When no supported framebuffer is present, boot remains serial-only. Physical
-execution and HDMI output remain unverified.
+Device-tree discovery now identifies enabled `brcm,2712-v3d` hub, core, and SMS
+register tuples, the HVS register resource, and the graphics address-translation
+requirement. Boot-resource planning maps those MMIO regions as Device memory.
+This proves bounded discovery and mapping only. It does not program V3D VII
+command lists or its MMU, an HVS display list or IOMMU, HDMI clocks/controllers/
+PHY, hotplug/DDC/EDID, or vblank.
+
+The first production Pi graphics backend must lower the shared commands to V3D
+VII, render into GPU-owned offscreen targets, use GPU copy/composition for
+damaged regions, synchronize through hardware fences, and present through a
+native HVS/HDMI pipeline. Live EDID/DDC supplies mode timing, refresh, physical
+dimensions, and therefore the inputs for refresh- and PPI-aware scale policy.
+Simple framebuffer supplies none of those contracts and cannot satisfy the
+production invariant. A bounded PSF2 loader and diagnostic glyph rasterizer are
+host-tested, but no font asset, GPU glyph atlas, or live font-selection path is
+packaged yet. When no supported diagnostic framebuffer is present, current boot
+remains serial-only. Physical execution and HDMI output remain unverified.
 
 ## Hardware validation gate
 
@@ -279,19 +305,22 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 - The runtime-patched framebuffer remains reserved and mapped, and the serial
   log reaches `SWIFTOS:SIMPLE_FB_OK`, `SWIFTOS:PLATFORM_FB_OK`, and
   `SWIFTOS:FRAMEBUFFER_READY` in order.
-- HDMI capture shows the Swift-rendered desktop at the firmware-selected mode;
-  the captured mode, reported refresh, display EDID, viewport scale, and visible
-  letterbox bounds are retained with the boot evidence.
+- HDMI capture shows the diagnostic Swift-rendered desktop at the firmware-
+  selected mode; the captured mode, reported refresh, display EDID, viewport
+  scale, and visible letterbox bounds are retained with the boot evidence.
 - At least three power-cycle boots and three warm resets produce the same staged
   serial protocol.
 - ELF inspection confirms AArch64, no Darwin load commands or framework symbols,
   and only reviewed freestanding unresolved symbols.
 
 Native display modesetting, vblank-driven animation, USB input, storage, RP1
-ownership, networking, and accelerated graphics are later gates. A
-firmware-framebuffer image establishes early display output and can run the
-shared software compositor; it is not a user window system or GPU-capable
-Raspberry Pi release.
+ownership, networking, and native GPU rendering are later gates that must pass
+before a production GUI claim. A firmware-framebuffer image establishes early
+diagnostic display output and can run the software oracle; it is not a user
+window system or GPU-capable Raspberry Pi release. The production GPU gate must
+add retained serial/fence evidence for V3D VII rendering, HVS/vblank presentation,
+IOMMU/address-translation ownership, HDMI HPD/DDC/EDID timing, measured refresh,
+physical dimensions/PPI, and captured output at the selected native mode.
 
 ## Primary sources
 

@@ -151,60 +151,77 @@ a general process manager, or a stable syscall ABI.
 
 ## Graphics and monitor model
 
-The renderer owns a validated 32-bit linear surface and performs software
-rasterization independently of presentation. Its first retained path is a
-fixed-capacity layer tree in deterministic painter order, a bounded logical
-damage region, and a software compositor with source-over alpha and four-sample
-antialiased rounded rectangles. Animation uses normalized Q16 progress,
-overflow-safe integer interpolation, deterministic easing curves, and a
-phase-preserving frame pacer driven by the architectural counter. None of these
-types contains a QEMU or Pi branch.
+The production graphics boundary separates scene construction, GPU
+rasterization, and display presentation. CPUs may update a fixed-capacity
+retained tree in deterministic painter order, sample normalized Q16 animation,
+compute bounded damage, and compile immutable backend-neutral commands. Every
+pixel operation in a production frame--including clear, coverage, blending,
+composition, scaling, and glyph sampling--must execute on a hardware GPU queue.
+The execution policy rejects a production configuration without a hardware
+rasterizer; software rasterization is an explicit diagnostic/oracle mode, not a
+fallback.
+
+The generic GPU model describes render passes, quads, per-corner radii, blend
+mode, and glyph-atlas instances. Bounded command storage, a retained-scene
+compiler, frame-slot/fence scheduling, separate rasterizer/presenter and image-
+domain capabilities, and an allocation-free graphics-worker mailbox contain no
+QEMU or Pi branch. A backend lowers these records to its device protocol, owns
+its queue and fences, and reports completion before a render target can be
+reused. Presentation remains distinct so a GPU-rendered image can move to a
+separate scanout engine without making the scene model device-specific.
 
 A shared logical canvas maps the 800 x 600 coordinate space into each physical
 mode with centered integer scaling and letterboxing, then maps logical damage
-back to the physical presentation contract. QEMU policy selects modern
-VirtIO-MMIO GPU 2D first and ramfb as fallback; the Pi board path can instead
-bind a firmware-created simple framebuffer. DMA mappings carry separate
-CPU-physical and device-visible addresses, address width, byte extent, and
-coherency.
+back to the presentation contract. DMA mappings carry separate CPU-physical and
+device-visible addresses, address width, byte extent, and coherency. Memory
+domains model both CPU-visible system memory and device-local images, while
+queue/fence capabilities describe ownership without assuming a particular CPU
+or GPU configuration.
 
-The QEMU VirtIO path requires a DT `dma-coherent` transport. The Pi firmware
-scanout is software-managed: the renderer writes its retained normal-memory
-mapping and presentation cleans the damaged cache range with an architectural
-completion barrier. This exercises the same display/driver resource contracts
-without putting Pi conditionals into the renderer.
+The QEMU GPU foundation negotiates modern VirtIO and optional VirGL features,
+reads generation-stable GPU configuration, supports separate external control
+buffers, defines bounded capset/context/resource/submit packets, and encodes
+VirGL surface, framebuffer, clear, fixed-state, shader, draw, and GPU copy
+commands. The existing end-to-end smoke only exercises a host 2D resource with
+CPU-generated backing storage, transfer, flush, and scanout. No live boot path
+creates a VirGL context or submits the GPU command stream yet, so that smoke is
+presentation evidence, not GPU-rasterization evidence.
 
-The VirtIO driver negotiates a modern split queue, fences each control command,
-creates a host 2D resource, attaches the Swift-owned framebuffer as backing,
-selects a scanout, and performs explicit transfer and flush operations for
-monitor updates. The end-to-end smoke removes ramfb and validates both the
-initial 800 x 600 desktop and a later command update through QEMU's GPU device.
-This is a guest 2D scanout driver, not virgl/Venus 3D acceleration.
+The diagnostic QEMU path selects VirtIO-MMIO GPU 2D first and ramfb as fallback.
+The diagnostic Pi path can bind a firmware-created simple framebuffer, write a
+retained normal-memory surface, and clean damaged cache ranges before firmware
+scanout reads them. Both paths remain useful for bring-up and comparison, but a
+production configuration may not select them as its rasterizer.
 
 The Pi backend consumes a mode already selected by firmware and described by
 the runtime-patched Device Tree. It is not native HVS/HDMI modesetting and does
-not submit work to VideoCore. Simple framebuffer also carries neither refresh
+not submit work to V3D VII. Device-tree discovery now identifies the enabled V3D
+hub/core/SMS, HVS, and graphics address-translation requirement and maps their
+register resources through the shared boot-resource path. It does not yet
+program the V3D MMU or command lists, HVS display lists/IOMMU, HDMI clocks/PHY,
+hotplug/DDC/EDID, or vblank. Simple framebuffer also carries neither refresh
 rate nor physical display dimensions, so pixel-fit scaling is available but
 refresh/PPI-aware policy waits for a live EDID/DDC or equivalent metadata
 driver. The implementation remains hardware-unverified.
 
-Desktop panels and terminal glyphs are still drawn directly. A retained rounded
-status layer exercises mutation, damage repaint, alpha composition, frame
-pacing, and partial presentation in the single-CPU monitor. The bootstrap tree
-currently holds at most eight solid-color layers; there are no transforms,
-textures, paths, shadows, font atlas, window/surface protocol, graphical input
-path, or EL0 application surface yet.
+The current desktop panels and terminal glyphs are still drawn by the diagnostic
+CPU path. A retained rounded status layer exercises mutation, damage repaint,
+alpha composition, frame pacing, and partial presentation in the single-CPU
+monitor. The bootstrap tree currently holds at most eight solid-color layers;
+there are no live GPU-rendered frames, transforms, textures, paths, shadows,
+font atlas, window/surface protocol, graphical input path, or EL0 application
+surface yet.
 
 With four CPUs, `make run` publishes the ramfb frame and then follows the SMP/EL0
 path. `QEMU_CPUS=1 make run` retains the interactive EL1 kernel monitor after
 boot. The monitor, framebuffer, and VirtIO scanout are useful diagnostics, not
 userland and not evidence of a complete desktop environment.
 
-The eventual user compositor will build on this renderer and own scanout.
-Applications will submit owned surfaces and damage rectangles through handles
-rather than receiving the scanout mapping. A physical board port implements the
-same backend contract through its own display and input drivers; renderer and
-animation policy remain shared.
+The eventual user compositor will own GPU queues and scanout. Applications will
+submit owned surfaces and damage rectangles through handles rather than
+receiving scanout or device mappings. QEMU VirGL and native Pi V3D/HVS drivers
+implement the same command, memory-domain, synchronization, and presentation
+contracts; retained scene and animation policy remain shared.
 
 ## User ABI direction
 
