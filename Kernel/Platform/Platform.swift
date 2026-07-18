@@ -13,6 +13,59 @@ enum InterruptControllerDescription: Equatable {
     case gicV3(distributor: DeviceResource, redistributor: DeviceResource)
 }
 
+/// Names the address-translation owner a graphics backend must program before
+/// a buffer can be accessed by one stage of the display pipeline. Renderer and
+/// scanout addresses are intentionally independent: a render target handed to
+/// a display engine may need two mappings even when both refer to one physical
+/// allocation.
+enum GraphicsAddressTranslationRequirement: UInt8, Equatable {
+    /// The device consumes a system-bus address without another translation
+    /// domain. This is useful for simple DMA engines and virtual devices.
+    case directSystemBus
+    /// The renderer owns its GPU virtual address space and page tables.
+    case deviceManaged
+    /// A platform IOMMU supplies the device-visible address.
+    case platformIOMMU
+}
+
+struct GraphicsAddressSpaceRequirements: Equatable {
+    let renderer: GraphicsAddressTranslationRequirement
+    let scanout: GraphicsAddressTranslationRequirement
+}
+
+/// The three independently mapped register regions published by the Pi 5 V3D
+/// VII Device Tree binding. This is discovery metadata only; it does not imply
+/// that clocks, resets, interrupts, or command submission are implemented.
+struct V3DVIIRegisterResources: Equatable {
+    let hub: DeviceResource
+    let core0: DeviceResource
+    let sms: DeviceResource
+}
+
+/// The Pi display compositor/scanout register aperture. It remains separate
+/// from V3D because rendering and scanout are distinct devices with distinct
+/// address spaces and ownership rules.
+struct HVSRegisterResources: Equatable {
+    let registers: DeviceResource
+}
+
+enum GraphicsRendererResourceDescription: Equatable {
+    case v3dVII(V3DVIIRegisterResources)
+}
+
+enum GraphicsScanoutResourceDescription: Equatable {
+    case hvs(HVSRegisterResources)
+}
+
+/// Backend-neutral hardware discovery result. Drivers consume this contract
+/// instead of reaching back into a board-specific Device Tree or assuming that
+/// renderer and scanout share one DMA address.
+struct PlatformGraphicsResources: Equatable {
+    let renderer: GraphicsRendererResourceDescription
+    let scanout: GraphicsScanoutResourceDescription
+    let addressSpaces: GraphicsAddressSpaceRequirements
+}
+
 struct Platform {
     static let physicalTimerInterruptID: UInt32 = 30
     private static let raspberryPi5DebugUART: UInt64 = 0x10_7d00_1000
@@ -23,6 +76,7 @@ struct Platform {
     let firmwareConfiguration: DeviceResource?
     let firmwareMailbox: DeviceResource?
     let simpleFramebuffer: SimpleFramebufferDescription?
+    let graphicsResources: PlatformGraphicsResources?
     let virtioTransportWindow: DeviceResource?
     let firmwareCallConduit: FirmwareCallConduit?
     let deviceTreeAddress: UInt64
@@ -118,12 +172,77 @@ struct Platform {
             firmwareConfiguration: firmwareConfiguration,
             firmwareMailbox: firmwareMailbox,
             simpleFramebuffer: tree.simpleFramebuffer(),
+            graphicsResources: kind == .raspberryPi5
+                ? raspberryPi5GraphicsResources(in: tree)
+                : nil,
             virtioTransportWindow: virtioTransportWindow(in: tree),
             firmwareCallConduit: firmwareCallConduit,
             deviceTreeAddress: deviceTreeAddress,
             deviceTreeSize: tree.blobSize,
             deviceTree: tree
         )
+    }
+
+    private static func raspberryPi5GraphicsResources(
+        in tree: FlattenedDeviceTree
+    ) -> PlatformGraphicsResources? {
+        // Register tuple order is part of the bcm2712 V3D binding: hub, core0,
+        // then SMS. The FDT parser translates every tuple through its parent
+        // ranges, so no SoC MMIO address is duplicated here.
+        guard let hub = tree.resource(
+                  compatibleWith: "brcm,2712-v3d",
+                  registerIndex: 0
+              ), let core0 = tree.resource(
+                  compatibleWith: "brcm,2712-v3d",
+                  registerIndex: 1
+              ), let sms = tree.resource(
+                  compatibleWith: "brcm,2712-v3d",
+                  registerIndex: 2
+              ), let hvs = tree.resource(
+                  compatibleWith: "brcm,bcm2712-hvs",
+                  requiringProperty: "iommus"
+              ), validMMIOResource(hub),
+              validMMIOResource(core0),
+              validMMIOResource(sms),
+              validMMIOResource(hvs),
+              resourcesAreDisjoint(hub, core0),
+              resourcesAreDisjoint(hub, sms),
+              resourcesAreDisjoint(core0, sms),
+              resourcesAreDisjoint(hub, hvs),
+              resourcesAreDisjoint(core0, hvs),
+              resourcesAreDisjoint(sms, hvs)
+        else {
+            return nil
+        }
+
+        return PlatformGraphicsResources(
+            renderer: .v3dVII(
+                V3DVIIRegisterResources(
+                    hub: hub,
+                    core0: core0,
+                    sms: sms
+                )
+            ),
+            scanout: .hvs(HVSRegisterResources(registers: hvs)),
+            addressSpaces: GraphicsAddressSpaceRequirements(
+                renderer: .deviceManaged,
+                scanout: .platformIOMMU
+            )
+        )
+    }
+
+    private static func validMMIOResource(_ resource: DeviceResource) -> Bool {
+        resource.length >= 4
+            && resource.baseAddress & 0x3 == 0
+            && resource.length <= UInt64.max - resource.baseAddress
+    }
+
+    private static func resourcesAreDisjoint(
+        _ first: DeviceResource,
+        _ second: DeviceResource
+    ) -> Bool {
+        first.baseAddress + first.length <= second.baseAddress
+            || second.baseAddress + second.length <= first.baseAddress
     }
 
     private static func virtioTransportWindow(

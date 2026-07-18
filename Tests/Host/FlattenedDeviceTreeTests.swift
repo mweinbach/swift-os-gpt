@@ -4,8 +4,86 @@ struct FlattenedDeviceTreeTests {
         findsNestedResourcesAndCompatibleListEntries()
         readsPlatformMemoryCPUAndRegisterIndexes()
         readsFirmwareSimpleFramebufferProperties()
+        discoversEnabledPi5GraphicsResources()
+        rejectsUnavailablePi5GraphicsResources()
         rejectsBadMagicAndTruncatedStructure()
-        print("FDT host tests: 4 passed")
+        print("FDT host tests: 6 passed")
+    }
+
+    private static func discoversEnabledPi5GraphicsResources() {
+        let bytes = makeRaspberryPiGraphicsDeviceTree()
+        bytes.withUnsafeBytes { storage in
+            guard let platform = Platform.discover(
+                      deviceTreeAddress: UInt64(
+                          UInt(bitPattern: storage.baseAddress!)
+                      )
+                  )
+            else {
+                fatalError("Pi graphics fixture was rejected")
+            }
+
+            let expected = PlatformGraphicsResources(
+                renderer: .v3dVII(
+                    V3DVIIRegisterResources(
+                        hub: DeviceResource(
+                            baseAddress: 0x21_0000_1000,
+                            length: 0x4000
+                        ),
+                        core0: DeviceResource(
+                            baseAddress: 0x21_0000_9000,
+                            length: 0x6000
+                        ),
+                        sms: DeviceResource(
+                            baseAddress: 0x21_0003_1800,
+                            length: 0x700
+                        )
+                    )
+                ),
+                scanout: .hvs(
+                    HVSRegisterResources(
+                        registers: DeviceResource(
+                            baseAddress: 0x22_0c58_0000,
+                            length: 0x1a000
+                        )
+                    )
+                ),
+                addressSpaces: GraphicsAddressSpaceRequirements(
+                    renderer: .deviceManaged,
+                    scanout: .platformIOMMU
+                )
+            )
+            expect(
+                platform.graphicsResources == expected,
+                "Pi graphics resources were not read from the FDT"
+            )
+        }
+    }
+
+    private static func rejectsUnavailablePi5GraphicsResources() {
+        let fixtures = [
+            makeRaspberryPiGraphicsDeviceTree(v3dEnabled: false),
+            makeRaspberryPiGraphicsDeviceTree(hvsEnabled: false),
+            makeRaspberryPiGraphicsDeviceTree(includeHVSAddressTranslation: false),
+            makeRaspberryPiGraphicsDeviceTree(includeSMSRegisters: false),
+            makeRaspberryPiGraphicsDeviceTree(overlapV3DRegisters: true),
+            makeRaspberryPiGraphicsDeviceTree(unalignedV3DRegisters: true),
+        ]
+        for bytes in fixtures {
+            bytes.withUnsafeBytes { storage in
+                guard let platform = Platform.discover(
+                          deviceTreeAddress: UInt64(
+                              UInt(bitPattern: storage.baseAddress!)
+                          )
+                      )
+                else {
+                    fatalError("Pi platform fixture was rejected")
+                }
+                expect(
+                    platform.graphicsResources == nil,
+                    "unavailable Pi graphics hardware was bound"
+                )
+            }
+        }
     }
 
     private static func readsFirmwareSimpleFramebufferProperties() {
@@ -447,6 +525,154 @@ private func makeDeviceTree() -> [UInt8] {
     let headerSize = 40
     let reservation = be64(0x4100_0000) + be64(0x1_0000)
         + Array(repeating: UInt8(0), count: 16)
+    let structureOffset = headerSize + reservation.count
+    let stringsOffset = structureOffset + structure.count
+    let totalSize = stringsOffset + strings.count
+
+    var header: [UInt8] = []
+    appendBE32(0xd00d_feed, to: &header)
+    appendBE32(UInt32(totalSize), to: &header)
+    appendBE32(UInt32(structureOffset), to: &header)
+    appendBE32(UInt32(stringsOffset), to: &header)
+    appendBE32(UInt32(headerSize), to: &header)
+    appendBE32(17, to: &header)
+    appendBE32(16, to: &header)
+    appendBE32(0, to: &header)
+    appendBE32(UInt32(strings.count), to: &header)
+    appendBE32(UInt32(structure.count), to: &header)
+
+    return header + reservation + structure + strings
+}
+
+private func makeRaspberryPiGraphicsDeviceTree(
+    v3dEnabled: Bool = true,
+    hvsEnabled: Bool = true,
+    includeHVSAddressTranslation: Bool = true,
+    includeSMSRegisters: Bool = true,
+    overlapV3DRegisters: Bool = false,
+    unalignedV3DRegisters: Bool = false
+) -> [UInt8] {
+    let names = [
+        "#address-cells",
+        "#size-cells",
+        "compatible",
+        "reg",
+        "status",
+        "iommus",
+    ]
+    var strings: [UInt8] = []
+    var offsets: [String: UInt32] = [:]
+    for name in names {
+        offsets[name] = UInt32(strings.count)
+        strings.append(contentsOf: name.utf8)
+        strings.append(0)
+    }
+
+    var structure: [UInt8] = []
+    appendBeginNode("", to: &structure)
+    appendProperty(
+        nameOffset: offsets["#address-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#size-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("raspberrypi,5-model-b".utf8) + [0]
+            + Array("brcm,bcm2712".utf8) + [0],
+        to: &structure
+    )
+
+    appendBeginNode("serial@107d001000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("arm,pl011".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be64(0x10_7d00_1000) + be64(0x200),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("interrupt-controller@107fff9000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("arm,gic-400".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be64(0x10_7fff_9000) + be64(0x1000)
+            + be64(0x10_7fff_a000) + be64(0x2000),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("gpu@2100001000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("brcm,2712-v3d".utf8) + [0],
+        to: &structure
+    )
+    let hubAddress: UInt64 = unalignedV3DRegisters
+        ? 0x21_0000_1001
+        : 0x21_0000_1000
+    let coreAddress: UInt64 = overlapV3DRegisters
+        ? 0x21_0000_2000
+        : 0x21_0000_9000
+    var v3dRegisters = be64(hubAddress) + be64(0x4000)
+        + be64(coreAddress) + be64(0x6000)
+    if includeSMSRegisters {
+        v3dRegisters += be64(0x21_0003_1800) + be64(0x700)
+    }
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: v3dRegisters,
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["status"]!,
+        value: Array((v3dEnabled ? "okay" : "disabled").utf8) + [0],
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("hvs@220c580000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("brcm,bcm2712-hvs".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be64(0x22_0c58_0000) + be64(0x1a000),
+        to: &structure
+    )
+    if includeHVSAddressTranslation {
+        appendProperty(
+            nameOffset: offsets["iommus"]!,
+            value: be32(1),
+            to: &structure
+        )
+    }
+    appendProperty(
+        nameOffset: offsets["status"]!,
+        value: Array((hvsEnabled ? "okay" : "disabled").utf8) + [0],
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBE32(2, to: &structure)
+    appendBE32(9, to: &structure)
+
+    let headerSize = 40
+    let reservation = Array(repeating: UInt8(0), count: 16)
     let structureOffset = headerSize + reservation.count
     let stringsOffset = structureOffset + structure.count
     let totalSize = stringsOffset + strings.count
