@@ -106,6 +106,21 @@ host-test:
 		Tests/Host/RunQueueTests.swift \
 		-o $(BUILD_DIR)/run-queue-host-tests
 	$(BUILD_DIR)/run-queue-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Interrupts/ExceptionFrame.swift \
+		Tests/Host/ExceptionFrameTests.swift \
+		-o $(BUILD_DIR)/exception-frame-host-tests
+	$(BUILD_DIR)/exception-frame-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Memory/PhysicalMemory.swift \
+		Kernel/Memory/PageAllocator.swift \
+		Kernel/Memory/PageTables.swift \
+		Kernel/Memory/AddressSpace.swift \
+		Tests/Host/MemoryFoundationTests.swift \
+		-o $(BUILD_DIR)/memory-foundation-host-tests
+	$(BUILD_DIR)/memory-foundation-host-tests
 
 qemu-fdt-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
