@@ -410,6 +410,14 @@ host-test:
 	$(BUILD_DIR)/virgl-command-encoder-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Core/PhysicalBytes.swift \
+		Kernel/Drivers/VirtIO/VirtIOGPU3DProtocol.swift \
+		Kernel/Drivers/VirtIO/VirGLCapabilityParser.swift \
+		Tests/Host/VirGLCapabilityParserTests.swift \
+		-o $(BUILD_DIR)/virgl-capability-parser-host-tests
+	$(BUILD_DIR)/virgl-capability-parser-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Drivers/VirtIO/VirtIOGPUDeviceConfiguration.swift \
 		Tests/Host/VirtIOGPUDeviceConfigurationTests.swift \
 		-o $(BUILD_DIR)/virtio-gpu-device-configuration-host-tests
