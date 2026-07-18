@@ -363,10 +363,25 @@ host-test:
 	$(BUILD_DIR)/virtio-gpu-protocol-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Core/PhysicalBytes.swift \
+		Kernel/Drivers/VirtIO/VirtIOGPU3DProtocol.swift \
+		Tests/Host/VirtIOGPU3DProtocolTests.swift \
+		-o $(BUILD_DIR)/virtio-gpu-3d-protocol-host-tests
+	$(BUILD_DIR)/virtio-gpu-3d-protocol-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Drivers/VirtIO/VirtIOFeatureNegotiation.swift \
 		Tests/Host/VirtIOFeatureNegotiationTests.swift \
 		-o $(BUILD_DIR)/virtio-feature-negotiation-host-tests
 	$(BUILD_DIR)/virtio-feature-negotiation-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Drivers/VirtIO/VirtIOQueueBufferPair.swift \
+		Tests/Host/VirtIOQueueBufferPairTests.swift \
+		-o $(BUILD_DIR)/virtio-queue-buffer-pair-host-tests
+	$(BUILD_DIR)/virtio-queue-buffer-pair-host-tests
 
 userland-test: $(USERLAND_TEST_ELF)
 	$(PYTHON) Tests/Toolchain/validate_userland_objects.py \

@@ -76,6 +76,7 @@ struct VirtIOMMIOTransport {
     }
 
     private let baseAddress: UInt
+    private var queueMapping: DMAMapping?
     private(set) var offeredFeatures: UInt64 = 0
     private(set) var negotiatedFeatures: UInt64 = 0
     private(set) var queueSize: UInt16 = 0
@@ -201,6 +202,7 @@ struct VirtIOMMIOTransport {
         responseAddress = cpuBase + QueueLayout.responseOffset
         requestDeviceAddress = deviceBase + QueueLayout.requestOffset
         responseDeviceAddress = deviceBase + QueueLayout.responseOffset
+        self.queueMapping = queueMapping
         queueSize = selected
         availableIndex = 0
         usedIndex = 0
@@ -253,6 +255,50 @@ struct VirtIOMMIOTransport {
         else {
             return .invalidRequest
         }
+        return submitDescriptors(
+            requestDeviceAddress: requestDeviceAddress,
+            requestByteCount: requestByteCount,
+            responseDeviceAddress: responseDeviceAddress,
+            responseCapacity: responseCapacity,
+            pollLimit: pollLimit
+        )
+    }
+
+    /// Submits allocator-owned buffers without copying a potentially large GPU
+    /// command stream through the transport's 512-byte bootstrap scratch.
+    mutating func submit(
+        buffers: VirtIOQueueBufferPair,
+        pollLimit: UInt64 = 5_000_000
+    ) -> VirtIOMMIORequestResult {
+        guard queueSize >= 2,
+              pollLimit > 0,
+              let queueMapping,
+              VirtIOQueueBufferPair(
+                  request: buffers.request,
+                  requestByteCount: buffers.requestByteCount,
+                  response: buffers.response,
+                  responseCapacity: buffers.responseCapacity,
+                  protectedQueueMapping: queueMapping
+              ) != nil
+        else {
+            return .invalidRequest
+        }
+        return submitDescriptors(
+            requestDeviceAddress: buffers.request.deviceAddress,
+            requestByteCount: buffers.requestByteCount,
+            responseDeviceAddress: buffers.response.deviceAddress,
+            responseCapacity: buffers.responseCapacity,
+            pollLimit: pollLimit
+        )
+    }
+
+    private mutating func submitDescriptors(
+        requestDeviceAddress: UInt64,
+        requestByteCount: UInt32,
+        responseDeviceAddress: UInt64,
+        responseCapacity: UInt32,
+        pollLimit: UInt64
+    ) -> VirtIOMMIORequestResult {
         if read(Register.status) & Status.deviceNeedsReset != 0 {
             failDevice()
             return .deviceNeedsReset

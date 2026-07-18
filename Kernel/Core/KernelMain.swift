@@ -329,7 +329,11 @@ private func activateVirtIOGPU(
               transport.hasVirtIOMagic,
               transport.identity.version == VirtIOMMIOTransport.modernVersion,
               transport.identity.deviceID == VirtIOMMIOTransport.gpuDeviceID,
-              transport.initializeModernGPU(queueMapping: queueMapping) == .ready,
+              transport.initializeModernGPU(
+                  queueMapping: queueMapping,
+                  requestedDeviceFeatures:
+                    VirtIOGPU3DFeatures.baseline3DRequestMask
+              ) == .ready,
               var gpu = VirtIOGPU(transport: transport, scanout: scanout),
               gpu.configure()
         else {
