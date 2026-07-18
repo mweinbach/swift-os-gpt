@@ -16,7 +16,7 @@ enum KernelMemoryRuntime {
     private static let kernelReadOnlyCapacity = 2
     private static let kernelDataCapacity = 6
     private static let userStackCapacity = 2
-    private static let mmioCapacity = 4
+    private static let mmioCapacity = 5
     private static let guardCapacity = 6
 
     private enum LayoutOffset {
@@ -365,6 +365,10 @@ enum KernelMemoryRuntime {
         }
         if let firmware = platform.firmwareConfiguration,
            !appendDevice(firmware, to: mmio, count: &mmioCount) {
+            return nil
+        }
+        if let virtio = platform.virtioTransportWindow,
+           !appendDevice(virtio, to: mmio, count: &mmioCount) {
             return nil
         }
 

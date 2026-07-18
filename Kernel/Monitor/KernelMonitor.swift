@@ -3,34 +3,44 @@ struct KernelMonitor {
     private static let maximumLineLength = 127
 
     private var terminal: KernelTerminal
+    private var display: ActiveDisplayBackend
     private let serial: PL011
     private let lineStorageAddress: UInt
     private var lineLength = 0
     private var lastInputWasCarriageReturn = false
 
-    init(framebuffer: LinearFramebuffer, storageAddress: UInt64, serial: PL011) {
+    init(
+        framebuffer: LinearFramebuffer,
+        display: ActiveDisplayBackend,
+        storageAddress: UInt64,
+        serial: PL011
+    ) {
         terminal = KernelTerminal(
             framebuffer: framebuffer,
             storageAddress: storageAddress
         )
+        self.display = display
         self.serial = serial
         lineStorageAddress = UInt(storageAddress) + Self.lineStorageOffset
     }
 
-    mutating func start() {
+    mutating func start() -> Bool {
         terminal.clear()
         emit("SWIFTOS KERNEL MONITOR\n", color: KernelTerminal.cyan)
         emit("QEMU VIRT AARCH64  EMBEDDED SWIFT\n", color: KernelTerminal.muted)
         emit("TYPE HELP FOR COMMANDS\n\n", color: KernelTerminal.muted)
         prompt()
-        AArch64.synchronizeData()
+        return display.presentFullFrame()
     }
 
     mutating func run() -> Never {
         while true {
             if let byte = serial.readByteIfAvailable() {
                 handle(byte)
-                AArch64.synchronizeData()
+                guard display.presentFullFrame() else {
+                    serialWrite("SWIFTOS:PANIC:DISPLAY_PRESENT\n")
+                    while true { AArch64.waitForEvent() }
+                }
             } else {
                 AArch64.spinHint()
             }

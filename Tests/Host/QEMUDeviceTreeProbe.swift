@@ -32,6 +32,20 @@ public func validateQEMUDeviceTree(_ rawAddress: UnsafeRawPointer?) -> Int32 {
     guard platform.processorCount == 1 else { return 8 }
     guard platform.processorAffinity(at: 0) == 0 else { return 9 }
     guard platform.firmwareCallConduit == .hypervisorCall else { return 10 }
+    guard platform.virtioTransportWindow == DeviceResource(
+        baseAddress: 0x0a00_0000,
+        length: 0x4000
+    ) else {
+        return 11
+    }
+    guard platform.virtioTransport(at: 0) != nil,
+          platform.virtioTransport(at: 31) != nil,
+          platform.virtioTransport(at: 32) == nil,
+          platform.virtioTransportIsDMACoherent(at: 0),
+          platform.virtioTransportIsDMACoherent(at: 31)
+    else {
+        return 12
+    }
     guard case let .gicV3(distributor, redistributor) = platform.interruptController,
           distributor.baseAddress == 0x0800_0000,
           redistributor.baseAddress == 0x080a_0000

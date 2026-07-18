@@ -108,6 +108,29 @@ struct FlattenedDeviceTreeTests {
                 ),
                 "platform GIC mismatch"
             )
+            expect(
+                platform?.virtioTransport(at: 0)
+                    == DeviceResource(baseAddress: 0x0a00_0000, length: 0x200),
+                "first VirtIO transport mismatch"
+            )
+            expect(
+                platform?.virtioTransport(at: 1)
+                    == DeviceResource(baseAddress: 0x0a00_3e00, length: 0x200),
+                "second VirtIO transport mismatch"
+            )
+            expect(
+                platform?.virtioTransportWindow
+                    == DeviceResource(baseAddress: 0x0a00_0000, length: 0x4000),
+                "VirtIO transport aperture was not coalesced"
+            )
+            expect(
+                platform?.virtioTransportIsDMACoherent(at: 0) == true,
+                "coherent VirtIO transport lost its property"
+            )
+            expect(
+                platform?.virtioTransportIsDMACoherent(at: 1) == false,
+                "noncoherent VirtIO transport inherited another node's property"
+            )
         }
     }
 
@@ -146,6 +169,7 @@ private func makeDeviceTree() -> [UInt8] {
         "device_type",
         "ranges",
         "reg",
+        "dma-coherent",
     ]
     var strings: [UInt8] = []
     var offsets: [String: UInt32] = [:]
@@ -215,6 +239,37 @@ private func makeDeviceTree() -> [UInt8] {
         nameOffset: offsets["reg"]!,
         value: be32(0) + be32(0x0800_0000) + be32(0) + be32(0x1_0000)
             + be32(0) + be32(0x080a_0000) + be32(0) + be32(0x20_0000),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("virtio_mmio@a000000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("virtio,mmio".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be32(0) + be32(0x0a00_0000) + be32(0) + be32(0x200),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["dma-coherent"]!,
+        value: [],
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("virtio_mmio@a003e00", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("virtio,mmio".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be32(0) + be32(0x0a00_3e00) + be32(0) + be32(0x200),
         to: &structure
     )
     appendBE32(2, to: &structure)

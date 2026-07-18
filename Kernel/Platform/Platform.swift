@@ -21,6 +21,7 @@ struct Platform {
     let serial: DeviceResource
     let interruptController: InterruptControllerDescription
     let firmwareConfiguration: DeviceResource?
+    let virtioTransportWindow: DeviceResource?
     let firmwareCallConduit: FirmwareCallConduit?
     let deviceTreeAddress: UInt64
     let deviceTreeSize: UInt64
@@ -103,10 +104,51 @@ struct Platform {
             serial: serial,
             interruptController: interruptController,
             firmwareConfiguration: firmwareConfiguration,
+            virtioTransportWindow: virtioTransportWindow(in: tree),
             firmwareCallConduit: firmwareCallConduit,
             deviceTreeAddress: deviceTreeAddress,
             deviceTreeSize: tree.blobSize,
             deviceTree: tree
+        )
+    }
+
+    private static func virtioTransportWindow(
+        in tree: FlattenedDeviceTree
+    ) -> DeviceResource? {
+        let pageMask: UInt64 = 0xfff
+        var minimumBase = UInt64.max
+        var maximumEnd: UInt64 = 0
+        var nodeIndex = 0
+        var found = false
+        while nodeIndex < 64,
+              let resource = tree.resource(
+                  compatibleWith: "virtio,mmio",
+                  nodeIndex: nodeIndex
+              ) {
+            guard resource.length >= 0x100,
+                  resource.length <= UInt64.max - resource.baseAddress,
+                  resource.baseAddress + resource.length
+                    <= UInt64.max - pageMask
+            else {
+                return nil
+            }
+            let alignedBase = resource.baseAddress & ~pageMask
+            let alignedEnd = (resource.baseAddress + resource.length
+                + pageMask) & ~pageMask
+            if alignedBase < minimumBase { minimumBase = alignedBase }
+            if alignedEnd > maximumEnd { maximumEnd = alignedEnd }
+            found = true
+            nodeIndex += 1
+        }
+        guard found,
+              maximumEnd > minimumBase,
+              maximumEnd - minimumBase <= 0x1_0000
+        else {
+            return nil
+        }
+        return DeviceResource(
+            baseAddress: minimumBase,
+            length: maximumEnd - minimumBase
         )
     }
 
@@ -156,6 +198,28 @@ struct Platform {
 
     func processorAffinity(at index: Int) -> UInt64? {
         deviceTree.resource(deviceType: "cpu", nodeIndex: index)?.baseAddress
+    }
+
+    func virtioTransport(at index: Int) -> DeviceResource? {
+        deviceTree.resource(
+            compatibleWith: "virtio,mmio",
+            nodeIndex: index
+        )
+    }
+
+    func virtioTransportIsDMACoherent(at index: Int) -> Bool {
+        guard let target = virtioTransport(at: index) else { return false }
+        var coherentIndex = 0
+        while coherentIndex < 64,
+              let coherent = deviceTree.resource(
+                  compatibleWith: "virtio,mmio",
+                  nodeIndex: coherentIndex,
+                  requiringProperty: "dma-coherent"
+              ) {
+            if coherent == target { return true }
+            coherentIndex += 1
+        }
+        return false
     }
 
     var processorCount: Int {

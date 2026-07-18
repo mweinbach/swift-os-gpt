@@ -122,27 +122,71 @@ private func runQEMUDesktop(
         console.write("SWIFTOS:PANIC:FW_CFG\n")
         park()
     }
+    guard let mode = DisplayMode(
+              widthInPixels: UInt32(RamFramebuffer.width),
+              heightInPixels: UInt32(RamFramebuffer.height),
+              refreshRateMilliHertz: 60_000,
+              pixelFormat: .xrgb8888
+          ),
+          let framebufferMapping = DMAMapping(
+              cpuPhysicalAddress: AArch64.framebufferAddress,
+              deviceAddress: AArch64.framebufferAddress,
+              byteCount: mode.minimumByteCount,
+              deviceAddressWidth: .bits64,
+              coherency: .hardwareCoherent
+          ),
+          let scanout = ScanoutBuffer(
+              mode: mode,
+              bytesPerRow: UInt64(RamFramebuffer.stride),
+              mapping: framebufferMapping
+          ),
+          scanout.mapping.cpuPhysicalAddress <= UInt64(UInt.max)
+    else {
+        console.write("SWIFTOS:PANIC:DISPLAY_MEMORY\n")
+        park()
+    }
     let framebuffer = LinearFramebuffer(
-        baseAddress: UInt(AArch64.framebufferAddress),
-        width: RamFramebuffer.width,
-        height: RamFramebuffer.height,
-        strideInPixels: RamFramebuffer.stride / RamFramebuffer.bytesPerPixel
+        baseAddress: UInt(scanout.mapping.cpuPhysicalAddress),
+        width: Int(mode.widthInPixels),
+        height: Int(mode.heightInPixels),
+        strideInPixels: Int(
+            scanout.bytesPerRow / mode.pixelFormat.bytesPerPixel
+        )
     )
     DesktopRenderer.render(into: framebuffer)
-    var monitor = KernelMonitor(
-        framebuffer: framebuffer,
-        storageAddress: AArch64.terminalStorageAddress,
-        serial: PL011(baseAddress: UInt(platform.serial.baseAddress))
-    )
-    monitor.start()
     let firmware = FirmwareConfiguration(
         baseAddress: firmwareConfiguration.baseAddress
     )
-    guard RamFramebuffer.publish(using: firmware) else {
-        console.write("SWIFTOS:PANIC:RAMFB\n")
+    guard let display = activateQEMUDisplay(
+              policy: .automatic,
+              platform: platform,
+              firmware: firmware,
+              scanout: scanout
+          )
+    else {
+        console.write("SWIFTOS:PANIC:DISPLAY_BACKEND\n")
         park()
     }
-    console.write("SWIFTOS:RAMFB_OK\n")
+    let displayKind = display.kind
+    var monitor = KernelMonitor(
+        framebuffer: framebuffer,
+        display: display,
+        storageAddress: AArch64.terminalStorageAddress,
+        serial: PL011(baseAddress: UInt(platform.serial.baseAddress))
+    )
+    guard monitor.start() else {
+        console.write("SWIFTOS:PANIC:DISPLAY_PRESENT\n")
+        park()
+    }
+    switch displayKind {
+    case .virtIOGPU:
+        console.write(VirtIOGPU.transportReadyMarker)
+        console.write(VirtIOGPU.readyMarker)
+    case .firmwareRAMFramebuffer:
+        console.write("SWIFTOS:RAMFB_OK\n")
+    case .platformFramebuffer:
+        console.write("SWIFTOS:PLATFORM_FB_OK\n")
+    }
     console.write("SWIFTOS:FRAMEBUFFER_READY\n")
     console.write("SWIFTOS:SWIFT_OK\n")
 
@@ -156,6 +200,73 @@ private func runQEMUDesktop(
     }
     console.write("SWIFTOS:READY\n")
     monitor.run()
+}
+
+private func activateQEMUDisplay(
+    policy: DisplayBackendSelectionPolicy,
+    platform: Platform,
+    firmware: FirmwareConfiguration,
+    scanout: ScanoutBuffer
+) -> ActiveDisplayBackend? {
+    let gpuPriority = policy.priority(for: .virtIOGPU)
+    let ramPriority = policy.priority(for: .firmwareRAMFramebuffer)
+
+    if let gpuPriority, let ramPriority {
+        if gpuPriority <= ramPriority {
+            return activateVirtIOGPU(platform: platform, scanout: scanout)
+                ?? activateRAMFramebuffer(firmware: firmware, mode: scanout.mode)
+        }
+        return activateRAMFramebuffer(firmware: firmware, mode: scanout.mode)
+            ?? activateVirtIOGPU(platform: platform, scanout: scanout)
+    }
+    if gpuPriority != nil {
+        return activateVirtIOGPU(platform: platform, scanout: scanout)
+    }
+    if ramPriority != nil {
+        return activateRAMFramebuffer(firmware: firmware, mode: scanout.mode)
+    }
+    return nil
+}
+
+private func activateRAMFramebuffer(
+    firmware: FirmwareConfiguration,
+    mode: DisplayMode
+) -> ActiveDisplayBackend? {
+    guard RamFramebuffer.publish(using: firmware) else { return nil }
+    return .firmwareRAMFramebuffer(mode: mode)
+}
+
+private func activateVirtIOGPU(
+    platform: Platform,
+    scanout: ScanoutBuffer
+) -> ActiveDisplayBackend? {
+    guard let queueMapping = DMAMapping(
+        cpuPhysicalAddress: AArch64.dmaScratchAddress,
+        deviceAddress: AArch64.dmaScratchAddress,
+        byteCount: 4096,
+        deviceAddressWidth: .bits64,
+        coherency: .hardwareCoherent
+    ) else {
+        return nil
+    }
+
+    var index = 0
+    while index < 64, let resource = platform.virtioTransport(at: index) {
+        defer { index += 1 }
+        guard platform.virtioTransportIsDMACoherent(at: index),
+              var transport = VirtIOMMIOTransport(resource: resource),
+              transport.hasVirtIOMagic,
+              transport.identity.version == VirtIOMMIOTransport.modernVersion,
+              transport.identity.deviceID == VirtIOMMIOTransport.gpuDeviceID,
+              transport.initializeModernGPU(queueMapping: queueMapping) == .ready,
+              var gpu = VirtIOGPU(transport: transport, scanout: scanout),
+              gpu.configure()
+        else {
+            continue
+        }
+        return .virtIOGPU(mode: scanout.mode, driver: gpu)
+    }
+    return nil
 }
 
 private func runScheduledOrPark(
