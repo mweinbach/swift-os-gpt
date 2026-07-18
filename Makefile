@@ -24,6 +24,7 @@ LLVM_NM ?= $(shell xcrun --find llvm-nm)
 LLVM_OBJDUMP ?= $(shell xcrun --find llvm-objdump)
 QEMU ?= qemu-system-aarch64
 PYTHON ?= python3
+QEMU_CPUS ?= 4
 
 TARGET := aarch64-none-none-elf
 SWIFT_SOURCES := $(shell find Kernel -name '*.swift' -type f | sort)
@@ -43,7 +44,7 @@ QEMU_FLAGS := \
 	-machine virt,gic-version=3 \
 	-cpu cortex-a72 \
 	-accel tcg \
-	-smp 4 \
+	-smp $(QEMU_CPUS) \
 	-m 512M \
 	-device ramfb,id=ramfb0 \
 	-monitor none \
@@ -254,6 +255,8 @@ frame-smoke: build
 
 smp-el0-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py $(KERNEL_BIN)
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
+		$(KERNEL_BIN) --virtualization
 
 test: toolchain-check source-check host-test userland-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke smp-el0-smoke rpi5-inspect
 

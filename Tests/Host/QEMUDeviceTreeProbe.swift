@@ -31,6 +31,7 @@ public func validateQEMUDeviceTree(_ rawAddress: UnsafeRawPointer?) -> Int32 {
     guard platform.kind == .qemuVirt else { return 7 }
     guard platform.processorCount == 1 else { return 8 }
     guard platform.processorAffinity(at: 0) == 0 else { return 9 }
+    guard platform.firmwareCallConduit == .hypervisorCall else { return 10 }
     guard case let .gicV3(distributor, redistributor) = platform.interruptController,
           distributor.baseAddress == 0x0800_0000,
           redistributor.baseAddress == 0x080a_0000

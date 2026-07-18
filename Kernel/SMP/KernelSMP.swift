@@ -66,11 +66,14 @@ enum KernelSMP {
         }
 
         let conduit: PSCIConduit
-        switch platform.kind {
-        case .qemuVirt:
+        switch platform.firmwareCallConduit {
+        case .hypervisorCall:
             conduit = .hypervisorCall
-        case .raspberryPi5:
+        case .secureMonitorCall:
             conduit = .secureMonitorCall
+        case nil:
+            console.write("SWIFTOS:SMP_NO_PSCI_METHOD\n")
+            return false
         }
         guard var runtime = SMPRuntime(
             conduit: conduit,

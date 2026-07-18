@@ -3,6 +3,11 @@ enum BoardKind: UInt8, Equatable {
     case raspberryPi5
 }
 
+enum FirmwareCallConduit: UInt8, Equatable {
+    case hypervisorCall
+    case secureMonitorCall
+}
+
 enum InterruptControllerDescription: Equatable {
     case gicV2(distributor: DeviceResource, cpuInterface: DeviceResource)
     case gicV3(distributor: DeviceResource, redistributor: DeviceResource)
@@ -15,6 +20,7 @@ struct Platform {
     let serial: DeviceResource
     let interruptController: InterruptControllerDescription
     let firmwareConfiguration: DeviceResource?
+    let firmwareCallConduit: FirmwareCallConduit?
     let deviceTreeAddress: UInt64
     let deviceTreeSize: UInt64
 
@@ -67,11 +73,29 @@ struct Platform {
             return nil
         }
 
+        let firmwareCallConduit: FirmwareCallConduit?
+        if tree.contains(
+            compatibleWith: "arm,psci-0.2",
+            cStringProperty: "method",
+            equalTo: "hvc"
+        ) {
+            firmwareCallConduit = .hypervisorCall
+        } else if tree.contains(
+            compatibleWith: "arm,psci-0.2",
+            cStringProperty: "method",
+            equalTo: "smc"
+        ) {
+            firmwareCallConduit = .secureMonitorCall
+        } else {
+            firmwareCallConduit = nil
+        }
+
         return Platform(
             kind: kind,
             serial: serial,
             interruptController: interruptController,
             firmwareConfiguration: firmwareConfiguration,
+            firmwareCallConduit: firmwareCallConduit,
             deviceTreeAddress: deviceTreeAddress,
             deviceTreeSize: tree.blobSize,
             deviceTree: tree

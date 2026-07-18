@@ -41,10 +41,18 @@ EXPECTED = [
 ]
 
 
-def run_kernel(qemu: str, kernel: Path, timeout: float) -> str:
+def run_kernel(
+    qemu: str,
+    kernel: Path,
+    timeout: float,
+    virtualization: bool,
+) -> str:
+    machine = "virt,gic-version=3"
+    if virtualization:
+        machine += ",virtualization=on"
     command = [
         qemu,
-        "-machine", "virt,gic-version=3",
+        "-machine", machine,
         "-cpu", "cortex-a72",
         "-accel", "tcg",
         "-smp", "4",
@@ -105,18 +113,24 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("kernel", type=Path)
     parser.add_argument("--timeout", type=float, default=15.0)
+    parser.add_argument("--virtualization", action="store_true")
     arguments = parser.parse_args()
     transcript = run_kernel(
         os.environ.get("QEMU", "qemu-system-aarch64"),
         arguments.kernel.resolve(),
         arguments.timeout,
+        arguments.virtualization,
     )
     try:
         validate(transcript)
     except AssertionError as error:
         print(f"SMP/EL0 smoke failed: {error}", file=sys.stderr)
         return 1
-    print("SMP/EL0 smoke: 4 CPUs, isolated Swift threads, and preemption passed")
+    entry = "EL2 handoff" if arguments.virtualization else "EL1 entry"
+    print(
+        "SMP/EL0 smoke: 4 CPUs, isolated Swift threads, and preemption passed "
+        f"({entry})"
+    )
     return 0
 
 

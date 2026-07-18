@@ -117,6 +117,23 @@ struct FlattenedDeviceTree {
         ) != nil
     }
 
+    func contains(
+        compatibleWith compatibility: StaticString,
+        cStringProperty property: StaticString,
+        equalTo value: StaticString
+    ) -> Bool {
+        var remainingMatches = 0
+        return search(
+            compatibleWith: compatibility,
+            deviceType: nil,
+            reservedMemory: false,
+            remainingMatches: &remainingMatches,
+            registerIndex: 0,
+            matchingPropertyName: property,
+            matchingPropertyValue: value
+        ) != nil
+    }
+
     func resource(
         compatibleWith compatibility: StaticString,
         nodeIndex: Int = 0,
@@ -189,7 +206,9 @@ struct FlattenedDeviceTree {
         deviceType: StaticString?,
         reservedMemory: Bool,
         remainingMatches: inout Int,
-        registerIndex: Int
+        registerIndex: Int,
+        matchingPropertyName: StaticString? = nil,
+        matchingPropertyValue: StaticString? = nil
     ) -> DeviceTreeSearchResult? {
         var cursor = structureStart
         while cursor < structureEnd {
@@ -213,7 +232,9 @@ struct FlattenedDeviceTree {
                 deviceType: deviceType,
                 reservedMemory: reservedMemory,
                 remainingMatches: &remainingMatches,
-                registerIndex: registerIndex
+                registerIndex: registerIndex,
+                matchingPropertyName: matchingPropertyName,
+                matchingPropertyValue: matchingPropertyValue
             )
         }
         return nil
@@ -229,7 +250,9 @@ struct FlattenedDeviceTree {
         deviceType: StaticString?,
         reservedMemory: Bool,
         remainingMatches: inout Int,
-        registerIndex: Int
+        registerIndex: Int,
+        matchingPropertyName: StaticString?,
+        matchingPropertyValue: StaticString?
     ) -> DeviceTreeSearchResult? {
         guard readStructureWord(at: cursor) == Self.beginNode else {
             return nil
@@ -250,6 +273,7 @@ struct FlattenedDeviceTree {
         var childSizeCells: UInt32 = 1
         var compatibleMatches = compatibility == nil
         var deviceTypeMatches = deviceType == nil
+        var propertyMatches = matchingPropertyName == nil
         var enabled = true
         var resource: DeviceResource?
         var childTranslation = parentTranslation
@@ -274,7 +298,9 @@ struct FlattenedDeviceTree {
                     deviceType: deviceType,
                     reservedMemory: reservedMemory,
                     remainingMatches: &remainingMatches,
-                    registerIndex: registerIndex
+                    registerIndex: registerIndex,
+                    matchingPropertyName: matchingPropertyName,
+                    matchingPropertyValue: matchingPropertyValue
                 ) {
                     return found
                 }
@@ -357,11 +383,27 @@ struct FlattenedDeviceTree {
                         parentTranslation: parentTranslation
                     ) ?? parentTranslation
                 }
+                if let matchingPropertyName,
+                   propertyName(
+                       at: UInt(nameOffset),
+                       equals: matchingPropertyName
+                   ) {
+                    if let matchingPropertyValue {
+                        propertyMatches = cStringEquals(
+                            matchingPropertyValue,
+                            at: valueOffset,
+                            length: valueLength
+                        )
+                    } else {
+                        propertyMatches = true
+                    }
+                }
 
             case Self.endNode:
                 let reservedMemoryMatches = !reservedMemory
                     || (insideReservedMemory && resource != nil)
-                if compatibleMatches && deviceTypeMatches && enabled
+                if compatibleMatches && deviceTypeMatches && propertyMatches
+                    && enabled
                     && reservedMemoryMatches {
                     if remainingMatches == 0 {
                         return DeviceTreeSearchResult(resource: resource)

@@ -91,8 +91,9 @@ _start:
     /* BCM2712 executes in low RAM and exposes its main MMIO windows high. */
     ldr     x2, =0x0000000000000705 /* normal WB, inner-shareable, AF */
     str     x2, [x1, #0]
-    ldr     x2, =0x0060000000000401 /* device, AF, privileged XN */
+    ldr     x2, =RPI5_BCM_HIGH_MMIO_L1_DESCRIPTOR
     str     x2, [x1, #(65 * 8)]     /* 0x10_40000000...0x10_7fffffff */
+    ldr     x2, =RPI5_RP1_MMIO_L1_DESCRIPTOR
     str     x2, [x1, #(124 * 8)]    /* RP1 CPU aperture at 0x1f_00000000 */
 #else
     ldr     x2, =0x0060000000000401 /* device, AF, privileged XN */

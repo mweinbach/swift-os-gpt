@@ -46,6 +46,19 @@ def main() -> int:
     if not start or int(start.group(1), 16) != 0x81000:
         return fail("reset body is not page-aligned at 0x81000")
 
+    descriptor_contract = {
+        "RPI5_BCM_HIGH_MMIO_L1_DESCRIPTOR": 0x0060001040000401,
+        "RPI5_RP1_MMIO_L1_DESCRIPTOR": 0x0060001F00000401,
+    }
+    for name, expected in descriptor_contract.items():
+        match = re.search(
+            rf"^([0-9a-fA-F]+)\s+\S\s+{name}$",
+            symbols,
+            re.MULTILINE,
+        )
+        if not match or int(match.group(1), 16) != expected:
+            return fail(f"{name} does not preserve its identity output address")
+
     data = image.read_bytes()
     if len(data) < 64:
         return fail("raw image is shorter than its 64-byte header")
