@@ -1,15 +1,14 @@
 enum DesktopRenderer {
-    static func render(into framebuffer: LinearFramebuffer) {
-        framebuffer.fill(.wallpaper)
+    static func render(on framebuffer: ScaledFramebufferCanvas) {
+        framebuffer.clear(.wallpaper)
         drawTopBar(on: framebuffer)
         drawTerminal(on: framebuffer)
         drawSystemPanel(on: framebuffer)
         drawRoadmapPanel(on: framebuffer)
         drawDock(on: framebuffer)
-        AArch64.synchronizeData()
     }
 
-    private static func drawTopBar(on framebuffer: LinearFramebuffer) {
+    private static func drawTopBar(on framebuffer: ScaledFramebufferCanvas) {
         framebuffer.fill(Rectangle(x: 0, y: 0, width: 800, height: 34), color: .chrome)
         framebuffer.fill(Rectangle(x: 0, y: 34, width: 800, height: 2), color: .cyan)
         framebuffer.fill(Rectangle(x: 14, y: 8, width: 18, height: 18), color: .cyan)
@@ -21,13 +20,13 @@ enum DesktopRenderer {
             scale: 2
         )
         framebuffer.drawText(
-            "EL1  MMU ON  QEMU VIRT",
+            "EL1  MMU ON  AARCH64",
             at: Point(x: 530, y: 13),
             color: .muted
         )
     }
 
-    private static func drawTerminal(on framebuffer: LinearFramebuffer) {
+    private static func drawTerminal(on framebuffer: ScaledFramebufferCanvas) {
         framebuffer.fill(Rectangle(x: 54, y: 84, width: 470, height: 354), color: .shadow)
         framebuffer.fill(Rectangle(x: 48, y: 78, width: 470, height: 354), color: .terminal)
         framebuffer.stroke(Rectangle(x: 48, y: 78, width: 470, height: 354), color: .panel)
@@ -36,7 +35,7 @@ enum DesktopRenderer {
         framebuffer.drawText("KERNEL MONITOR", at: Point(x: 238, y: 91), color: .muted)
     }
 
-    private static func drawSystemPanel(on framebuffer: LinearFramebuffer) {
+    private static func drawSystemPanel(on framebuffer: ScaledFramebufferCanvas) {
         framebuffer.fill(Rectangle(x: 554, y: 84, width: 208, height: 214), color: .shadow)
         framebuffer.fill(Rectangle(x: 548, y: 78, width: 208, height: 214), color: .chrome)
         framebuffer.stroke(Rectangle(x: 548, y: 78, width: 208, height: 214), color: .panel)
@@ -52,14 +51,14 @@ enum DesktopRenderer {
         _ label: StaticString,
         value: StaticString,
         y: Int,
-        on framebuffer: LinearFramebuffer
+        on framebuffer: ScaledFramebufferCanvas
     ) {
         framebuffer.fill(Rectangle(x: 566, y: y, width: 172, height: 26), color: .panel)
         framebuffer.drawText(label, at: Point(x: 574, y: y + 9), color: .muted)
         framebuffer.drawText(value, at: Point(x: 646, y: y + 9), color: .white)
     }
 
-    private static func drawRoadmapPanel(on framebuffer: LinearFramebuffer) {
+    private static func drawRoadmapPanel(on framebuffer: ScaledFramebufferCanvas) {
         framebuffer.fill(Rectangle(x: 554, y: 326, width: 208, height: 126), color: .shadow)
         framebuffer.fill(Rectangle(x: 548, y: 320, width: 208, height: 126), color: .chrome)
         framebuffer.stroke(Rectangle(x: 548, y: 320, width: 208, height: 126), color: .panel)
@@ -69,7 +68,7 @@ enum DesktopRenderer {
         framebuffer.drawText("EL0 TASKS", at: Point(x: 566, y: 414), color: .yellow)
     }
 
-    private static func drawDock(on framebuffer: LinearFramebuffer) {
+    private static func drawDock(on framebuffer: ScaledFramebufferCanvas) {
         framebuffer.fill(Rectangle(x: 194, y: 542, width: 412, height: 46), color: .shadow)
         framebuffer.fill(Rectangle(x: 188, y: 536, width: 412, height: 46), color: .chrome)
         framebuffer.stroke(Rectangle(x: 188, y: 536, width: 412, height: 46), color: .panel)
@@ -85,7 +84,7 @@ enum DesktopRenderer {
         _ label: StaticString,
         x: Int,
         color: PixelColor,
-        on framebuffer: LinearFramebuffer
+        on framebuffer: ScaledFramebufferCanvas
     ) {
         framebuffer.fill(Rectangle(x: x, y: 546, width: 54, height: 26), color: color)
         framebuffer.drawText(label, at: Point(x: x + 10, y: 555), color: .wallpaper)

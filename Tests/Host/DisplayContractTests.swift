@@ -26,10 +26,36 @@ struct DisplayContractTests {
             ) == 0x0012_3456,
             "XRGB packing"
         )
+        expect(
+            PixelFormat.b8g8r8a8.packXRGB(
+                red: 0x12,
+                green: 0x34,
+                blue: 0x56
+            ) == 0xff12_3456,
+            "opaque ARGB packing"
+        )
 
         let mode = requireMode(width: 800, height: 600)
         expect(mode.minimumBytesPerRow == 3_200, "minimum row size")
         expect(mode.minimumByteCount == 1_920_000, "minimum scanout size")
+        expect(
+            DisplayMode(
+                widthInPixels: 1_920,
+                heightInPixels: 1_080,
+                refreshRateMilliHertz: nil,
+                pixelFormat: .b8g8r8x8
+            )?.refreshRateMilliHertz == nil,
+            "unknown firmware refresh was rejected"
+        )
+        expect(
+            DisplayMode(
+                widthInPixels: 1_920,
+                heightInPixels: 1_080,
+                refreshRateMilliHertz: 0,
+                pixelFormat: .b8g8r8x8
+            ) == nil,
+            "known zero refresh was accepted"
+        )
         expect(
             DisplayMode(
                 widthInPixels: 0,

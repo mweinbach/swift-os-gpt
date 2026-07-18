@@ -7,8 +7,9 @@ struct RuntimeMemoryIntegrationTests {
         testEL0StackBackingIsScrubbedExactly()
         testEL0StackScrubRejectsMalformedPairsBeforeWriting()
         testFinalTablesUseBlocksAndExactPermissions()
+        testDriverMappingsRequireReservedRAM()
         testFinalTableFailuresAreResettable()
-        print("runtime memory integration host tests: 7 groups passed")
+        print("runtime memory integration host tests: 8 groups passed")
     }
 
     private static func testFirmwareMemorySanitizationAtEightGiBScale() {
@@ -19,6 +20,11 @@ struct RuntimeMemoryIntegrationTests {
                 PhysicalByteSpan(
                     baseAddress: 0x4008_0123,
                     length: 0x1f_f000
+                )!,
+                // Models a RAM-backed scanout retained by a boot driver.
+                PhysicalByteSpan(
+                    baseAddress: 0x5300_0123,
+                    length: 0x2_000
                 )!,
             ]
             var mapStorage = Array(
@@ -70,7 +76,7 @@ struct RuntimeMemoryIntegrationTests {
                             "reserved-memory tuple count"
                         )
                         expect(
-                            summary.explicitReservationCount == 1,
+                            summary.explicitReservationCount == 2,
                             "explicit reservation count"
                         )
                         expect(map.count <= 8, "8 GiB map metadata exploded")
@@ -94,6 +100,10 @@ struct RuntimeMemoryIntegrationTests {
                         expect(
                             !mapContains(map, address: 0x5200_0000),
                             "translation-table pool remained free"
+                        )
+                        expect(
+                            !mapContains(map, address: 0x5300_1000),
+                            "driver-owned scanout remained allocatable"
                         )
                     }
                 }
@@ -582,6 +592,285 @@ struct RuntimeMemoryIntegrationTests {
             }
         }
     }
+
+    private static func testDriverMappingsRequireReservedRAM() {
+        withRuntimeMemoryPlatform(
+            deviceTreeMemoryLength: MemoryPageGeometry.pageSize
+        ) { platform in
+            let kernelImage = DeviceResource(
+                baseAddress: 0x4008_0000,
+                length: 0x20_0000
+            )
+            var resources = BootDriverResourceSet()
+            expect(
+                resources.append(
+                    memory: DriverMemoryResource(
+                        baseAddress: 0x5300_0123,
+                        length: 0x2_000,
+                        role: .kernelData,
+                        reservesSystemMemory: true
+                    )!
+                ),
+                "framebuffer resource append"
+            )
+            // Address observed in the Raspberry Pi 5 DT probe. Planning rounds
+            // the register window to the exact page mapped as Device memory.
+            expect(
+                resources.append(
+                    mmio: DeviceResource(
+                        baseAddress: 0x10_7c01_3880,
+                        length: 0x40
+                    )
+                ),
+                "Pi mailbox resource append"
+            )
+            guard let plan = BootDriverResourcePlan(
+                resources: resources,
+                platform: platform,
+                kernelImage: kernelImage
+            ) else {
+                fatalError("valid driver resource plan rejected")
+            }
+            expect(plan.memoryResourceCount == 1, "planned memory count")
+            expect(plan.mmioResourceCount == 1, "planned MMIO count")
+
+            guard let framebufferReservation = plan.systemMemoryReservation(
+                      at: 0
+                  ),
+                  let framebufferMapping = plan.memoryMapping(at: 0),
+                  let mailboxMapping = plan.mmioMapping(at: 0)
+            else {
+                fatalError("driver plan omitted a resource")
+            }
+            expect(
+                framebufferReservation == PhysicalByteSpan(
+                    baseAddress: 0x5300_0000,
+                    length: 0x3_000
+                ),
+                "framebuffer reservation was not page-normalized"
+            )
+            expect(
+                framebufferMapping == FinalMappingRegion(
+                    virtualBaseAddress: 0x5300_0000,
+                    physicalBaseAddress: 0x5300_0000,
+                    pageCount: 3,
+                    role: .kernelData
+                ),
+                "framebuffer mapping plan"
+            )
+            expect(
+                mailboxMapping == FinalMappingRegion(
+                    virtualBaseAddress: 0x10_7c01_3000,
+                    physicalBaseAddress: 0x10_7c01_3000,
+                    pageCount: 1,
+                    role: .device
+                ),
+                "Pi mailbox mapping plan"
+            )
+
+            verifyPlannedDriverMappings(
+                framebufferReservation: framebufferReservation,
+                framebufferMapping: framebufferMapping,
+                mailboxMapping: mailboxMapping
+            )
+            verifyDriverPlanRejections(
+                platform: platform,
+                kernelImage: kernelImage
+            )
+        }
+    }
+}
+
+private func verifyPlannedDriverMappings(
+    framebufferReservation: PhysicalByteSpan,
+    framebufferMapping: FinalMappingRegion,
+    mailboxMapping: FinalMappingRegion
+) {
+    var freeStorage = Array(
+        repeating: PhysicalPageRange.empty,
+        count: 8
+    )
+    freeStorage.withUnsafeMutableBufferPointer { freeBuffer in
+        var freeMemory = PhysicalMemoryMap(storage: freeBuffer)
+        expect(
+            freeMemory.addDeviceTreeMemory(
+                baseAddress: 0x5300_0000,
+                length: 0x20_0000
+            ),
+            "driver RAM fixture"
+        )
+
+        let driverMemory = [framebufferMapping]
+        let driverMMIO = [mailboxMapping]
+        let emptyMappings: [FinalMappingRegion] = []
+        let emptyGuards: [FinalGuardRegion] = []
+        driverMemory.withUnsafeBufferPointer { memoryBuffer in
+            driverMMIO.withUnsafeBufferPointer { mmioBuffer in
+                emptyMappings.withUnsafeBufferPointer { emptyBuffer in
+                    emptyGuards.withUnsafeBufferPointer { guardBuffer in
+                        let layout = FinalAddressSpaceLayout(
+                            kind: .kernel,
+                            identifier: .kernel,
+                            kernelText: nil,
+                            kernelReadOnlyDataRegions: emptyBuffer,
+                            kernelDataRegions: memoryBuffer,
+                            userText: nil,
+                            userReadOnlyData: nil,
+                            userStacks: emptyBuffer,
+                            mmioRegions: mmioBuffer,
+                            guardRegions: guardBuffer
+                        )
+
+                        withTableStorage(pageCount: 16) { entries in
+                            var pool = FinalTranslationTablePagePool(
+                                physicalBaseAddress: 0x7200_0000,
+                                pageCount: 16,
+                                mappedEntries: entries
+                            )!
+                            expect(
+                                FinalTranslationTableBuilder.build(
+                                    availablePhysicalMemory: freeMemory,
+                                    layout: layout,
+                                    pool: &pool
+                                ) == .failed(.mappingConflict),
+                                "unreserved framebuffer mapped twice"
+                            )
+                        }
+
+                        expect(
+                            freeMemory.reserve(
+                                baseAddress: framebufferReservation.baseAddress,
+                                length: framebufferReservation.length
+                            ),
+                            "planned framebuffer reservation failed"
+                        )
+                        expect(
+                            !mapContains(freeMemory, address: 0x5300_1000),
+                            "planned framebuffer remained allocatable"
+                        )
+                        withTableStorage(pageCount: 16) { entries in
+                            var pool = FinalTranslationTablePagePool(
+                                physicalBaseAddress: 0x7200_0000,
+                                pageCount: 16,
+                                mappedEntries: entries
+                            )!
+                            let result = FinalTranslationTableBuilder.build(
+                                availablePhysicalMemory: freeMemory,
+                                layout: layout,
+                                pool: &pool
+                            )
+                            guard case let .built(tables) = result else {
+                                fatalError("planned driver mappings failed")
+                            }
+                            let root = tables.addressSpace
+                                .rootTablePhysicalAddress
+                            assertKernelData(
+                                pool.lookup(
+                                    rootTablePhysicalAddress: root,
+                                    virtualAddress: 0x5300_1123
+                                ),
+                                expectedPhysicalAddress: 0x5300_1123
+                            )
+                            assertDevice(
+                                pool.lookup(
+                                    rootTablePhysicalAddress: root,
+                                    virtualAddress: 0x10_7c01_3880
+                                ),
+                                expectedPhysicalAddress: 0x10_7c01_3880
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private func verifyDriverPlanRejections(
+    platform: Platform,
+    kernelImage: DeviceResource
+) {
+    var unreservedRAM = BootDriverResourceSet()
+    expect(
+        unreservedRAM.append(
+            memory: DriverMemoryResource(
+                baseAddress: 0x5300_0000,
+                length: 0x1000,
+                role: .kernelData,
+                reservesSystemMemory: false
+            )!
+        ),
+        "unreserved RAM rejection fixture"
+    )
+    expect(
+        BootDriverResourcePlan(
+            resources: unreservedRAM,
+            platform: platform,
+            kernelImage: kernelImage
+        ) == nil,
+        "unreserved framebuffer RAM was accepted"
+    )
+
+    var partialRAM = BootDriverResourceSet()
+    expect(
+        partialRAM.append(
+            memory: DriverMemoryResource(
+                baseAddress: 0x2_3fff_f000,
+                length: 0x2_000,
+                role: .kernelData,
+                reservesSystemMemory: true
+            )!
+        ),
+        "partial RAM rejection fixture"
+    )
+    expect(
+        BootDriverResourcePlan(
+            resources: partialRAM,
+            platform: platform,
+            kernelImage: kernelImage
+        ) == nil,
+        "partially RAM-backed framebuffer was accepted"
+    )
+
+    var baseDeviceCollision = BootDriverResourceSet()
+    expect(
+        baseDeviceCollision.append(
+            mmio: DeviceResource(
+                baseAddress: platform.serial.baseAddress + 0x20,
+                length: 0x40
+            )
+        ),
+        "base MMIO rejection fixture"
+    )
+    expect(
+        BootDriverResourcePlan(
+            resources: baseDeviceCollision,
+            platform: platform,
+            kernelImage: kernelImage
+        ) == nil,
+        "driver MMIO overlapping the serial page was accepted"
+    )
+
+    var kernelCollision = BootDriverResourceSet()
+    expect(
+        kernelCollision.append(
+            memory: DriverMemoryResource(
+                baseAddress: kernelImage.baseAddress + 0x1000,
+                length: 0x1000,
+                role: .kernelData,
+                reservesSystemMemory: true
+            )!
+        ),
+        "kernel collision rejection fixture"
+    )
+    expect(
+        BootDriverResourcePlan(
+            resources: kernelCollision,
+            platform: platform,
+            kernelImage: kernelImage
+        ) == nil,
+        "framebuffer overlapping the kernel image was accepted"
+    )
 }
 
 private func mapContains(
@@ -621,14 +910,41 @@ private func assertUserText(_ lookup: FinalTranslationLookup) {
     expect(descriptor & (1 << 54) == 0, "user text UXN")
 }
 
-private func assertDevice(_ lookup: FinalTranslationLookup) {
-    guard case let .mapped(_, level, descriptor) = lookup else {
+private func assertDevice(
+    _ lookup: FinalTranslationLookup,
+    expectedPhysicalAddress: UInt64? = nil
+) {
+    guard case let .mapped(physicalAddress, level, descriptor) = lookup else {
         fatalError("device lookup failed")
+    }
+    if let expectedPhysicalAddress {
+        expect(
+            physicalAddress == expectedPhysicalAddress,
+            "device physical mapping"
+        )
     }
     expect(level == .level3, "MMIO was not exact-page mapped")
     expect((descriptor >> 2) & 0b111 == 0, "MMIO AttrIndx")
     expect(descriptor & (1 << 53) != 0, "MMIO PXN")
     expect(descriptor & (1 << 54) != 0, "MMIO UXN")
+}
+
+private func assertKernelData(
+    _ lookup: FinalTranslationLookup,
+    expectedPhysicalAddress: UInt64 = 0x6000_1123
+) {
+    guard case let .mapped(physicalAddress, level, descriptor) = lookup else {
+        fatalError("kernel data lookup failed")
+    }
+    expect(
+        physicalAddress == expectedPhysicalAddress,
+        "kernel data physical mapping"
+    )
+    expect(level == .level3, "driver RAM was not exact-page mapped")
+    expect((descriptor >> 2) & 0b111 == 1, "driver RAM AttrIndx")
+    expect((descriptor >> 6) & 0b11 == 0, "driver RAM AP")
+    expect(descriptor & (1 << 53) != 0, "driver RAM PXN")
+    expect(descriptor & (1 << 54) != 0, "driver RAM UXN")
 }
 
 private func withTableStorage(

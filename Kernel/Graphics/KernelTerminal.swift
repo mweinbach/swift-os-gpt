@@ -15,13 +15,13 @@ struct KernelTerminal {
     private static let cellWidth = 6
     private static let cellHeight = 9
 
-    private let framebuffer: LinearFramebuffer
+    private let canvas: ScaledFramebufferCanvas
     private let storageAddress: UInt
     private(set) var cursorColumn = 0
     private(set) var cursorRow = 0
 
-    init(framebuffer: LinearFramebuffer, storageAddress: UInt64) {
-        self.framebuffer = framebuffer
+    init(canvas: ScaledFramebufferCanvas, storageAddress: UInt64) {
+        self.canvas = canvas
         self.storageAddress = UInt(storageAddress)
     }
 
@@ -39,7 +39,7 @@ struct KernelTerminal {
         }
         cursorColumn = 0
         cursorRow = 0
-        framebuffer.fill(
+        canvas.fill(
             Rectangle(
                 x: Self.origin.x,
                 y: Self.origin.y,
@@ -179,7 +179,7 @@ struct KernelTerminal {
             x: Self.origin.x + column * Self.cellWidth,
             y: Self.origin.y + row * Self.cellHeight
         )
-        framebuffer.fill(
+        canvas.fill(
             Rectangle(
                 x: point.x,
                 y: point.y,
@@ -189,7 +189,7 @@ struct KernelTerminal {
             color: .terminal
         )
         if character != 32 {
-            framebuffer.drawCharacter(
+            canvas.drawCharacter(
                 character,
                 at: Point(x: point.x, y: point.y + 1),
                 color: color(for: colorCode),

@@ -4,6 +4,13 @@ arm_64bit=1
 kernel=kernel8.img
 device_tree=bcm2712-rpi-5-b.dtb
 
+# Pi 5 defaults to leaving mode selection to an OS KMS driver. SwiftOS does
+# not own HVS/HDMI modesetting yet, so ask firmware to read HDMI EDID, select
+# the attached display's mode, and retain a 32-bit simple-framebuffer handoff.
+disable_fw_kms_setup=0
+framebuffer_depth=32
+framebuffer_ignore_alpha=1
+
 # UART10 is the preferred early console on the dedicated debug connector.
 enable_uart=1
 uart_2ndstage=1

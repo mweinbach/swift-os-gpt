@@ -198,8 +198,8 @@ struct PhysicalMemoryMap {
             startingAt: first,
             removedCount: end - first,
             insertedCount: insertedCount,
-            first: left,
-            second: right
+            first: left ?? right,
+            second: left == nil ? nil : right
         )
     }
 

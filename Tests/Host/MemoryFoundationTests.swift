@@ -2,13 +2,49 @@
 struct MemoryFoundationTests {
     static func main() {
         testPhysicalRangeNormalizationAndReservation()
+        testReservationAtFreeRunBoundaries()
         testReservationCapacityIsAtomic()
         testRunAllocatorAtEightGiBScale()
         testAllocatorMetadataExhaustion()
         testPageTableDescriptorPermissions()
         testPageTablePageBuilderAndGuards()
         testAddressSpaceRegionsAndASIDs()
-        print("memory foundation host tests: 7 groups passed")
+        print("memory foundation host tests: 8 groups passed")
+    }
+
+    private static func testReservationAtFreeRunBoundaries() {
+        var storage = Array(repeating: PhysicalPageRange.empty, count: 4)
+        storage.withUnsafeMutableBufferPointer { buffer in
+            var map = PhysicalMemoryMap(storage: buffer)
+            expect(
+                map.addDeviceTreeMemory(
+                    baseAddress: 0x1000,
+                    length: 0x5000
+                ),
+                "boundary reservation fixture"
+            )
+
+            expect(
+                map.reserve(baseAddress: 0x1000, length: 0x2000),
+                "reservation at free-run base"
+            )
+            expect(map.count == 1, "right-only reservation count")
+            expect(
+                map.range(at: 0) == pageRange(base: 0x3000, pages: 3),
+                "right-only remainder was not retained"
+            )
+
+            expect(
+                map.reserve(baseAddress: 0x5000, length: 0x1000),
+                "reservation at free-run end"
+            )
+            expect(map.count == 1, "left-only reservation count")
+            expect(
+                map.range(at: 0) == pageRange(base: 0x3000, pages: 2),
+                "left-only remainder was not retained"
+            )
+            expect(map.totalPageCount == 2, "boundary reservation accounting")
+        }
     }
 
     private static func testPhysicalRangeNormalizationAndReservation() {

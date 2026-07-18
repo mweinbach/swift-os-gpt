@@ -199,6 +199,8 @@ host-test:
 		Kernel/Memory/AddressSpace.swift \
 		Kernel/Memory/RuntimePhysicalMemory.swift \
 		Kernel/Memory/FinalTranslationTables.swift \
+		Kernel/Drivers/BootDriverResources.swift \
+		Kernel/Memory/BootDriverResourcePlan.swift \
 		Tests/Host/RuntimeMemoryIntegrationTests.swift \
 		-o $(BUILD_DIR)/runtime-memory-integration-host-tests
 	$(BUILD_DIR)/runtime-memory-integration-host-tests
@@ -244,6 +246,7 @@ host-test:
 	$(BUILD_DIR)/edid-base-block-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/Geometry.swift \
 		Kernel/Graphics/BitmapFont.swift \
 		Kernel/Graphics/LinearFramebuffer.swift \
@@ -251,6 +254,28 @@ host-test:
 		Tests/Host/PSF2FontTests.swift \
 		-o $(BUILD_DIR)/psf2-font-host-tests
 	$(BUILD_DIR)/psf2-font-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Memory/PhysicalMemory.swift \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Graphics/DamageRectangle.swift \
+		Kernel/Drivers/BootDriverResources.swift \
+		Kernel/Drivers/SimpleFramebufferDisplay.swift \
+		Tests/Host/SimpleFramebufferDisplayTests.swift \
+		-o $(BUILD_DIR)/simple-framebuffer-display-host-tests
+	$(BUILD_DIR)/simple-framebuffer-display-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/BitmapFont.swift \
+		Kernel/Graphics/LinearFramebuffer.swift \
+		Kernel/Graphics/DisplayViewport.swift \
+		Kernel/Graphics/ScaledFramebufferCanvas.swift \
+		Tests/Host/DisplayViewportTests.swift \
+		-o $(BUILD_DIR)/display-viewport-host-tests
+	$(BUILD_DIR)/display-viewport-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Core/PhysicalBytes.swift \

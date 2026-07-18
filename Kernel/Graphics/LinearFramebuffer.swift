@@ -3,6 +3,21 @@ struct LinearFramebuffer {
     let width: Int
     let height: Int
     let strideInPixels: Int
+    let pixelFormat: PixelFormat
+
+    init(
+        baseAddress: UInt,
+        width: Int,
+        height: Int,
+        strideInPixels: Int,
+        pixelFormat: PixelFormat = .xrgb8888
+    ) {
+        self.baseAddress = baseAddress
+        self.width = width
+        self.height = height
+        self.strideInPixels = strideInPixels
+        self.pixelFormat = pixelFormat
+    }
 
     func fill(_ color: PixelColor) {
         fill(
@@ -29,12 +44,19 @@ struct LinearFramebuffer {
             return
         }
 
+        let storedColor: UInt32
+        switch pixelFormat {
+        case .b8g8r8x8:
+            storedColor = color.xrgb & 0x00ff_ffff
+        case .b8g8r8a8:
+            storedColor = color.xrgb | 0xff00_0000
+        }
         var y = startY
         while y < endY {
             var x = startX
             let row = pixels.advanced(by: y * strideInPixels)
             while x < endX {
-                row.advanced(by: x).pointee = color.xrgb
+                row.advanced(by: x).pointee = storedColor
                 x += 1
             }
             y += 1

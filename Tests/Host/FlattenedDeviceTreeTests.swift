@@ -167,6 +167,41 @@ struct FlattenedDeviceTreeTests {
                 platform?.virtioTransportIsDMACoherent(at: 1) == false,
                 "noncoherent VirtIO transport inherited another node's property"
             )
+            expect(
+                platform?.containsSystemMemory(
+                    baseAddress: 0x4000_1000,
+                    length: 0x2000
+                ) == true,
+                "contained system-memory span was rejected"
+            )
+            expect(
+                platform?.overlapsSystemMemory(
+                    baseAddress: 0x4000_1000,
+                    length: 0x2000
+                ) == true,
+                "contained system-memory span did not overlap"
+            )
+            expect(
+                platform?.containsSystemMemory(
+                    baseAddress: 0x3fff_f000,
+                    length: 0x2000
+                ) == false,
+                "partial system-memory overlap was treated as contained"
+            )
+            expect(
+                platform?.overlapsSystemMemory(
+                    baseAddress: 0x3fff_f000,
+                    length: 0x2000
+                ) == true,
+                "partial system-memory overlap was missed"
+            )
+            expect(
+                platform?.overlapsSystemMemory(
+                    baseAddress: 0x7000_0000,
+                    length: 0x1000
+                ) == false,
+                "disjoint span overlapped system memory"
+            )
         }
     }
 

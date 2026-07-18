@@ -223,6 +223,37 @@ _secondary_start:
     b       .Lpark
 .size _secondary_start, . - _secondary_start
 
+/*
+ * Clean every data-cache line touched by [x0, x0 + x1) to the point of
+ * coherency. Swift validates that the nonempty byte interval cannot overflow.
+ * CTR_EL0.DminLine encodes log2(words), so the byte size is 4 << DminLine.
+ */
+.align 4
+.global arch_clean_data_cache_range
+.type arch_clean_data_cache_range, %function
+arch_clean_data_cache_range:
+    cbz     x1, .Lcache_clean_done
+    sub     x4, x1, #1
+    add     x4, x0, x4
+    mrs     x2, ctr_el0
+    ubfx    x2, x2, #16, #4
+    mov     x3, #4
+    lsl     x2, x3, x2
+    sub     x3, x2, #1
+    bic     x0, x0, x3
+    bic     x4, x4, x3
+.Lcache_clean_loop:
+    dc      cvac, x0
+    cmp     x0, x4
+    b.hs    .Lcache_clean_barrier
+    add     x0, x0, x2
+    b       .Lcache_clean_loop
+.Lcache_clean_barrier:
+    dsb     sy
+.Lcache_clean_done:
+    ret
+.size arch_clean_data_cache_range, . - arch_clean_data_cache_range
+
 /* Early vectors park safely. Typed diagnostic vectors are the next milestone. */
 .align 11
 early_vectors:

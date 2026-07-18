@@ -29,17 +29,21 @@ enum KernelMemoryRuntime {
     private static let classifiedActiveAllocationCapacity = 512
     private static let kernelReadOnlyCapacity = 2
     private static let kernelDataCapacity = 6
+        + BootDriverResourceSet.maximumMemoryResourceCount
     private static let userStackCapacity = 2
     private static let mmioCapacity = 5
+        + BootDriverResourceSet.maximumMMIOResourceCount
     private static let guardCapacity = 6
+    private static let explicitReservationCapacity = 1
+        + BootDriverResourceSet.maximumMemoryResourceCount
 
     private enum LayoutOffset {
         static let kernelReadOnly = 0
         static let kernelData = 128
-        static let userStacks = 384
-        static let mmio = 512
-        static let guards = 768
-        static let explicitReservations = 1024
+        static let userStacks = 640
+        static let mmio = 768
+        static let guards = 1280
+        static let explicitReservations = 1536
     }
 
     private nonisolated(unsafe) static var ownedMemoryMap:
@@ -57,10 +61,19 @@ enum KernelMemoryRuntime {
 
     static func activate(
         platform: Platform,
-        console: EarlyConsole
+        console: EarlyConsole,
+        driverResources: BootDriverResourceSet = BootDriverResourceSet()
     ) -> KernelMemoryActivation? {
         guard !isReady,
               storageBoundsAreValid(),
+              let driverPlan = BootDriverResourcePlan(
+                  resources: driverResources,
+                  platform: platform,
+                  kernelImage: DeviceResource(
+                      baseAddress: KernelLinkerLayout.kernelImage.start,
+                      length: KernelLinkerLayout.kernelImage.length
+                  )
+              ),
               let mapStorage: UnsafeMutableBufferPointer<PhysicalPageRange>
                 = fixedBuffer(
                     at: KernelLinkerLayout.memoryMapStorage,
@@ -95,9 +108,25 @@ enum KernelMemoryRuntime {
         }
 
         explicitReservations[0] = kernelReservation
+        var explicitReservationCount = 1
+        var driverMemoryIndex = 0
+        while driverMemoryIndex < driverPlan.memoryResourceCount {
+            if let span = driverPlan.systemMemoryReservation(
+                at: driverMemoryIndex
+            ) {
+                guard explicitReservationCount
+                        < explicitReservations.count
+                else {
+                    return nil
+                }
+                explicitReservations[explicitReservationCount] = span
+                explicitReservationCount += 1
+            }
+            driverMemoryIndex += 1
+        }
         let immutableReservations = UnsafeBufferPointer(
             start: explicitReservations.baseAddress,
-            count: 1
+            count: explicitReservationCount
         )
         var memoryMap = PhysicalMemoryMap(storage: mapStorage)
         var bootstrapAllocator = PhysicalPageAllocator(
@@ -124,10 +153,15 @@ enum KernelMemoryRuntime {
               classifiedAllocator.totalFreePageCount
                 == memorySummary.usablePageCount,
               let userMappings = KernelEL0Runtime.addressSpaceMappings(),
+              driverVirtualAddressesAreValid(
+                  driverPlan,
+                  userMappings: userMappings
+              ),
               scrubUserStackBacking(),
               let layout = finalLayout(
                   platform: platform,
-                  userMappings: userMappings
+                  userMappings: userMappings,
+                  driverPlan: driverPlan
               ),
               let tableStorage: UnsafeMutableBufferPointer<UInt64>
                 = fixedBuffer(
@@ -296,9 +330,106 @@ enum KernelMemoryRuntime {
         )
     }
 
+    private static func pageAlignedInterval(
+        baseAddress: UInt64,
+        length: UInt64
+    ) -> (base: UInt64, end: UInt64)? {
+        guard length > 0,
+              length <= UInt64.max - baseAddress,
+              let end = MemoryPageGeometry.alignUp(baseAddress + length)
+        else {
+            return nil
+        }
+        let base = MemoryPageGeometry.alignDown(baseAddress)
+        guard end > base else { return nil }
+        return (base: base, end: end)
+    }
+
+    private static func driverVirtualAddressesAreValid(
+        _ plan: BootDriverResourcePlan,
+        userMappings: KernelEL0AddressSpaceMappings
+    ) -> Bool {
+        var memoryIndex = 0
+        while memoryIndex < plan.memoryResourceCount {
+            guard let mapping = plan.memoryMapping(at: memoryIndex),
+                  !overlapsUserMappings(
+                      baseAddress: mapping.virtualBaseAddress,
+                      length: mapping.byteCount,
+                      userMappings: userMappings
+                  )
+            else {
+                return false
+            }
+            memoryIndex += 1
+        }
+
+        var mmioIndex = 0
+        while mmioIndex < plan.mmioResourceCount {
+            guard let mapping = plan.mmioMapping(at: mmioIndex),
+                  !overlapsUserMappings(
+                      baseAddress: mapping.virtualBaseAddress,
+                      length: mapping.byteCount,
+                      userMappings: userMappings
+                  )
+            else {
+                return false
+            }
+            mmioIndex += 1
+        }
+        return true
+    }
+
+    private static func overlapsUserMappings(
+        baseAddress: UInt64,
+        length: UInt64,
+        userMappings: KernelEL0AddressSpaceMappings
+    ) -> Bool {
+        guard let interval = pageAlignedInterval(
+                  baseAddress: baseAddress,
+                  length: length
+              )
+        else {
+            return true
+        }
+        if overlaps(interval, userMappings.userText) {
+            return true
+        }
+        if let readOnly = userMappings.userReadOnlyData,
+           overlaps(interval, readOnly) {
+            return true
+        }
+        return overlaps(interval, userMappings.firstUserStack)
+            || overlaps(interval, userMappings.secondUserStack)
+            || overlaps(interval, userMappings.firstUserStackGuard)
+            || overlaps(interval, userMappings.secondUserStackGuard)
+    }
+
+    private static func overlaps(
+        _ interval: (base: UInt64, end: UInt64),
+        _ mapping: FinalMappingRegion
+    ) -> Bool {
+        interval.base < mapping.virtualEndAddress
+            && mapping.virtualBaseAddress < interval.end
+    }
+
+    private static func overlaps(
+        _ interval: (base: UInt64, end: UInt64),
+        _ guardRegion: FinalGuardRegion
+    ) -> Bool {
+        guard let byteCount = MemoryPageGeometry.byteCount(
+                  forPageCount: guardRegion.pageCount
+              )
+        else {
+            return true
+        }
+        return interval.base < guardRegion.virtualBaseAddress + byteCount
+            && guardRegion.virtualBaseAddress < interval.end
+    }
+
     private static func finalLayout(
         platform: Platform,
-        userMappings: KernelEL0AddressSpaceMappings
+        userMappings: KernelEL0AddressSpaceMappings,
+        driverPlan: BootDriverResourcePlan
     ) -> FinalAddressSpaceLayout? {
         guard let kernelReadOnly:
                 UnsafeMutableBufferPointer<FinalMappingRegion> = layoutBuffer(
@@ -422,6 +553,22 @@ enum KernelMemoryRuntime {
             return nil
         }
 
+        var driverMemoryIndex = 0
+        while driverMemoryIndex < driverPlan.memoryResourceCount {
+            guard let mapping = driverPlan.memoryMapping(
+                      at: driverMemoryIndex
+                  ),
+                  append(
+                      mapping,
+                      to: kernelData,
+                      count: &dataCount
+                  )
+            else {
+                return nil
+            }
+            driverMemoryIndex += 1
+        }
+
         // User stack count is separate from the privileged data count.
         userStacks[0] = userMappings.firstUserStack
         userStacks[1] = userMappings.secondUserStack
@@ -486,6 +633,17 @@ enum KernelMemoryRuntime {
            !appendDevice(virtio, to: mmio, count: &mmioCount) {
             return nil
         }
+        var driverMMIOIndex = 0
+        while driverMMIOIndex < driverPlan.mmioResourceCount {
+            guard let mapping = driverPlan.mmioMapping(
+                      at: driverMMIOIndex
+                  ),
+                  append(mapping, to: mmio, count: &mmioCount)
+            else {
+                return nil
+            }
+            driverMMIOIndex += 1
+        }
 
         return FinalAddressSpaceLayout(
             kind: .user,
@@ -535,7 +693,8 @@ enum KernelMemoryRuntime {
         else {
             return false
         }
-        return allocatorStart - mapStart >= requiredBytes(
+        return pagingLayoutStorageIsValid()
+            && allocatorStart - mapStart >= requiredBytes(
                 PhysicalPageRange.self,
                 count: memoryMapCapacity
             )
@@ -553,11 +712,61 @@ enum KernelMemoryRuntime {
             )
     }
 
+    private static func pagingLayoutStorageIsValid() -> Bool {
+        let region = KernelLinkerLayout.pagingLayoutStorage
+        let readOnlyEnd = UInt64(LayoutOffset.kernelReadOnly)
+            + requiredBytes(
+                FinalMappingRegion.self,
+                count: kernelReadOnlyCapacity
+            )
+        let dataEnd = UInt64(LayoutOffset.kernelData)
+            + requiredBytes(
+                FinalMappingRegion.self,
+                count: kernelDataCapacity
+            )
+        let userStackEnd = UInt64(LayoutOffset.userStacks)
+            + requiredBytes(
+                FinalMappingRegion.self,
+                count: userStackCapacity
+            )
+        let mmioEnd = UInt64(LayoutOffset.mmio)
+            + requiredBytes(
+                FinalMappingRegion.self,
+                count: mmioCapacity
+            )
+        let guardEnd = UInt64(LayoutOffset.guards)
+            + requiredBytes(FinalGuardRegion.self, count: guardCapacity)
+        let reservationEnd = UInt64(LayoutOffset.explicitReservations)
+            + requiredBytes(
+                PhysicalByteSpan.self,
+                count: explicitReservationCapacity
+            )
+
+        return UInt64(LayoutOffset.kernelReadOnly)
+                % UInt64(MemoryLayout<FinalMappingRegion>.alignment) == 0
+            && UInt64(LayoutOffset.kernelData)
+                % UInt64(MemoryLayout<FinalMappingRegion>.alignment) == 0
+            && UInt64(LayoutOffset.userStacks)
+                % UInt64(MemoryLayout<FinalMappingRegion>.alignment) == 0
+            && UInt64(LayoutOffset.mmio)
+                % UInt64(MemoryLayout<FinalMappingRegion>.alignment) == 0
+            && UInt64(LayoutOffset.guards)
+                % UInt64(MemoryLayout<FinalGuardRegion>.alignment) == 0
+            && UInt64(LayoutOffset.explicitReservations)
+                % UInt64(MemoryLayout<PhysicalByteSpan>.alignment) == 0
+            && readOnlyEnd <= UInt64(LayoutOffset.kernelData)
+            && dataEnd <= UInt64(LayoutOffset.userStacks)
+            && userStackEnd <= UInt64(LayoutOffset.mmio)
+            && mmioEnd <= UInt64(LayoutOffset.guards)
+            && guardEnd <= UInt64(LayoutOffset.explicitReservations)
+            && reservationEnd <= region.length
+    }
+
     private static func explicitReservationStorage()
         -> UnsafeMutableBufferPointer<PhysicalByteSpan>? {
         layoutBuffer(
             offset: LayoutOffset.explicitReservations,
-            count: 1
+            count: explicitReservationCapacity
         )
     }
 

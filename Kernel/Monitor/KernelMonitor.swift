@@ -5,21 +5,26 @@ struct KernelMonitor {
     private var terminal: KernelTerminal
     private var display: ActiveDisplayBackend
     private let serial: PL011
+    private let boardKind: BoardKind
+    private let mode: DisplayMode
     private let lineStorageAddress: UInt
     private var lineLength = 0
     private var lastInputWasCarriageReturn = false
 
     init(
-        framebuffer: LinearFramebuffer,
+        canvas: ScaledFramebufferCanvas,
         display: ActiveDisplayBackend,
+        boardKind: BoardKind,
         storageAddress: UInt64,
         serial: PL011
     ) {
         terminal = KernelTerminal(
-            framebuffer: framebuffer,
+            canvas: canvas,
             storageAddress: storageAddress
         )
         self.display = display
+        self.boardKind = boardKind
+        mode = display.mode
         self.serial = serial
         lineStorageAddress = UInt(storageAddress) + Self.lineStorageOffset
     }
@@ -27,7 +32,12 @@ struct KernelMonitor {
     mutating func start() -> Bool {
         terminal.clear()
         emit("SWIFTOS KERNEL MONITOR\n", color: KernelTerminal.cyan)
-        emit("QEMU VIRT AARCH64  EMBEDDED SWIFT\n", color: KernelTerminal.muted)
+        switch boardKind {
+        case .qemuVirt:
+            emit("QEMU VIRT AARCH64  EMBEDDED SWIFT\n", color: KernelTerminal.muted)
+        case .raspberryPi5:
+            emit("RASPBERRY PI 5  EMBEDDED SWIFT\n", color: KernelTerminal.muted)
+        }
         emit("TYPE HELP FOR COMMANDS\n\n", color: KernelTerminal.muted)
         prompt()
         return display.presentFullFrame()
@@ -121,7 +131,23 @@ struct KernelMonitor {
             emitUnsigned(AArch64.currentExceptionLevel, color: KernelTerminal.white)
             emit("\nSCTLR: ", color: KernelTerminal.muted)
             emitHex(AArch64.systemControl, color: KernelTerminal.white)
-            emit("\nFRAMEBUFFER: 800X600 XRGB8888\n", color: KernelTerminal.green)
+            emit("\nFRAMEBUFFER: ", color: KernelTerminal.muted)
+            emitUnsigned(UInt64(mode.widthInPixels), color: KernelTerminal.green)
+            emit("X", color: KernelTerminal.green)
+            emitUnsigned(UInt64(mode.heightInPixels), color: KernelTerminal.green)
+            switch mode.pixelFormat {
+            case .b8g8r8x8:
+                emit(" XRGB8888\n", color: KernelTerminal.green)
+            case .b8g8r8a8:
+                emit(" ARGB8888\n", color: KernelTerminal.green)
+            }
+            emit("REFRESH_MHZ: ", color: KernelTerminal.muted)
+            if let refresh = mode.refreshRateMilliHertz {
+                emitUnsigned(UInt64(refresh), color: KernelTerminal.green)
+            } else {
+                emit("UNKNOWN", color: KernelTerminal.yellow)
+            }
+            emit("\n")
             emit("DEVICE TREE: DISCOVERED\n", color: KernelTerminal.green)
 
         case .clear:
@@ -153,7 +179,7 @@ struct KernelMonitor {
     }
 
     private mutating func prompt() {
-        emit("SWIFT@QEMU:~> ", color: KernelTerminal.cyan)
+        emit("SWIFT@HOST:~> ", color: KernelTerminal.cyan)
     }
 
     private mutating func emit(

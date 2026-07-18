@@ -74,9 +74,18 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
     }
     console.write("SWIFTOS:FDT_OK\n")
 
+    guard let drivers = PlatformDriverBootstrap.discover(
+              platform: platform
+          )
+    else {
+        console.write("SWIFTOS:PANIC:DRIVER_RESOURCES\n")
+        park()
+    }
+
     guard let memory = KernelMemoryRuntime.activate(
         platform: platform,
-        console: console
+        console: console,
+        driverResources: drivers.resources
     ) else {
         console.write("SWIFTOS:PANIC:MEMORY\n")
         park()
@@ -102,6 +111,15 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             memory: memory
         )
     case .raspberryPi5:
+        if let display = drivers.display {
+            console.write(SimpleFramebufferDisplayDriver.readyMarker)
+            runPlatformDesktop(
+                console: console,
+                platform: platform,
+                memory: memory,
+                driver: display
+            )
+        }
         console.write("SWIFTOS:SERIAL_ONLY\n")
         console.write("SWIFTOS:SWIFT_OK\n")
         proveTimerInterrupts(console: console)
@@ -145,15 +163,6 @@ private func runQEMUDesktop(
         console.write("SWIFTOS:PANIC:DISPLAY_MEMORY\n")
         park()
     }
-    let framebuffer = LinearFramebuffer(
-        baseAddress: UInt(scanout.mapping.cpuPhysicalAddress),
-        width: Int(mode.widthInPixels),
-        height: Int(mode.heightInPixels),
-        strideInPixels: Int(
-            scanout.bytesPerRow / mode.pixelFormat.bytesPerPixel
-        )
-    )
-    DesktopRenderer.render(into: framebuffer)
     let firmware = FirmwareConfiguration(
         baseAddress: firmwareConfiguration.baseAddress
     )
@@ -167,10 +176,72 @@ private func runQEMUDesktop(
         console.write("SWIFTOS:PANIC:DISPLAY_BACKEND\n")
         park()
     }
+    runDesktopSession(
+        console: console,
+        platform: platform,
+        memory: memory,
+        scanout: scanout,
+        display: display
+    )
+}
+
+private func runPlatformDesktop(
+    console: EarlyConsole,
+    platform: Platform,
+    memory: KernelMemoryActivation,
+    driver: SimpleFramebufferDisplayDriver
+) -> Never {
+    runDesktopSession(
+        console: console,
+        platform: platform,
+        memory: memory,
+        scanout: driver.scanout,
+        display: .platformFramebuffer(
+            mode: driver.scanout.mode,
+            driver: driver
+        )
+    )
+}
+
+private func runDesktopSession(
+    console: EarlyConsole,
+    platform: Platform,
+    memory: KernelMemoryActivation,
+    scanout: ScanoutBuffer,
+    display initialDisplay: ActiveDisplayBackend
+) -> Never {
+    let mode = scanout.mode
+    let strideInPixels = scanout.bytesPerRow
+        / mode.pixelFormat.bytesPerPixel
+    guard scanout.mapping.cpuPhysicalAddress <= UInt64(UInt.max),
+          strideInPixels <= UInt64(Int.max)
+    else {
+        console.write("SWIFTOS:PANIC:DISPLAY_MEMORY\n")
+        park()
+    }
+    let framebuffer = LinearFramebuffer(
+        baseAddress: UInt(scanout.mapping.cpuPhysicalAddress),
+        width: Int(mode.widthInPixels),
+        height: Int(mode.heightInPixels),
+        strideInPixels: Int(strideInPixels),
+        pixelFormat: mode.pixelFormat
+    )
+    guard let viewport = DisplayViewport(mode: mode),
+          let canvas = ScaledFramebufferCanvas(
+              framebuffer: framebuffer,
+              viewport: viewport
+          )
+    else {
+        console.write("SWIFTOS:PANIC:DISPLAY_VIEWPORT\n")
+        park()
+    }
+    DesktopRenderer.render(on: canvas)
+    let display = initialDisplay
     let displayKind = display.kind
     var monitor = KernelMonitor(
-        framebuffer: framebuffer,
+        canvas: canvas,
         display: display,
+        boardKind: platform.kind,
         storageAddress: AArch64.terminalStorageAddress,
         serial: PL011(baseAddress: UInt(platform.serial.baseAddress))
     )

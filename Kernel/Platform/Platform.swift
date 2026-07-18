@@ -235,6 +235,27 @@ struct Platform {
         return false
     }
 
+    func overlapsSystemMemory(baseAddress: UInt64, length: UInt64) -> Bool {
+        guard length > 0, length <= UInt64.max - baseAddress else {
+            return false
+        }
+        let endAddress = baseAddress + length
+        var index = 0
+        while index < 4096, let resource = memoryRegion(at: index) {
+            guard resource.length > 0,
+                  resource.length <= UInt64.max - resource.baseAddress
+            else {
+                return true
+            }
+            if baseAddress < resource.baseAddress + resource.length,
+               resource.baseAddress < endAddress {
+                return true
+            }
+            index += 1
+        }
+        return false
+    }
+
     func virtioTransport(at index: Int) -> DeviceResource? {
         deviceTree.resource(
             compatibleWith: "virtio,mmio",

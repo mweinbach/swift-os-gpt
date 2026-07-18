@@ -62,6 +62,20 @@ enum AArch64 {
         archDataSyncBarrier()
     }
 
+    /// Makes CPU writes visible to a non-coherent device over one physical
+    /// byte interval. The assembly boundary discovers the implemented cache
+    /// line size and rounds the first address down before issuing `dc cvac`.
+    @inline(__always)
+    static func cleanDataCache(address: UInt64, byteCount: UInt64) -> Bool {
+        guard byteCount > 0,
+              byteCount <= UInt64.max - address
+        else {
+            return false
+        }
+        archCleanDataCacheRange(address, byteCount)
+        return true
+    }
+
     @inline(__always)
     static func spinHint() {
         archSpinHint()
@@ -163,6 +177,9 @@ private func archTerminalStorageAddress() -> UInt64
 
 @_silgen_name("arch_data_sync_barrier")
 private func archDataSyncBarrier()
+
+@_silgen_name("arch_clean_data_cache_range")
+private func archCleanDataCacheRange(_ address: UInt64, _ byteCount: UInt64)
 
 @_silgen_name("arch_spin_hint")
 private func archSpinHint()
