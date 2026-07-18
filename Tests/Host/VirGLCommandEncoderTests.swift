@@ -5,6 +5,7 @@ struct VirGLCommandEncoderTests {
         testGenericObjectLifecycle()
         testSurfaceAndFramebufferPackets()
         testViewportAndScissorPackets()
+        testResourceCopyRegionPackets()
         testClearPackets()
         testFixedFunctionStatePackets()
         testVertexAndConstantPackets()
@@ -12,7 +13,7 @@ struct VirGLCommandEncoderTests {
         testShaderObjectFragments()
         testShaderBindAndLinkPackets()
         testDrawPacketAndAtomicRejections()
-        print("VirGL command encoder host tests: 11 groups passed")
+        print("VirGL command encoder host tests: 12 groups passed")
     }
 
     private static func testPacketHeadersAndArenaBoundaries() {
@@ -263,6 +264,168 @@ struct VirGLCommandEncoderTests {
                 "out-of-range scissor was accepted"
             )
         }
+    }
+
+    private static func testResourceCopyRegionPackets() {
+        let sourceBox = requireTextureBox(
+            x: 11,
+            y: 12,
+            z: 13,
+            width: 14,
+            height: 15,
+            depth: 16
+        )
+        withArena(capacity: 24) { arena, storage in
+            expectEncoded(
+                arena.encodeResourceCopyRegion(
+                    destinationResourceHandle: 0x21,
+                    destinationLevel: 2,
+                    destinationX: 3,
+                    destinationY: 4,
+                    destinationZ: 5,
+                    sourceResourceHandle: 0x31,
+                    sourceLevel: 6,
+                    sourceBox: sourceBox
+                ),
+                start: 0,
+                count: 14,
+                "RESOURCE_COPY_REGION"
+            )
+            expectDWords(
+                arena,
+                [
+                    0x000d_0011,
+                    0x21, 2, 3, 4, 5,
+                    0x31, 6, 11, 12, 13, 14, 15, 16,
+                ],
+                "resource-copy-region layout"
+            )
+
+            let before = arena.dwordCount
+            expectRejected(
+                arena.encodeResourceCopyRegion(
+                    destinationResourceHandle: 0,
+                    destinationLevel: 0,
+                    destinationX: 0,
+                    destinationY: 0,
+                    destinationZ: 0,
+                    sourceResourceHandle: 1,
+                    sourceLevel: 0,
+                    sourceBox: sourceBox
+                ),
+                .invalidResourceHandle,
+                "zero copy destination resource"
+            )
+            expectRejected(
+                arena.encodeResourceCopyRegion(
+                    destinationResourceHandle: 1,
+                    destinationLevel: 0,
+                    destinationX: 0,
+                    destinationY: 0,
+                    destinationZ: 0,
+                    sourceResourceHandle: 0,
+                    sourceLevel: 0,
+                    sourceBox: sourceBox
+                ),
+                .invalidResourceHandle,
+                "zero copy source resource"
+            )
+            expectRejected(
+                arena.encodeResourceCopyRegion(
+                    destinationResourceHandle: 1,
+                    destinationLevel: UInt32.max,
+                    destinationX: UInt32.max - 13,
+                    destinationY: 0,
+                    destinationZ: 0,
+                    sourceResourceHandle: 2,
+                    sourceLevel: UInt32.max,
+                    sourceBox: sourceBox
+                ),
+                .invalidCopyRegion,
+                "overflowing copy destination x"
+            )
+            expectRejected(
+                arena.encodeResourceCopyRegion(
+                    destinationResourceHandle: 1,
+                    destinationLevel: 0,
+                    destinationX: 0,
+                    destinationY: UInt32.max - 14,
+                    destinationZ: 0,
+                    sourceResourceHandle: 2,
+                    sourceLevel: 0,
+                    sourceBox: sourceBox
+                ),
+                .invalidCopyRegion,
+                "overflowing copy destination y"
+            )
+            expectRejected(
+                arena.encodeResourceCopyRegion(
+                    destinationResourceHandle: 1,
+                    destinationLevel: 0,
+                    destinationX: 0,
+                    destinationY: 0,
+                    destinationZ: UInt32.max - 15,
+                    sourceResourceHandle: 2,
+                    sourceLevel: 0,
+                    sourceBox: sourceBox
+                ),
+                .invalidCopyRegion,
+                "overflowing copy destination z"
+            )
+            expect(
+                arena.dwordCount == before,
+                "invalid resource copy advanced cursor"
+            )
+            expect(
+                UInt32(littleEndian: storage[before]) == 0xa5a5_a5a5,
+                "invalid resource copy overwrote arena"
+            )
+        }
+
+        withArena(capacity: 13) { arena, storage in
+            expectRejected(
+                arena.encodeResourceCopyRegion(
+                    destinationResourceHandle: 1,
+                    destinationLevel: 0,
+                    destinationX: 0,
+                    destinationY: 0,
+                    destinationZ: 0,
+                    sourceResourceHandle: 2,
+                    sourceLevel: 0,
+                    sourceBox: sourceBox
+                ),
+                .capacityExhausted,
+                "resource copy exceeding arena"
+            )
+            expect(arena.dwordCount == 0, "failed copy advanced cursor")
+            expect(
+                UInt32(littleEndian: storage[0]) == 0xa5a5_a5a5,
+                "failed resource copy overwrote arena"
+            )
+        }
+
+        expect(
+            VirGLTextureBox(
+                x: 0,
+                y: 0,
+                z: 0,
+                width: 0,
+                height: 1,
+                depth: 1
+            ) == nil,
+            "zero-width copy source box was accepted"
+        )
+        expect(
+            VirGLTextureBox(
+                x: UInt32.max,
+                y: 0,
+                z: 0,
+                width: 1,
+                height: 1,
+                depth: 1
+            ) == nil,
+            "overflowing copy source box was accepted"
+        )
     }
 
     private static func testClearPackets() {

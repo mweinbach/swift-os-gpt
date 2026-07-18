@@ -26,6 +26,7 @@ enum VirGLCommand: UInt8 {
     case setStencilReference = 13
     case setBlendColor = 14
     case setScissorState = 15
+    case resourceCopyRegion = 17
     case bindShader = 31
     case clearTexture = 47
     case linkShader = 52
@@ -80,6 +81,7 @@ enum VirGLEncodeRejection: Equatable {
     case invalidFormat
     case invalidCount
     case invalidState
+    case invalidCopyRegion
     case invalidSurfaceView
     case invalidShaderFragment
     case invalidDataSize
@@ -723,6 +725,64 @@ struct VirGLDWordArena {
             index += 1
         }
         return .encoded(startDWord: start, dwordCount: payloadCount + 1)
+    }
+
+    /// Copies one validated source box without scaling or format conversion.
+    /// Resource-level bounds remain the backend's responsibility because this
+    /// wire encoder does not own resource metadata.
+    mutating func encodeResourceCopyRegion(
+        destinationResourceHandle: UInt32,
+        destinationLevel: UInt32,
+        destinationX: UInt32,
+        destinationY: UInt32,
+        destinationZ: UInt32,
+        sourceResourceHandle: UInt32,
+        sourceLevel: UInt32,
+        sourceBox: VirGLTextureBox
+    ) -> VirGLEncodeResult {
+        guard destinationResourceHandle != 0,
+              sourceResourceHandle != 0
+        else {
+            return .rejected(.invalidResourceHandle)
+        }
+        let destinationEndX = destinationX.addingReportingOverflow(
+            sourceBox.width
+        )
+        let destinationEndY = destinationY.addingReportingOverflow(
+            sourceBox.height
+        )
+        let destinationEndZ = destinationZ.addingReportingOverflow(
+            sourceBox.depth
+        )
+        guard !destinationEndX.overflow,
+              !destinationEndY.overflow,
+              !destinationEndZ.overflow
+        else {
+            return .rejected(.invalidCopyRegion)
+        }
+
+        let reservation = reservePacket(
+            command: .resourceCopyRegion,
+            objectType: .null,
+            payloadDWordCount: 13
+        )
+        guard case .ready(let start) = reservation else {
+            return Self.rejectionResult(reservation)
+        }
+        appendUnchecked(destinationResourceHandle)
+        appendUnchecked(destinationLevel)
+        appendUnchecked(destinationX)
+        appendUnchecked(destinationY)
+        appendUnchecked(destinationZ)
+        appendUnchecked(sourceResourceHandle)
+        appendUnchecked(sourceLevel)
+        appendUnchecked(sourceBox.x)
+        appendUnchecked(sourceBox.y)
+        appendUnchecked(sourceBox.z)
+        appendUnchecked(sourceBox.width)
+        appendUnchecked(sourceBox.height)
+        appendUnchecked(sourceBox.depth)
+        return .encoded(startDWord: start, dwordCount: 14)
     }
 
     mutating func encodeClear(_ value: VirGLClearValue) -> VirGLEncodeResult {
