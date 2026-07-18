@@ -20,9 +20,29 @@ struct SimpleFramebufferDescription: Equatable {
     let format: SimpleFramebufferFormat
 }
 
+struct PlatformGraphicsResources {
+    static let maximumMMIOResourceCount = 4
+
+    let resource0: DeviceResource
+    let resource1: DeviceResource
+    let resource2: DeviceResource
+    let resource3: DeviceResource
+
+    func mmioResource(at index: Int) -> DeviceResource? {
+        switch index {
+        case 0: return resource0
+        case 1: return resource1
+        case 2: return resource2
+        case 3: return resource3
+        default: return nil
+        }
+    }
+}
+
 struct Platform {
     let firmwareMailbox: DeviceResource?
     let simpleFramebuffer: SimpleFramebufferDescription?
+    let graphicsResources: PlatformGraphicsResources?
 }
 
 struct MemoryRegionRole: Equatable {
@@ -480,11 +500,39 @@ struct SimpleFramebufferDisplayTests {
         let bootstrap = PlatformDriverBootstrap.discover(
             platform: Platform(
                 firmwareMailbox: mailbox,
-                simpleFramebuffer: framebuffer
+                simpleFramebuffer: framebuffer,
+                graphicsResources: PlatformGraphicsResources(
+                    resource0: DeviceResource(
+                        baseAddress: 0x20_0000,
+                        length: 0x4000
+                    ),
+                    resource1: DeviceResource(
+                        baseAddress: 0x21_0000,
+                        length: 0x6000
+                    ),
+                    resource2: DeviceResource(
+                        baseAddress: 0x22_0000,
+                        length: 0x700
+                    ),
+                    resource3: DeviceResource(
+                        baseAddress: 0x23_0000,
+                        length: 0x1a000
+                    )
+                )
             )
         )
         expect(bootstrap != nil, "platform driver discovery failed")
-        expect(bootstrap?.resources.mmioResourceCount == 1, "mailbox missing")
+        expect(
+            bootstrap?.resources.mmioResourceCount == 5,
+            "mailbox or graphics MMIO resources missing"
+        )
+        expect(
+            bootstrap?.resources.mmioResource(at: 1)?.baseAddress
+                == 0x20_0000
+                && bootstrap?.resources.mmioResource(at: 4)?.baseAddress
+                    == 0x23_0000,
+            "graphics MMIO order changed"
+        )
         expect(
             bootstrap?.resources.memoryResourceCount == 1,
             "framebuffer memory missing"
@@ -501,7 +549,8 @@ struct SimpleFramebufferDisplayTests {
                     height: 32,
                     stride: 128,
                     format: .r5g6b5
-                )
+                ),
+                graphicsResources: nil
             )
         )
         expect(

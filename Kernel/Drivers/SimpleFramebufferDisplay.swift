@@ -113,6 +113,17 @@ struct PlatformDriverBootstrap {
            !resources.append(mmio: mailbox) {
             return nil
         }
+        if let graphics = platform.graphicsResources {
+            var index = 0
+            while index < PlatformGraphicsResources.maximumMMIOResourceCount {
+                guard let resource = graphics.mmioResource(at: index),
+                      resources.append(mmio: resource)
+                else {
+                    return nil
+                }
+                index += 1
+            }
+        }
 
         var display: SimpleFramebufferDisplayDriver?
         if let description = platform.simpleFramebuffer {

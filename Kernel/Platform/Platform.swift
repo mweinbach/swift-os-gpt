@@ -61,9 +61,24 @@ enum GraphicsScanoutResourceDescription: Equatable {
 /// instead of reaching back into a board-specific Device Tree or assuming that
 /// renderer and scanout share one DMA address.
 struct PlatformGraphicsResources: Equatable {
+    static let maximumMMIOResourceCount = 4
+
     let renderer: GraphicsRendererResourceDescription
     let scanout: GraphicsScanoutResourceDescription
     let addressSpaces: GraphicsAddressSpaceRequirements
+
+    func mmioResource(at index: Int) -> DeviceResource? {
+        guard index >= 0, index < Self.maximumMMIOResourceCount else {
+            return nil
+        }
+        switch (renderer, scanout, index) {
+        case let (.v3dVII(registers), _, 0): return registers.hub
+        case let (.v3dVII(registers), _, 1): return registers.core0
+        case let (.v3dVII(registers), _, 2): return registers.sms
+        case let (_, .hvs(registers), 3): return registers.registers
+        default: return nil
+        }
+    }
 }
 
 struct Platform {
