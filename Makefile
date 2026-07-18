@@ -411,6 +411,16 @@ host-test:
 	$(BUILD_DIR)/virgl-command-encoder-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/GPU/GPUPrimitives.swift \
+		Kernel/Graphics/GPU/GPURenderCommands.swift \
+		Kernel/Graphics/GPU/GPUCommandBuffer.swift \
+		Kernel/Drivers/VirtIO/VirGLCommandEncoder.swift \
+		Kernel/Drivers/VirtIO/VirGLIRCompiler.swift \
+		Tests/Host/VirGLIRCompilerTests.swift \
+		-o $(BUILD_DIR)/virgl-ir-compiler-host-tests
+	$(BUILD_DIR)/virgl-ir-compiler-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Core/PhysicalBytes.swift \
 		Kernel/Drivers/VirtIO/VirtIOGPU3DProtocol.swift \
 		Kernel/Drivers/VirtIO/VirGLCapabilityParser.swift \
