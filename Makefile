@@ -433,12 +433,16 @@ host-test:
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/DisplayMemory.swift \
 		Kernel/Graphics/DamageRectangle.swift \
+		Kernel/Graphics/GPU/GPUPrimitives.swift \
+		Kernel/Graphics/GPU/GPURenderCommands.swift \
+		Kernel/Graphics/GPU/GPUCommandBuffer.swift \
 		Kernel/Drivers/VirtIO/VirtIOGPU.swift \
 		Kernel/Drivers/VirtIO/VirtIOGPU3DProtocol.swift \
 		Kernel/Drivers/VirtIO/VirtIOGPUDeviceConfiguration.swift \
 		Kernel/Drivers/VirtIO/VirtIOQueueBufferPair.swift \
 		Kernel/Drivers/VirtIO/VirGLCapabilityParser.swift \
 		Kernel/Drivers/VirtIO/VirGLCommandEncoder.swift \
+		Kernel/Drivers/VirtIO/VirGLIRCompiler.swift \
 		Kernel/Drivers/VirtIO/VirtIOGPU3DSession.swift \
 		Tests/Host/VirtIOGPU3DSessionTests.swift \
 		-o $(BUILD_DIR)/virtio-gpu-3d-session-host-tests

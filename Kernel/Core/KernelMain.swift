@@ -297,7 +297,7 @@ private func activateVirtIOGPU3D(
             blueBits: 0x3df5_c28f,
             alphaBits: 0x3f80_0000
         )
-        switch session.configureAndClear(color: clear) {
+        switch session.configureAndRenderDesktop(color: clear) {
         case .configured(let configuration):
             activeVirtIOGPU3DAllocation = allocation
             activeVirtIOGPU3DSession = session

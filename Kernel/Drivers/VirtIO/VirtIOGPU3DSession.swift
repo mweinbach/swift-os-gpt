@@ -1,8 +1,8 @@
-// The first complete SwiftOS accelerated rendering crossing for VirtIO-GPU.
-// The guest never allocates or uploads a pixel backing store: VirGL creates and
-// clears a host-private render target, and VirtIO-GPU scans that resource out.
-// Every controlq operation is fenced and completed before dependent state is
-// published.
+// The complete SwiftOS accelerated rendering crossing for VirtIO-GPU. The
+// guest never allocates or uploads a pixel backing store: VirGL renders the
+// retained desktop into a host-private sRGB target and VirtIO-GPU scans that
+// resource out. Every controlq operation is fenced and completed before
+// dependent state is published.
 
 struct VirtIOGPU3DClearColor: Equatable {
     let redBits: UInt32
@@ -17,6 +17,8 @@ struct VirtIOGPU3DSessionConfiguration: Equatable {
     let height: UInt32
     let contextID: UInt32
     let resourceID: UInt32
+    let unitQuadResourceID: UInt32
+    let colorSurfaceHandle: UInt32
     let capabilities: VirGLRendererCapabilities
     let completionFenceID: UInt64
 }
@@ -29,6 +31,8 @@ enum VirtIOGPU3DSessionError: Equatable {
     case fenceIDExhausted
     case protocolEncoding(commandType: UInt32)
     case commandEncoding(VirGLEncodeRejection)
+    case pipelineInitialization(VirGLIRPipelineInitializationRejection)
+    case renderLowering(VirGLIRLoweringRejection)
     case transport(VirtIOMMIORequestResult)
     case malformedResponse(commandType: UInt32)
     case noEnabledScanout
@@ -38,11 +42,17 @@ enum VirtIOGPU3DSessionError: Equatable {
     case capsetPayloadTooLarge
     case capabilityPayload(VirGLCapabilityParseRejection)
     case displayModeExceedsTextureLimit
+    case displayModeExceedsRendererCoordinates
     case commandStreamInvariant
 }
 
 enum VirtIOGPU3DSessionResult: Equatable {
     case configured(VirtIOGPU3DSessionConfiguration)
+    case failed(VirtIOGPU3DSessionError)
+}
+
+enum VirtIOGPU3DFrameResult: Equatable {
+    case presented(completionFenceID: UInt64)
     case failed(VirtIOGPU3DSessionError)
 }
 
@@ -57,29 +67,42 @@ private struct VirtIOGPU3DScanoutMode {
     let height: UInt32
 }
 
-/// Owns the strictly ordered bootstrap lifecycle for one VirGL context and one
-/// scanout resource. Copying this value would duplicate mutable transport and
-/// fence state, so callers must keep one mutable owner after construction.
+/// Owns one VirGL context, its GPU-only scanout target, immutable unit-quad
+/// geometry, and the reusable retained-renderer pipeline. Copying this value
+/// would duplicate mutable transport and fence state, so callers must keep one
+/// mutable owner after construction.
 struct VirtIOGPU3DSession {
     static let readyMarker: StaticString = "SWIFTOS:VIRTIO_GPU_3D_OK\n"
 
     // Values are fixed by the public VirGL/Gallium wire protocol pinned by
     // VirGLCommandEncoder and VirGLCapabilityParser.
     private static let texture2DTarget: UInt32 = 2
-    private static let b8g8r8x8UNorm: UInt32 = 2
+    private static let pipeBufferTarget: UInt32 = 0
+    private static let b8g8r8a8SRGB: UInt32 = 100
+    private static let r8UNorm: UInt32 = 64
     private static let renderTargetBind: UInt32 = 1 << 1
+    private static let vertexBufferBind: UInt32 = 1 << 4
     private static let scanoutBind: UInt32 = 1 << 18
     private static let colorAttachmentZeroMask: UInt32 = 1 << 2
+    private static let maximumRendererCoordinate: UInt32 = 32_767
+    private static let unitQuadByteCount: UInt32 = 48
+    private static let inlineWriteUsage: UInt32 = 0x82
 
     private static let contextID: UInt32 = 1
     private static let resourceID: UInt32 = 1
-    private static let colorSurfaceHandle: UInt32 = 1
+    private static let unitQuadResourceID: UInt32 = 2
+    private static let colorSurfaceHandle: UInt32 = 0x100
+    private static let vertexShaderHandle: UInt32 = 0x101
+    private static let fragmentShaderHandle: UInt32 = 0x102
+    private static let vertexElementsHandle: UInt32 = 0x103
+    private static let rasterizerHandle: UInt32 = 0x104
+    private static let depthStencilAlphaHandle: UInt32 = 0x105
+    private static let copyBlendHandle: UInt32 = 0x106
+    private static let sourceOverBlendHandle: UInt32 = 0x107
 
-    private static let commandDWordCount: UInt64 = 19
-    private static let commandByteCount: UInt64 = commandDWordCount * 4
+    private static let minimumCommandArenaByteCount: UInt64 = 4096
     private static let maximumSubmitRequestByteCount: UInt64 =
-        UInt64(VirtIOGPU3DWireLayout.submit3DHeaderByteCount)
-            + commandByteCount
+        minimumCommandArenaByteCount
     private static let maximumCapsetResponseByteCount: UInt64 =
         UInt64(VirtIOGPU3DWireLayout.controlHeaderByteCount)
             + UInt64(VirGLCapabilityWire.maximumVirGL2PayloadByteCount)
@@ -92,6 +115,9 @@ struct VirtIOGPU3DSession {
     private let protectedQueueMapping: DMAMapping
     private var nextFenceID: UInt64 = 1
     private(set) var isConfigured = false
+    private var activeConfiguration: VirtIOGPU3DSessionConfiguration?
+    private var activeFeatures: VirtIOGPU3DFeatures?
+    private var renderer: VirGLIRCompiler?
 
     init(
         transport: VirtIOMMIOTransport,
@@ -107,7 +133,7 @@ struct VirtIOGPU3DSession {
         self.protectedQueueMapping = protectedQueueMapping
     }
 
-    mutating func configureAndClear(
+    mutating func configureAndRenderDesktop(
         color: VirtIOGPU3DClearColor
     ) -> VirtIOGPU3DSessionResult {
         guard !isConfigured else { return .failed(.alreadyConfigured) }
@@ -154,10 +180,13 @@ struct VirtIOGPU3DSession {
             return abort(error)
         }
 
-        // Direct scanout requires the explicit VIRGL2 format mask. The legacy
-        // capset exposes neither that contract nor a 2D texture limit, so this
-        // production path rejects it instead of inferring either property.
-        guard capabilities.supportsB8G8R8X8Scanout else {
+        // Production compositing preserves attachment alpha and performs the
+        // linear-to-sRGB transfer in the GPU render target. Opaque format 101
+        // and linear format 2 cannot substitute for format 100.
+        guard capabilities.supportsB8G8R8A8SRGBRenderTarget else {
+            return abort(.capabilityPayload(.unsupportedRenderTargetFormat))
+        }
+        guard capabilities.supportsB8G8R8A8SRGBScanout else {
             return abort(.capabilityPayload(.unsupportedScanoutFormat))
         }
         if capabilities.hasExplicitTexture2DLimit,
@@ -167,17 +196,62 @@ struct VirtIOGPU3DSession {
            ) {
             return abort(.displayModeExceedsTextureLimit)
         }
+        guard scanout.width <= Self.maximumRendererCoordinate,
+              scanout.height <= Self.maximumRendererCoordinate
+        else {
+            return abort(.displayModeExceedsRendererCoordinates)
+        }
+
+        guard let colorResource = VirtIOGPU3DResourceDescriptor(
+                  resourceID: Self.resourceID,
+                  target: Self.texture2DTarget,
+                  format: Self.b8g8r8a8SRGB,
+                  bind: Self.renderTargetBind | Self.scanoutBind,
+                  width: scanout.width,
+                  height: scanout.height,
+                  depth: 1,
+                  arraySize: 1,
+                  lastLevel: 0,
+                  sampleCount: 0,
+                  flags: VirtIOGPU3DResourceFlag.yOriginTop
+              ),
+              let unitQuadResource = VirtIOGPU3DResourceDescriptor(
+                  resourceID: Self.unitQuadResourceID,
+                  target: Self.pipeBufferTarget,
+                  format: Self.r8UNorm,
+                  bind: Self.vertexBufferBind,
+                  width: Self.unitQuadByteCount,
+                  height: 1,
+                  depth: 1,
+                  arraySize: 1,
+                  lastLevel: 0,
+                  sampleCount: 0,
+                  flags: 0
+              )
+        else {
+            return abort(.commandStreamInvariant)
+        }
 
         guard createContext(
                   capset: capabilities.capset,
                   features: features
               ),
               createResource(
-                  width: scanout.width,
-                  height: scanout.height,
+                  colorResource,
                   features: features
               ),
-              attachResource(features: features)
+              attachResource(
+                  resourceID: Self.resourceID,
+                  features: features
+              ),
+              createResource(
+                  unitQuadResource,
+                  features: features
+              ),
+              attachResource(
+                  resourceID: Self.unitQuadResourceID,
+                  features: features
+              )
         else {
             // Each helper already preserved its exact error in lastError.
             return abort(lastError ?? .protocolEncoding(
@@ -185,7 +259,19 @@ struct VirtIOGPU3DSession {
             ))
         }
 
-        switch encodeAndSubmitClear(color: color, features: features) {
+        switch encodeAndSubmitUnitQuad(features: features) {
+        case .success:
+            break
+        case .failure(let error):
+            return abort(error)
+        }
+
+        switch encodeAndSubmitDesktopFrame(
+            color: color,
+            scanout: scanout,
+            capabilities: capabilities,
+            features: features
+        ) {
         case .success:
             break
         case .failure(let error):
@@ -215,18 +301,80 @@ struct VirtIOGPU3DSession {
         }
 
         let completionFenceID = nextFenceID - 1
-        isConfigured = true
-        return .configured(
-            VirtIOGPU3DSessionConfiguration(
-                scanoutID: scanout.id,
-                width: scanout.width,
-                height: scanout.height,
-                contextID: Self.contextID,
-                resourceID: Self.resourceID,
-                capabilities: capabilities,
-                completionFenceID: completionFenceID
-            )
+        let sessionConfiguration = VirtIOGPU3DSessionConfiguration(
+            scanoutID: scanout.id,
+            width: scanout.width,
+            height: scanout.height,
+            contextID: Self.contextID,
+            resourceID: Self.resourceID,
+            unitQuadResourceID: Self.unitQuadResourceID,
+            colorSurfaceHandle: Self.colorSurfaceHandle,
+            capabilities: capabilities,
+            completionFenceID: completionFenceID
         )
+        activeConfiguration = sessionConfiguration
+        activeFeatures = features
+        isConfigured = true
+        return .configured(sessionConfiguration)
+    }
+
+    /// Lowers one immutable device-neutral command buffer into the already
+    /// initialized VirGL pipeline, submits it to the GPU, and presents only
+    /// the declared damage. No pixel backing store or CPU raster path exists
+    /// in this API.
+    mutating func render(
+        _ commandBuffer: GPURenderCommandBuffer,
+        damage requestedDamage: VirtIOGPURectangle? = nil
+    ) -> VirtIOGPU3DFrameResult {
+        guard isConfigured,
+              let configuration = activeConfiguration,
+              let features = activeFeatures,
+              var activeRenderer = renderer,
+              var arena = makeCommandArena(),
+              let target = makeRenderTarget(
+                  width: configuration.width,
+                  height: configuration.height
+              )
+        else {
+            return failFrame(.invalidMemoryLayout)
+        }
+        let damage = requestedDamage ?? VirtIOGPURectangle(
+            x: 0,
+            y: 0,
+            width: configuration.width,
+            height: configuration.height
+        )
+        guard damageFits(
+                  damage,
+                  width: configuration.width,
+                  height: configuration.height
+              )
+        else {
+            return failFrame(.commandStreamInvariant)
+        }
+        switch activeRenderer.lower(
+            commandBuffer,
+            renderTarget: target,
+            into: &arena
+        ) {
+        case .lowered:
+            break
+        case .rejected(let rejection):
+            return failFrame(.renderLowering(rejection))
+        }
+        switch submit(arena: arena, features: features) {
+        case .success:
+            break
+        case .failure(let error):
+            return failFrame(error)
+        }
+        switch flush(rectangle: damage) {
+        case .success:
+            renderer = activeRenderer
+            return .presented(completionFenceID: nextFenceID - 1)
+        case .failure(let error):
+            return failFrame(error)
+        }
     }
 
     private var lastError: VirtIOGPU3DSessionError?
@@ -531,28 +679,10 @@ struct VirtIOGPU3DSession {
     }
 
     private mutating func createResource(
-        width: UInt32,
-        height: UInt32,
+        _ resource: VirtIOGPU3DResourceDescriptor,
         features: VirtIOGPU3DFeatures
     ) -> Bool {
         let commandType = VirtIOGPU3DControlType.resourceCreate3D
-        guard let resource = VirtIOGPU3DResourceDescriptor(
-                  resourceID: Self.resourceID,
-                  target: Self.texture2DTarget,
-                  format: Self.b8g8r8x8UNorm,
-                  bind: Self.renderTargetBind | Self.scanoutBind,
-                  width: width,
-                  height: height,
-                  depth: 1,
-                  arraySize: 1,
-                  lastLevel: 0,
-                  sampleCount: 0,
-                  flags: VirtIOGPU3DResourceFlag.yOriginTop
-              )
-        else {
-            lastError = .protocolEncoding(commandType: commandType)
-            return false
-        }
         guard let fence = takeFence() else {
             lastError = .fenceIDExhausted
             return false
@@ -594,6 +724,7 @@ struct VirtIOGPU3DSession {
     }
 
     private mutating func attachResource(
+        resourceID: UInt32,
         features: VirtIOGPU3DFeatures
     ) -> Bool {
         let commandType = VirtIOGPU3DControlType.contextAttachResource
@@ -623,7 +754,7 @@ struct VirtIOGPU3DSession {
         }
         guard VirtIOGPU3DProtocol.writeContextAttachResource(
                   header: header,
-                  resourceID: Self.resourceID,
+                  resourceID: resourceID,
                   at: requestMapping.cpuPhysicalAddress,
                   capacity: byteCount
               ) == byteCount
@@ -638,27 +769,74 @@ struct VirtIOGPU3DSession {
         )
     }
 
-    private mutating func encodeAndSubmitClear(
-        color: VirtIOGPU3DClearColor,
+    private mutating func encodeAndSubmitUnitQuad(
         features: VirtIOGPU3DFeatures
     ) -> OperationResult {
-        guard let storage = UnsafeMutablePointer<UInt32>(
-                  bitPattern: UInt(commandArenaMapping.cpuPhysicalAddress)
+        guard var arena = makeCommandArena(),
+              let box = VirGLTextureBox(
+                  x: 0,
+                  y: 0,
+                  z: 0,
+                  width: Self.unitQuadByteCount,
+                  height: 1,
+                  depth: 1
               ),
-              var arena = VirGLDWordArena(
-                  storage: UnsafeMutableBufferPointer(
-                      start: storage,
-                      count: Int(commandArenaMapping.byteCount / 4)
-                  )
+              let blockLayout = VirGLTransferBlockLayout(
+                  blockWidth: 1,
+                  blockHeight: 1,
+                  blockDepth: 1,
+                  bytesPerBlock: 1
               )
         else {
             return .failure(.invalidMemoryLayout)
         }
 
+        let zero = Float(0).bitPattern
+        let one = Float(1).bitPattern
+        var vertices = (
+            zero, zero,
+            one, zero,
+            zero, one,
+            zero, one,
+            one, zero,
+            one, one
+        )
+        let encodeResult = withUnsafeBytes(of: &vertices) { bytes in
+            arena.encodeResourceInlineWrite(
+                resourceHandle: Self.unitQuadResourceID,
+                level: 0,
+                usage: Self.inlineWriteUsage,
+                stride: 0,
+                layerStride: 0,
+                box: box,
+                blockLayout: blockLayout,
+                bytes: bytes
+            )
+        }
+        switch encodeResult {
+        case .encoded(let start, let count):
+            guard start == 0, count == 24, arena.dwordCount == 24 else {
+                return .failure(.commandStreamInvariant)
+            }
+        case .rejected(let rejection):
+            return .failure(.commandEncoding(rejection))
+        }
+        return submit(arena: arena, features: features)
+    }
+
+    private mutating func encodeAndSubmitDesktopFrame(
+        color: VirtIOGPU3DClearColor,
+        scanout: VirtIOGPU3DScanoutMode,
+        capabilities: VirGLRendererCapabilities,
+        features: VirtIOGPU3DFeatures
+    ) -> OperationResult {
+        guard var arena = makeCommandArena() else {
+            return .failure(.invalidMemoryLayout)
+        }
         switch arena.encodeCreateSurface(
             handle: Self.colorSurfaceHandle,
             resourceHandle: Self.resourceID,
-            format: Self.b8g8r8x8UNorm,
+            format: Self.b8g8r8a8SRGB,
             view: .texture(level: 0, firstLayer: 0, lastLayer: 0)
         ) {
         case .encoded:
@@ -678,13 +856,9 @@ struct VirtIOGPU3DSession {
                 depthStencilSurfaceHandle: nil
             )
         }
-        switch framebufferResult {
-        case .encoded:
-            break
-        case .rejected(let rejection):
+        if case .rejected(let rejection) = framebufferResult {
             return .failure(.commandEncoding(rejection))
         }
-
         guard let clear = VirGLClearValue(
                   bufferMask: Self.colorAttachmentZeroMask,
                   color0Bits: color.redBits,
@@ -697,14 +871,77 @@ struct VirtIOGPU3DSession {
         else {
             return .failure(.commandEncoding(.invalidState))
         }
-        switch arena.encodeClear(clear) {
-        case .encoded:
-            break
-        case .rejected(let rejection):
+        if case .rejected(let rejection) = arena.encodeClear(clear) {
             return .failure(.commandEncoding(rejection))
         }
 
-        guard arena.dwordCount == Int(Self.commandDWordCount),
+        guard let handles = VirGLIRPipelineHandles(
+                  vertexShader: Self.vertexShaderHandle,
+                  fragmentShader: Self.fragmentShaderHandle,
+                  vertexElements: Self.vertexElementsHandle,
+                  rasterizer: Self.rasterizerHandle,
+                  depthStencilAlpha: Self.depthStencilAlphaHandle,
+                  copyBlend: Self.copyBlendHandle,
+                  sourceOverBlend: Self.sourceOverBlendHandle,
+                  unitQuadVertexResource: Self.unitQuadResourceID
+              )
+        else {
+            return .failure(.commandStreamInvariant)
+        }
+        let contextCapabilities = VirGLContextCapabilities(
+            capsetID: capabilities.capset.kind.rawValue,
+            capsetVersion: capabilities.capset.version,
+            capabilityBits: capabilities.capabilityBits,
+            capabilityBitsV2: capabilities.capabilityBitsV2
+        )
+        var compiler = VirGLIRCompiler(
+            configuration: VirGLIRPipelineConfiguration(
+                capabilities: contextCapabilities,
+                handles: handles,
+                unitQuadVertexLayout: .r32g32Float
+            )
+        )
+        switch compiler.initializePipeline(into: &arena) {
+        case .initialized:
+            break
+        case .rejected(let rejection):
+            return .failure(.pipelineInitialization(rejection))
+        }
+        guard let renderTarget = makeRenderTarget(
+                  width: scanout.width,
+                  height: scanout.height
+              ),
+              let commandBuffer = makeInitialDesktopCommandBuffer(
+                  width: scanout.width,
+                  height: scanout.height
+              )
+        else {
+            return .failure(.commandStreamInvariant)
+        }
+        switch compiler.lower(
+            commandBuffer,
+            renderTarget: renderTarget,
+            into: &arena
+        ) {
+        case .lowered:
+            break
+        case .rejected(let rejection):
+            return .failure(.renderLowering(rejection))
+        }
+        switch submit(arena: arena, features: features) {
+        case .success:
+            renderer = compiler
+            return .success
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
+    private mutating func submit(
+        arena: VirGLDWordArena,
+        features: VirtIOGPU3DFeatures
+    ) -> OperationResult {
+        guard arena.dwordCount > 0,
               arena.dwordCount <= Int(UInt32.max / 4)
         else {
             return .failure(.commandStreamInvariant)
@@ -724,8 +961,13 @@ struct VirtIOGPU3DSession {
             ))
         }
         let commandByteCount = UInt32(arena.dwordCount * 4)
-        let requestByteCount =
-            VirtIOGPU3DWireLayout.submit3DHeaderByteCount + commandByteCount
+        let requestByteCountResult =
+            VirtIOGPU3DWireLayout.submit3DHeaderByteCount
+                .addingReportingOverflow(commandByteCount)
+        guard !requestByteCountResult.overflow else {
+            return .failure(.commandStreamInvariant)
+        }
+        let requestByteCount = requestByteCountResult.partialValue
         guard prepareTransaction(
                   requestByteCount: requestByteCount,
                   responseCapacity:
@@ -757,6 +999,226 @@ struct VirtIOGPU3DSession {
         return .failure(lastError ?? .malformedResponse(
             commandType: VirtIOGPU3DControlType.submit3D
         ))
+    }
+
+    private func makeCommandArena() -> VirGLDWordArena? {
+        guard let storage = UnsafeMutablePointer<UInt32>(
+                  bitPattern: UInt(commandArenaMapping.cpuPhysicalAddress)
+              ),
+              requestMapping.byteCount
+                > UInt64(VirtIOGPU3DWireLayout.submit3DHeaderByteCount)
+        else {
+            return nil
+        }
+        let requestCommandCapacity = requestMapping.byteCount
+            - UInt64(VirtIOGPU3DWireLayout.submit3DHeaderByteCount)
+        let usableByteCount = commandArenaMapping.byteCount
+                < requestCommandCapacity
+            ? commandArenaMapping.byteCount
+            : requestCommandCapacity
+        return VirGLDWordArena(
+            storage: UnsafeMutableBufferPointer(
+                start: storage,
+                count: Int(usableByteCount / 4)
+            )
+        )
+    }
+
+    private func makeRenderTarget(
+        width: UInt32,
+        height: UInt32
+    ) -> VirGLIRRenderTarget? {
+        guard let targetID = GPURenderTargetID(rawValue: Self.resourceID),
+              let extent = GPUPixelExtent(width: width, height: height)
+        else {
+            return nil
+        }
+        return VirGLIRRenderTarget(
+            id: targetID,
+            surfaceHandle: Self.colorSurfaceHandle,
+            extent: extent,
+            format: .bgra8UNormSRGB,
+            virglSurfaceFormat: Self.b8g8r8a8SRGB
+        )
+    }
+
+    private func makeInitialDesktopCommandBuffer(
+        width: UInt32,
+        height: UInt32
+    ) -> GPURenderCommandBuffer? {
+        guard width >= 320,
+              height >= 200,
+              let targetID = GPURenderTargetID(rawValue: Self.resourceID),
+              let extent = GPUPixelExtent(width: width, height: height),
+              let commandID = GPUCommandBufferID(rawValue: 1),
+              var recorder = GPUCommandRecorder(id: commandID, capacity: 7)
+        else {
+            return nil
+        }
+        let pass = GPURenderPassDescriptor(
+            target: targetID,
+            extent: extent,
+            format: .bgra8UNormSRGB,
+            loadAction: .load,
+            storeAction: .store
+        )
+        guard Self.record(.beginRenderPass(pass), into: &recorder) else {
+            return nil
+        }
+
+        let topBarHeight = height / 18
+        let panelX = width / 12
+        let panelY = height / 7
+        let panelWidth = width - panelX * 2
+        let panelHeight = height - panelY - height / 9
+        let sidebarWidth = panelWidth / 4
+        let innerMargin = panelWidth / 40
+        let cardX = panelX + sidebarWidth + innerMargin
+        let cardWidth = panelWidth - sidebarWidth - innerMargin * 2
+        let cardHeight = panelHeight / 5
+        let dockWidth = width / 3
+        let dockHeight = height / 18
+        let dockX = (width - dockWidth) / 2
+        let dockY = height - dockHeight - height / 30
+
+        guard let topBar = Self.quad(
+                  x: 0,
+                  y: 0,
+                  width: width,
+                  height: topBarHeight,
+                  red: 0x0800,
+                  green: 0x0c00,
+                  blue: 0x1800,
+                  alpha: 0xe000
+              ),
+              let panel = Self.quad(
+                  x: panelX,
+                  y: panelY,
+                  width: panelWidth,
+                  height: panelHeight,
+                  red: 0x1200,
+                  green: 0x1800,
+                  blue: 0x2800,
+                  alpha: 0xf000
+              ),
+              let sidebar = Self.quad(
+                  x: panelX,
+                  y: panelY,
+                  width: sidebarWidth,
+                  height: panelHeight,
+                  red: 0x0800,
+                  green: 0x1000,
+                  blue: 0x2000,
+                  alpha: 0xd800
+              ),
+              let accentCard = Self.quad(
+                  x: cardX,
+                  y: panelY + innerMargin,
+                  width: cardWidth,
+                  height: cardHeight,
+                  red: 0x1000,
+                  green: 0x7000,
+                  blue: 0x9000,
+                  alpha: 0xf000
+              ),
+              let dock = Self.quad(
+                  x: dockX,
+                  y: dockY,
+                  width: dockWidth,
+                  height: dockHeight,
+                  red: 0x1800,
+                  green: 0x2000,
+                  blue: 0x3400,
+                  alpha: 0xd000
+              )
+        else {
+            return nil
+        }
+        guard Self.record(.drawQuad(topBar), into: &recorder),
+              Self.record(.drawQuad(panel), into: &recorder),
+              Self.record(.drawQuad(sidebar), into: &recorder),
+              Self.record(.drawQuad(accentCard), into: &recorder),
+              Self.record(.drawQuad(dock), into: &recorder),
+              Self.record(.endRenderPass, into: &recorder)
+        else {
+            return nil
+        }
+        guard case .sealed(let commandBuffer) = recorder.seal() else {
+            return nil
+        }
+        return commandBuffer
+    }
+
+    private static func quad(
+        x: UInt32,
+        y: UInt32,
+        width: UInt32,
+        height: UInt32,
+        red: UInt16,
+        green: UInt16,
+        blue: UInt16,
+        alpha: UInt16
+    ) -> GPUQuadInstance? {
+        guard let fixedX = GPUFixed16(whole: Int(x)),
+              let fixedY = GPUFixed16(whole: Int(y)),
+              let fixedWidth = GPUFixed16(whole: Int(width)),
+              let fixedHeight = GPUFixed16(whole: Int(height)),
+              let bounds = GPUFixedRectangle(
+                  x: fixedX,
+                  y: fixedY,
+                  width: fixedWidth,
+                  height: fixedHeight
+              ),
+              let color = GPUPremultipliedColor(
+                  red: red,
+                  green: green,
+                  blue: blue,
+                  alpha: alpha
+              )
+        else {
+            return nil
+        }
+        return GPUQuadInstance(
+            bounds: bounds,
+            color: color,
+            blendMode: .sourceOver
+        )
+    }
+
+    private static func record(
+        _ command: GPURenderCommand,
+        into recorder: inout GPUCommandRecorder
+    ) -> Bool {
+        if case .recorded = recorder.record(command) { return true }
+        return false
+    }
+
+    private func damageFits(
+        _ damage: VirtIOGPURectangle,
+        width: UInt32,
+        height: UInt32
+    ) -> Bool {
+        guard damage.width != 0, damage.height != 0 else { return false }
+        let endX = damage.x.addingReportingOverflow(damage.width)
+        let endY = damage.y.addingReportingOverflow(damage.height)
+        return !endX.overflow
+            && !endY.overflow
+            && endX.partialValue <= width
+            && endY.partialValue <= height
+    }
+
+    private mutating func failFrame(
+        _ error: VirtIOGPU3DSessionError
+    ) -> VirtIOGPU3DFrameResult {
+        switch error {
+        case .transport, .malformedResponse, .fenceIDExhausted,
+             .protocolEncoding, .invalidMemoryLayout:
+            transport.failDevice()
+            isConfigured = false
+        default:
+            break
+        }
+        return .failed(error)
     }
 
     private mutating func setScanout(
@@ -938,7 +1400,8 @@ struct VirtIOGPU3DSession {
               responseMapping.coherency == .hardwareCoherent,
               protectedQueueMapping.coherency == .hardwareCoherent,
               commandArenaMapping.cpuPhysicalAddress & 3 == 0,
-              commandArenaMapping.byteCount >= Self.commandByteCount,
+              commandArenaMapping.byteCount
+                >= Self.minimumCommandArenaByteCount,
               commandArenaMapping.byteCount / 4 <= UInt64(Int.max),
               requestMapping.byteCount
                 >= Self.maximumSubmitRequestByteCount,

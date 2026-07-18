@@ -234,6 +234,7 @@ struct VirGLIRCompiler {
         self.configuration = configuration
     }
 
+    @_optimize(none)
     mutating func initializePipeline(
         into arena: inout VirGLDWordArena
     ) -> VirGLIRPipelineInitializationResult {
@@ -269,6 +270,7 @@ struct VirGLIRCompiler {
         return .initialized(startDWord: start, dwordCount: encodedCount)
     }
 
+    @_optimize(none)
     mutating func lower(
         _ commandBuffer: GPURenderCommandBuffer,
         renderTarget: VirGLIRRenderTarget,
@@ -338,6 +340,7 @@ struct VirGLIRCompiler {
         return count
     }
 
+    @_optimize(none)
     private func preflight(
         _ commandBuffer: GPURenderCommandBuffer,
         renderTarget: VirGLIRRenderTarget
@@ -493,6 +496,12 @@ struct VirGLIRCompiler {
         )
     }
 
+    // Swift 6.2's Embedded optimizer can miscompile the large aggregate state
+    // setup when it is inlined into a live bare-metal submission path. Keep
+    // this protocol boundary explicit and cover its exact packet contents with
+    // host fixtures until the toolchain defect is fixed.
+    @_optimize(none)
+    @inline(never)
     private func encodePipelineInitialization(
         into arena: inout VirGLDWordArena
     ) -> VirGLEncodeRejection? {
@@ -659,6 +668,7 @@ struct VirGLIRCompiler {
         return nil
     }
 
+    @_optimize(none)
     private func encode(
         _ commandBuffer: GPURenderCommandBuffer,
         renderTarget: VirGLIRRenderTarget,
@@ -821,6 +831,7 @@ struct VirGLIRCompiler {
         return nil
     }
 
+    @_optimize(none)
     private func encodePipelineBindings(
         into arena: inout VirGLDWordArena
     ) -> VirGLEncodeRejection? {
@@ -869,6 +880,7 @@ struct VirGLIRCompiler {
         }
     }
 
+    @_optimize(none)
     private func encodeViewport(
         extent: GPUPixelExtent,
         into arena: inout VirGLDWordArena
@@ -893,6 +905,7 @@ struct VirGLIRCompiler {
         }
     }
 
+    @_optimize(none)
     private func encodeScissor(
         _ state: GPUScissorState,
         extent: GPUPixelExtent,
@@ -934,6 +947,7 @@ struct VirGLIRCompiler {
         }
     }
 
+    @_optimize(none)
     private func encodeQuadConstants(
         _ quad: GPUQuadInstance,
         transform: GPUTransform2D,

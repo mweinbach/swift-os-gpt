@@ -96,7 +96,7 @@ struct VirtIOMMIOTransport {
         step: Int
     ) -> Bool {
         let expectedType: UInt32
-        let expectedByteCount: UInt32
+        let expectedByteCount: UInt32?
         switch step {
         case 0:
             expectedType = VirtIOGPUControlType.getDisplayInfo
@@ -120,18 +120,33 @@ struct VirtIOMMIOTransport {
             expectedType = VirtIOGPU3DControlType.contextAttachResource
             expectedByteCount = 32
         case 7:
-            expectedType = VirtIOGPU3DControlType.submit3D
-            expectedByteCount = 108
+            expectedType = VirtIOGPU3DControlType.resourceCreate3D
+            expectedByteCount = 72
         case 8:
+            expectedType = VirtIOGPU3DControlType.contextAttachResource
+            expectedByteCount = 32
+        case 9:
+            expectedType = VirtIOGPU3DControlType.submit3D
+            expectedByteCount = 128
+        case 10:
+            expectedType = VirtIOGPU3DControlType.submit3D
+            expectedByteCount = nil
+        case 11:
             expectedType = VirtIOGPUControlType.setScanout
             expectedByteCount = 48
-        case 9:
+        case 12:
+            expectedType = VirtIOGPUControlType.resourceFlush
+            expectedByteCount = 48
+        case 13:
+            expectedType = VirtIOGPU3DControlType.submit3D
+            expectedByteCount = nil
+        case 14:
             expectedType = VirtIOGPUControlType.resourceFlush
             expectedByteCount = 48
         default:
             return false
         }
-        guard byteCount == expectedByteCount,
+        guard (expectedByteCount == nil || byteCount == expectedByteCount),
               PhysicalBytes.readLE32(at: address) == expectedType,
               PhysicalBytes.readLE32(at: address + 4)
                 & VirtIOGPUProtocol.fenceFlag != 0,
@@ -161,7 +176,7 @@ struct VirtIOMMIOTransport {
             return PhysicalBytes.readLE32(at: address + 16) == 0
                 && PhysicalBytes.readLE32(at: address + 24) == 1
                 && PhysicalBytes.readLE32(at: address + 28) == 2
-                && PhysicalBytes.readLE32(at: address + 32) == 2
+                && PhysicalBytes.readLE32(at: address + 32) == 100
                 && PhysicalBytes.readLE32(at: address + 36) == 0x0004_0002
                 && PhysicalBytes.readLE32(at: address + 40) == 1_920
                 && PhysicalBytes.readLE32(at: address + 44) == 1_080
@@ -174,12 +189,42 @@ struct VirtIOMMIOTransport {
             return PhysicalBytes.readLE32(at: address + 16) == 1
                 && PhysicalBytes.readLE32(at: address + 24) == 1
         case 7:
-            return submitCommandStreamIsValid(at: address)
+            return PhysicalBytes.readLE32(at: address + 16) == 0
+                && PhysicalBytes.readLE32(at: address + 24) == 2
+                && PhysicalBytes.readLE32(at: address + 28) == 0
+                && PhysicalBytes.readLE32(at: address + 32) == 64
+                && PhysicalBytes.readLE32(at: address + 36) == 0x10
+                && PhysicalBytes.readLE32(at: address + 40) == 48
+                && PhysicalBytes.readLE32(at: address + 44) == 1
+                && PhysicalBytes.readLE32(at: address + 48) == 1
+                && PhysicalBytes.readLE32(at: address + 52) == 1
+                && PhysicalBytes.readLE32(at: address + 56) == 0
+                && PhysicalBytes.readLE32(at: address + 60) == 0
+                && PhysicalBytes.readLE32(at: address + 64) == 0
         case 8:
+            return PhysicalBytes.readLE32(at: address + 16) == 1
+                && PhysicalBytes.readLE32(at: address + 24) == 2
+        case 9:
+            return unitQuadUploadIsValid(at: address)
+        case 10:
+            return initialRenderCommandStreamIsValid(
+                at: address,
+                requestByteCount: byteCount
+            )
+        case 11:
             return rectangleIsFullDisplay(at: address + 24)
                 && PhysicalBytes.readLE32(at: address + 40) == 0
                 && PhysicalBytes.readLE32(at: address + 44) == 1
-        case 9:
+        case 12:
+            return rectangleIsFullDisplay(at: address + 24)
+                && PhysicalBytes.readLE32(at: address + 40) == 1
+                && PhysicalBytes.readLE32(at: address + 44) == 0
+        case 13:
+            return subsequentRenderCommandStreamIsValid(
+                at: address,
+                requestByteCount: byteCount
+            )
+        case 14:
             return rectangleIsFullDisplay(at: address + 24)
                 && PhysicalBytes.readLE32(at: address + 40) == 1
                 && PhysicalBytes.readLE32(at: address + 44) == 0
@@ -188,31 +233,125 @@ struct VirtIOMMIOTransport {
         }
     }
 
-    private func submitCommandStreamIsValid(at address: UInt64) -> Bool {
+    private func unitQuadUploadIsValid(at address: UInt64) -> Bool {
+        let expected: [UInt32] = [
+            0x0017_0009,
+            2, 0, 0x82, 0, 0,
+            0, 0, 0, 48, 1, 1,
+            0, 0,
+            0x3f80_0000, 0,
+            0, 0x3f80_0000,
+            0, 0x3f80_0000,
+            0x3f80_0000, 0,
+            0x3f80_0000, 0x3f80_0000,
+        ]
         guard PhysicalBytes.readLE32(at: address + 16) == 1,
-              PhysicalBytes.readLE32(at: address + 24) == 76
+              PhysicalBytes.readLE32(at: address + 24) == 96
+        else {
+            return false
+        }
+        var index = 0
+        while index < expected.count {
+            if PhysicalBytes.readLE32(
+                at: address + 32 + UInt64(index * 4)
+            ) != expected[index] {
+                return false
+            }
+            index += 1
+        }
+        return true
+    }
+
+    private func initialRenderCommandStreamIsValid(
+        at address: UInt64,
+        requestByteCount: UInt32
+    ) -> Bool {
+        guard PhysicalBytes.readLE32(at: address + 16) == 1,
+              requestByteCount > 32,
+              PhysicalBytes.readLE32(at: address + 24)
+                == requestByteCount - 32
         else {
             return false
         }
         let stream = address + 32
-        let createSurfaceHeader: UInt32 = 1 | (8 << 8) | (5 << 16)
-        let framebufferHeader: UInt32 = 5 | (3 << 16)
-        let clearHeader: UInt32 = 7 | (8 << 16)
-        return PhysicalBytes.readLE32(at: stream) == createSurfaceHeader
-            && PhysicalBytes.readLE32(at: stream + 4) == 1
-            && PhysicalBytes.readLE32(at: stream + 8) == 1
-            && PhysicalBytes.readLE32(at: stream + 12) == 2
-            && PhysicalBytes.readLE32(at: stream + 24)
-                == framebufferHeader
-            && PhysicalBytes.readLE32(at: stream + 28) == 1
-            && PhysicalBytes.readLE32(at: stream + 32) == 0
-            && PhysicalBytes.readLE32(at: stream + 36) == 1
-            && PhysicalBytes.readLE32(at: stream + 40) == clearHeader
-            && PhysicalBytes.readLE32(at: stream + 44) == 4
-            && PhysicalBytes.readLE32(at: stream + 48) == 0x3e80_0000
-            && PhysicalBytes.readLE32(at: stream + 52) == 0x3f00_0000
-            && PhysicalBytes.readLE32(at: stream + 56) == 0x3f40_0000
-            && PhysicalBytes.readLE32(at: stream + 60) == 0x3f80_0000
+        let commandByteCount = requestByteCount - 32
+        var offset: UInt32 = 0
+        var surfaceCount = 0
+        var framebufferCount = 0
+        var clearCount = 0
+        var vertexBufferCount = 0
+        var drawCount = 0
+        var inlineWriteCount = 0
+        while offset < commandByteCount {
+            let packet = stream + UInt64(offset)
+            let header = PhysicalBytes.readLE32(at: packet)
+            let payloadDWords = header >> 16
+            let packetByteCount = (payloadDWords + 1) * 4
+            guard packetByteCount > 4,
+                  packetByteCount <= commandByteCount - offset
+            else {
+                return false
+            }
+            let command = UInt8(truncatingIfNeeded: header)
+            let objectType = UInt8(truncatingIfNeeded: header >> 8)
+            switch command {
+            case 1 where objectType == 8:
+                surfaceCount += 1
+                guard PhysicalBytes.readLE32(at: packet + 4) == 0x100,
+                      PhysicalBytes.readLE32(at: packet + 8) == 1,
+                      PhysicalBytes.readLE32(at: packet + 12) == 100
+                else {
+                    return false
+                }
+            case 5:
+                framebufferCount += 1
+            case 6:
+                vertexBufferCount += 1
+                guard PhysicalBytes.readLE32(at: packet + 4) == 8,
+                      PhysicalBytes.readLE32(at: packet + 8) == 0,
+                      PhysicalBytes.readLE32(at: packet + 12) == 2
+                else {
+                    return false
+                }
+            case 7:
+                clearCount += 1
+            case 8:
+                drawCount += 1
+                guard PhysicalBytes.readLE32(at: packet + 8) == 6,
+                      PhysicalBytes.readLE32(at: packet + 12) == 4
+                else {
+                    return false
+                }
+            case 9:
+                inlineWriteCount += 1
+            default:
+                break
+            }
+            offset += packetByteCount
+        }
+        return offset == commandByteCount
+            && surfaceCount == 1
+            && framebufferCount == 2
+            && clearCount == 1
+            && vertexBufferCount == 1
+            && drawCount == 5
+            && inlineWriteCount == 0
+    }
+
+    private func subsequentRenderCommandStreamIsValid(
+        at address: UInt64,
+        requestByteCount: UInt32
+    ) -> Bool {
+        guard PhysicalBytes.readLE32(at: address + 16) == 1,
+              requestByteCount == 132,
+              PhysicalBytes.readLE32(at: address + 24) == 100
+        else {
+            return false
+        }
+        let stream = address + 32
+        return PhysicalBytes.readLE32(at: stream) == 0x0003_0005
+            && PhysicalBytes.readLE32(at: stream + 12) == 0x100
+            && PhysicalBytes.readLE32(at: stream + 64) == 0x0008_0007
     }
 
     private func rectangleIsFullDisplay(at address: UInt64) -> Bool {
@@ -294,11 +433,13 @@ struct VirtIOMMIOTransport {
     private func writeValidVirGL2Capabilities(at address: UInt64) {
         PhysicalBytes.writeLE32(2, at: address)
         PhysicalBytes.writeLE32(1 << 2, at: address + 17 * 4)
+        PhysicalBytes.writeLE32(1 << 4, at: address + 20 * 4)
         PhysicalBytes.writeLE32(120, at: address + 66 * 4)
         PhysicalBytes.writeLE32(8, at: address + 70 * 4)
         PhysicalBytes.writeLE32(1 << 4, at: address + 72 * 4)
         PhysicalBytes.writeLE32(8_192, at: address + 121 * 4)
         PhysicalBytes.writeLE32(1 << 2, at: address + 156 * 4)
+        PhysicalBytes.writeLE32(1 << 4, at: address + 159 * 4)
     }
 }
 
@@ -310,7 +451,8 @@ struct VirtIOGPU3DSessionTests {
         testTransportFailureIsExact()
         testFencedResponseIsRequired()
         testEnabledScanoutIsRequired()
-        print("VirtIO-GPU 3D session host tests: 5 groups passed")
+        testReusableFrameSubmission()
+        print("VirtIO-GPU 3D session host tests: 6 groups passed")
     }
 
     private static func testGPUClearCrossing() {
@@ -322,7 +464,7 @@ struct VirtIOGPU3DSessionTests {
                 queue: queue,
                 behavior: .normal
             )
-            let result = session.configureAndClear(color: testColor)
+            let result = session.configureAndRenderDesktop(color: testColor)
             guard case .configured(let configured) = result else {
                 fatalError("valid GPU clear crossing failed: \(result)")
             }
@@ -332,7 +474,10 @@ struct VirtIOGPU3DSessionTests {
                 "display mode was not preserved"
             )
             expect(
-                configured.contextID == 1 && configured.resourceID == 1,
+                configured.contextID == 1
+                    && configured.resourceID == 1
+                    && configured.unitQuadResourceID == 2
+                    && configured.colorSurfaceHandle == 0x100,
                 "nonzero object identifiers were not preserved"
             )
             expect(
@@ -340,12 +485,12 @@ struct VirtIOGPU3DSessionTests {
                 "VIRGL2 capset was not selected"
             )
             expect(
-                configured.completionFenceID == 10,
-                "dependent operation did not complete on the tenth fence"
+                configured.completionFenceID == 13,
+                "dependent operation did not complete on the thirteenth fence"
             )
             expect(session.isConfigured, "configured state was not published")
             expect(
-                session.configureAndClear(color: testColor)
+                session.configureAndRenderDesktop(color: testColor)
                     == .failed(.alreadyConfigured),
                 "configured session accepted a second bootstrap"
             )
@@ -363,7 +508,7 @@ struct VirtIOGPU3DSessionTests {
                 negotiatedFeatures: 0
             )
             expect(
-                missingFeature.configureAndClear(color: testColor)
+                missingFeature.configureAndRenderDesktop(color: testColor)
                     == .failed(.invalidNegotiatedFeatures),
                 "session accepted a transport without VIRGL"
             )
@@ -376,7 +521,7 @@ struct VirtIOGPU3DSessionTests {
                 behavior: .normal
             )
             expect(
-                overlapping.configureAndClear(color: testColor)
+                overlapping.configureAndRenderDesktop(color: testColor)
                     == .failed(.invalidMemoryLayout),
                 "session accepted aliased command and request arenas"
             )
@@ -390,12 +535,12 @@ struct VirtIOGPU3DSessionTests {
                 request: request,
                 response: response,
                 queue: queue,
-                behavior: .timeoutAt(step: 7)
+                behavior: .timeoutAt(step: 9)
             )
             expect(
-                session.configureAndClear(color: testColor)
+                session.configureAndRenderDesktop(color: testColor)
                     == .failed(.transport(.timedOut)),
-                "SUBMIT_3D timeout lost its transport error"
+                "unit-quad SUBMIT_3D timeout lost its transport error"
             )
             expect(!session.isConfigured, "failed session was published")
         }
@@ -408,10 +553,10 @@ struct VirtIOGPU3DSessionTests {
                 request: request,
                 response: response,
                 queue: queue,
-                behavior: .wrongFenceAt(step: 9)
+                behavior: .wrongFenceAt(step: 12)
             )
             expect(
-                session.configureAndClear(color: testColor)
+                session.configureAndRenderDesktop(color: testColor)
                     == .failed(.malformedResponse(
                         commandType: VirtIOGPUControlType.resourceFlush
                     )),
@@ -431,10 +576,56 @@ struct VirtIOGPU3DSessionTests {
                 behavior: .noEnabledScanout
             )
             expect(
-                session.configureAndClear(color: testColor)
+                session.configureAndRenderDesktop(color: testColor)
                     == .failed(.noEnabledScanout),
                 "disabled display was selected for scanout"
             )
+        }
+    }
+
+    private static func testReusableFrameSubmission() {
+        withMappings { command, request, response, queue in
+            var session = makeSession(
+                command: command,
+                request: request,
+                response: response,
+                queue: queue,
+                behavior: .normal
+            )
+            guard case .configured = session.configureAndRenderDesktop(
+                      color: testColor
+                  ),
+                  let target = GPURenderTargetID(rawValue: 1),
+                  let extent = GPUPixelExtent(width: 1_920, height: 1_080),
+                  let commandID = GPUCommandBufferID(rawValue: 2),
+                  var recorder = GPUCommandRecorder(id: commandID, capacity: 2)
+            else {
+                fatalError("reusable session bootstrap")
+            }
+            let pass = GPURenderPassDescriptor(
+                target: target,
+                extent: extent,
+                format: .bgra8UNormSRGB,
+                loadAction: .clear(.opaqueBlack),
+                storeAction: .store
+            )
+            expect(
+                recorder.record(.beginRenderPass(pass)) == .recorded(index: 0),
+                "record reusable frame pass"
+            )
+            expect(
+                recorder.record(.endRenderPass) == .recorded(index: 1),
+                "record reusable frame end"
+            )
+            guard case .sealed(let frame) = recorder.seal() else {
+                fatalError("seal reusable frame")
+            }
+            expect(
+                session.render(frame)
+                    == .presented(completionFenceID: 15),
+                "reusable GPU frame was not submitted and flushed"
+            )
+            expect(session.isConfigured, "successful frame invalidated session")
         }
     }
 

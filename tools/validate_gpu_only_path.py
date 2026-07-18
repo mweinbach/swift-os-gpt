@@ -64,7 +64,7 @@ def main() -> int:
         "allocateClassifiedPages",
         "VirtIOGPU3DBootstrapMemory",
         "VirtIOGPU3DSession",
-        "configureAndClear",
+        "configureAndRenderDesktop",
         "VirtIOGPU3DSession.readyMarker",
         "SWIFTOS:GPU_FRAME_READY",
     )
