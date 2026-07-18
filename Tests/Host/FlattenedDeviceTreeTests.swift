@@ -51,6 +51,23 @@ struct FlattenedDeviceTreeTests {
                 "memory resource mismatch"
             )
             expect(
+                tree.resource(deviceType: "memory", registerIndex: 1)
+                    == DeviceResource(baseAddress: 0x1_0000_0000, length: 0x4000_0000),
+                "second memory tuple mismatch"
+            )
+            expect(
+                tree.reservedMemoryResource()
+                    == DeviceResource(baseAddress: 0x5f00_0000, length: 0x10_0000),
+                "reserved-memory resource mismatch"
+            )
+            expect(
+                tree.firmwareReservation(at: 0)
+                    == DeviceResource(baseAddress: 0x4100_0000, length: 0x1_0000),
+                "firmware reservation mismatch"
+            )
+            expect(tree.firmwareReservation(at: 1) == nil,
+                   "reservation terminator was ignored")
+            expect(
                 tree.resource(deviceType: "cpu")
                     == DeviceResource(baseAddress: 0x100, length: 0),
                 "CPU affinity resource mismatch"
@@ -68,6 +85,16 @@ struct FlattenedDeviceTreeTests {
             expect(platform?.kind == .qemuVirt, "QEMU platform mismatch")
             expect(platform?.processorCount == 1, "processor count mismatch")
             expect(platform?.processorAffinity(at: 0) == 0x100, "CPU affinity mismatch")
+            expect(
+                platform?.memoryRegion(at: 1)
+                    == DeviceResource(baseAddress: 0x1_0000_0000, length: 0x4000_0000),
+                "platform did not flatten memory tuples"
+            )
+            expect(
+                platform?.reservedMemoryRegion(at: 0)
+                    == DeviceResource(baseAddress: 0x5f00_0000, length: 0x10_0000),
+                "platform reserved-memory mismatch"
+            )
             expect(
                 platform?.interruptController == .gicV3(
                     distributor: DeviceResource(
@@ -159,9 +186,23 @@ private func makeDeviceTree() -> [UInt8] {
     )
     appendProperty(
         nameOffset: offsets["reg"]!,
-        value: be32(0) + be32(0x4000_0000) + be32(0) + be32(0x2000_0000),
+        value: be32(0) + be32(0x4000_0000) + be32(0) + be32(0x2000_0000)
+            + be32(1) + be32(0) + be32(0) + be32(0x4000_0000),
         to: &structure
     )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("reserved-memory", to: &structure)
+    appendProperty(nameOffset: offsets["#address-cells"]!, value: be32(2), to: &structure)
+    appendProperty(nameOffset: offsets["#size-cells"]!, value: be32(2), to: &structure)
+    appendProperty(nameOffset: offsets["ranges"]!, value: [], to: &structure)
+    appendBeginNode("firmware@5f000000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be32(0) + be32(0x5f00_0000) + be32(0) + be32(0x10_0000),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
     appendBE32(2, to: &structure)
 
     appendBeginNode("interrupt-controller@8000000", to: &structure)
@@ -222,8 +263,9 @@ private func makeDeviceTree() -> [UInt8] {
     appendBE32(9, to: &structure)
 
     let headerSize = 40
-    let reservationSize = 16
-    let structureOffset = headerSize + reservationSize
+    let reservation = be64(0x4100_0000) + be64(0x1_0000)
+        + Array(repeating: UInt8(0), count: 16)
+    let structureOffset = headerSize + reservation.count
     let stringsOffset = structureOffset + structure.count
     let totalSize = stringsOffset + strings.count
 
@@ -239,7 +281,7 @@ private func makeDeviceTree() -> [UInt8] {
     appendBE32(UInt32(strings.count), to: &header)
     appendBE32(UInt32(structure.count), to: &header)
 
-    return header + Array(repeating: 0, count: reservationSize) + structure + strings
+    return header + reservation + structure + strings
 }
 
 private func appendBeginNode(_ name: String, to bytes: inout [UInt8]) {
@@ -270,6 +312,11 @@ private func be32(_ value: UInt32) -> [UInt8] {
         UInt8(truncatingIfNeeded: value >> 8),
         UInt8(truncatingIfNeeded: value),
     ]
+}
+
+private func be64(_ value: UInt64) -> [UInt8] {
+    be32(UInt32(truncatingIfNeeded: value >> 32))
+        + be32(UInt32(truncatingIfNeeded: value))
 }
 
 private func appendBE32(_ value: UInt32, to bytes: inout [UInt8]) {

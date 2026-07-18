@@ -46,6 +46,7 @@ struct FlattenedDeviceTree {
 
     private let address: UInt
     private let totalSize: UInt
+    private let reservationStart: UInt
     private let structureStart: UInt
     private let structureEnd: UInt
     private let stringsStart: UInt
@@ -69,6 +70,7 @@ struct FlattenedDeviceTree {
               let rawTotalSize = Self.readBE32(base: base, offset: 4),
               let rawStructureStart = Self.readBE32(base: base, offset: 8),
               let rawStringsStart = Self.readBE32(base: base, offset: 12),
+              let rawReservationStart = Self.readBE32(base: base, offset: 16),
               let rawVersion = Self.readBE32(base: base, offset: 20),
               let rawStringsSize = Self.readBE32(base: base, offset: 32),
               let rawStructureSize = Self.readBE32(base: base, offset: 36)
@@ -79,6 +81,7 @@ struct FlattenedDeviceTree {
         let size = UInt(rawTotalSize)
         let structureOffset = UInt(rawStructureStart)
         let stringsOffset = UInt(rawStringsStart)
+        let reservationOffset = UInt(rawReservationStart)
         let structureSize = UInt(rawStructureSize)
         let stringsSize = UInt(rawStringsSize)
 
@@ -86,6 +89,8 @@ struct FlattenedDeviceTree {
               size >= Self.headerSize,
               size <= Self.maximumSize,
               structureOffset & 0x3 == 0,
+              reservationOffset & 0x7 == 0,
+              Self.range(offset: reservationOffset, length: 16, fits: size),
               Self.range(offset: structureOffset, length: structureSize, fits: size),
               Self.range(offset: stringsOffset, length: stringsSize, fits: size)
         else {
@@ -94,6 +99,7 @@ struct FlattenedDeviceTree {
 
         address = base
         totalSize = size
+        reservationStart = reservationOffset
         structureStart = structureOffset
         structureEnd = structureOffset + structureSize
         stringsStart = stringsOffset
@@ -105,6 +111,7 @@ struct FlattenedDeviceTree {
         return search(
             compatibleWith: compatibility,
             deviceType: nil,
+            reservedMemory: false,
             remainingMatches: &remainingMatches,
             registerIndex: 0
         ) != nil
@@ -120,6 +127,7 @@ struct FlattenedDeviceTree {
         return search(
             compatibleWith: compatibility,
             deviceType: nil,
+            reservedMemory: false,
             remainingMatches: &remainingMatches,
             registerIndex: registerIndex
         )?.resource
@@ -135,14 +143,51 @@ struct FlattenedDeviceTree {
         return search(
             compatibleWith: nil,
             deviceType: deviceType,
+            reservedMemory: false,
             remainingMatches: &remainingMatches,
             registerIndex: registerIndex
         )?.resource
     }
 
+    func reservedMemoryResource(
+        nodeIndex: Int = 0,
+        registerIndex: Int = 0
+    ) -> DeviceResource? {
+        guard nodeIndex >= 0, registerIndex >= 0 else { return nil }
+        var remainingMatches = nodeIndex
+        return search(
+            compatibleWith: nil,
+            deviceType: nil,
+            reservedMemory: true,
+            remainingMatches: &remainingMatches,
+            registerIndex: registerIndex
+        )?.resource
+    }
+
+    func firmwareReservation(at index: Int) -> DeviceResource? {
+        guard index >= 0 else { return nil }
+        var cursor = reservationStart
+        var remaining = index
+        var entries = 0
+        while entries < 4096,
+              Self.range(offset: cursor, length: 16, fits: totalSize),
+              let baseAddress = readBE64(at: cursor),
+              let length = readBE64(at: cursor + 8) {
+            if baseAddress == 0 && length == 0 { return nil }
+            if remaining == 0 {
+                return DeviceResource(baseAddress: baseAddress, length: length)
+            }
+            remaining -= 1
+            entries += 1
+            cursor += 16
+        }
+        return nil
+    }
+
     private func search(
         compatibleWith compatibility: StaticString?,
         deviceType: StaticString?,
+        reservedMemory: Bool,
         remainingMatches: inout Int,
         registerIndex: Int
     ) -> DeviceTreeSearchResult? {
@@ -163,8 +208,10 @@ struct FlattenedDeviceTree {
                 inheritedAddressCells: 2,
                 inheritedSizeCells: 1,
                 parentTranslation: .identity,
+                insideReservedMemory: false,
                 compatibility: compatibility,
                 deviceType: deviceType,
+                reservedMemory: reservedMemory,
                 remainingMatches: &remainingMatches,
                 registerIndex: registerIndex
             )
@@ -177,8 +224,10 @@ struct FlattenedDeviceTree {
         inheritedAddressCells: UInt32,
         inheritedSizeCells: UInt32,
         parentTranslation: AddressTranslation,
+        insideReservedMemory: Bool,
         compatibility: StaticString?,
         deviceType: StaticString?,
+        reservedMemory: Bool,
         remainingMatches: inout Int,
         registerIndex: Int
     ) -> DeviceTreeSearchResult? {
@@ -186,6 +235,11 @@ struct FlattenedDeviceTree {
             return nil
         }
         cursor += 4
+        let nodeNameOffset = cursor
+        let nodeIntroducesReservedMemory = nodeName(
+            at: nodeNameOffset,
+            equals: "reserved-memory"
+        )
         guard skipNodeName(cursor: &cursor) else {
             return nil
         }
@@ -214,8 +268,11 @@ struct FlattenedDeviceTree {
                     inheritedAddressCells: childAddressCells,
                     inheritedSizeCells: childSizeCells,
                     parentTranslation: childTranslation,
+                    insideReservedMemory: insideReservedMemory
+                        || nodeIntroducesReservedMemory,
                     compatibility: compatibility,
                     deviceType: deviceType,
+                    reservedMemory: reservedMemory,
                     remainingMatches: &remainingMatches,
                     registerIndex: registerIndex
                 ) {
@@ -302,7 +359,10 @@ struct FlattenedDeviceTree {
                 }
 
             case Self.endNode:
-                if compatibleMatches && deviceTypeMatches && enabled {
+                let reservedMemoryMatches = !reservedMemory
+                    || (insideReservedMemory && resource != nil)
+                if compatibleMatches && deviceTypeMatches && enabled
+                    && reservedMemoryMatches {
                     if remainingMatches == 0 {
                         return DeviceTreeSearchResult(resource: resource)
                     }
@@ -440,6 +500,20 @@ struct FlattenedDeviceTree {
         return false
     }
 
+    private func nodeName(at offset: UInt, equals expected: StaticString) -> Bool {
+        expected.withUTF8Buffer { expectedBytes in
+            var index = 0
+            while index < expectedBytes.count {
+                guard readByte(at: offset + UInt(index)) == expectedBytes[index] else {
+                    return false
+                }
+                index += 1
+            }
+            let terminator = readByte(at: offset + UInt(expectedBytes.count))
+            return terminator == 0 || terminator == UInt8(ascii: "@")
+        }
+    }
+
     private func propertyName(at offset: UInt, equals expected: StaticString) -> Bool {
         guard offset < stringsEnd - stringsStart else {
             return false
@@ -539,6 +613,16 @@ struct FlattenedDeviceTree {
             return nil
         }
         return pointer.load(as: UInt8.self)
+    }
+
+    private func readBE64(at offset: UInt) -> UInt64? {
+        guard Self.range(offset: offset, length: 8, fits: totalSize),
+              let high = Self.readBE32(base: address, offset: offset),
+              let low = Self.readBE32(base: address, offset: offset + 4)
+        else {
+            return nil
+        }
+        return UInt64(high) << 32 | UInt64(low)
     }
 
     private static func readBE32(base: UInt, offset: UInt) -> UInt32? {

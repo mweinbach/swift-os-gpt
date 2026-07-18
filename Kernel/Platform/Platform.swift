@@ -79,7 +79,26 @@ struct Platform {
     }
 
     func memoryRegion(at index: Int) -> DeviceResource? {
-        deviceTree.resource(deviceType: "memory", nodeIndex: index)
+        flattenedResource(at: index) { nodeIndex, registerIndex in
+            deviceTree.resource(
+                deviceType: "memory",
+                nodeIndex: nodeIndex,
+                registerIndex: registerIndex
+            )
+        }
+    }
+
+    func reservedMemoryRegion(at index: Int) -> DeviceResource? {
+        flattenedResource(at: index) { nodeIndex, registerIndex in
+            deviceTree.reservedMemoryResource(
+                nodeIndex: nodeIndex,
+                registerIndex: registerIndex
+            )
+        }
+    }
+
+    func firmwareReservation(at index: Int) -> DeviceResource? {
+        deviceTree.firmwareReservation(at: index)
     }
 
     func processorAffinity(at index: Int) -> UInt64? {
@@ -92,5 +111,25 @@ struct Platform {
             count += 1
         }
         return count
+    }
+
+    private func flattenedResource(
+        at index: Int,
+        lookup: (Int, Int) -> DeviceResource?
+    ) -> DeviceResource? {
+        guard index >= 0 else { return nil }
+        var remaining = index
+        var nodeIndex = 0
+        while nodeIndex < 64 {
+            var registerIndex = 0
+            while registerIndex < 64,
+                  let resource = lookup(nodeIndex, registerIndex) {
+                if remaining == 0 { return resource }
+                remaining -= 1
+                registerIndex += 1
+            }
+            nodeIndex += 1
+        }
+        return nil
     }
 }
