@@ -86,8 +86,9 @@ evidence only; it is not a Raspberry Pi or accelerated 3D graphics claim.
 1. a freestanding source-boundary audit for `Kernel/` and `Userland/`;
 2. host tests for FDT parsing, monitor parsing, run-queue behavior, exception
    layout, unclassified and classified memory allocation, final-table
-   integration, display/DMA contracts, VirtIO-GPU protocol layouts, preemptive
-   EL0 scheduling, PSCI topology, and SMP publication/runtime logic;
+   integration, boot-driver resource planning, simple-framebuffer safety,
+   display scaling/DMA contracts, PSF2 fonts, VirtIO-GPU protocol layouts,
+   preemptive EL0 scheduling, PSCI topology, and SMP publication/runtime logic;
 3. separate user-image compilation/link inspection and a parser probe against a
    DTB emitted by the installed QEMU;
 4. static ELF inspection proving AArch64 architecture, the expected entry/link
@@ -109,6 +110,30 @@ The ramfb and GPU visual artifacts are `.build/swiftos-frame.ppm` and
 `.build/swiftos-virtio-gpu.ppm`. They prove guest-rendered GUI-shaped frames and
 presentation, not a compositor, window system, or graphical input stack.
 
+## Implemented but hardware-unverified Raspberry Pi display path
+
+The Pi board package requests a firmware-selected HDMI mode and a 32-bit boot
+framebuffer. At boot, SwiftOS can discover a firmware-patched
+`/chosen/simple-framebuffer`, validate its geometry and supported pixel format,
+retain any valid scanout range before allocator activation, and create exact
+normal-memory mappings for the supported 32-bit rendering path. The Pi firmware
+mailbox aperture is discovered as a separate Device-memory driver resource.
+
+The same renderer and terminal used by both QEMU backends draw through a shared
+logical canvas. Its integer viewport centers and letterboxes the 800 x 600
+desktop on larger modes, while the Pi presenter cleans damaged cache ranges
+before firmware scanout reads them. Unsupported firmware pixel formats remain
+reserved rather than being returned to the allocator, and the kernel falls back
+to serial-only operation.
+
+This is a firmware-configured scanout handoff, not a native BCM2712 HVS/HDMI
+modesetting driver and not VideoCore 3D acceleration. The simple-framebuffer
+contract does not report refresh rate or physical panel dimensions, so refresh
+and PPI remain unknown and current scaling is based on pixel fit. A bounded PSF2
+font parser and rasterizer are host-tested, but no font asset or live boot-font
+selection is wired into the desktop. None of this path has executed on physical
+Pi hardware yet.
+
 ## Not implemented yet
 
 - scheduling user or general kernel work across CPUs other than CPU0, per-CPU
@@ -117,8 +142,9 @@ presentation, not a compositor, window system, or graphical input stack.
   write, signals, or a stable user system library and syscall ABI;
 - persistent block storage, VFS, filesystem, permissions, or recovery;
 - virtio/RP1 keyboard, pointer, block, entropy, USB, and network drivers;
-- accelerated VirtIO 3D, a BCM2712/VideoCore display driver, cache-maintained
-  noncoherent DMA, and IOMMU-backed device address translation;
+- accelerated VirtIO 3D, native BCM2712 HVS/HDMI modesetting, VideoCore GPU
+  submission, live EDID/DDC ownership, and IOMMU-backed device address
+  translation;
 - a compositor, window/surface protocol, graphical applications, or graphical
   input routing;
 - physical Raspberry Pi 5 execution and a Raspberry Pi 5 GUI;
@@ -136,14 +162,18 @@ checkout, `make rpi5-package` creates the boot-partition file set and hashes.
 Packaging also runs the parser against that checkout's real Pi 5 DTB and requires
 UART10 at `0x107d001000`, the GICv2 distributor/CPU-interface resources, PSCI
 `smc`, four affinities, and the ATF reservation. These gates prove an artifact
-and unpatched source-DTB contract only. No physical Raspberry Pi 5 boot, UART,
-GICv2 timer delivery, PSCI startup, firmware-patched 8 GB allocator exercise,
-framebuffer, input, or GUI path has been verified.
+and unpatched source-DTB contract. The kernel also contains a host-tested driver
+for the runtime-patched firmware simple framebuffer and mailbox resources. No
+physical Raspberry Pi 5 boot, UART, GICv2 timer delivery, PSCI startup,
+firmware-patched 8 GB allocator exercise, HDMI frame, input, or GUI path has
+been verified.
 
 ## Next coherent milestone
 
-The next crossing should turn the proof scheduler into an operating-system
-execution model: per-CPU scheduler state and interrupt interfaces, runnable work
-on secondaries, a versioned syscall ABI, executable loading, and a minimal VFS.
-Storage and input drivers can then support a real terminal-first user session;
-the compositor follows after surface ownership and graphical input are defined.
+The next work is driver-first: physically validate the Pi firmware-framebuffer
+handoff and then add bounded EDID/display metadata, input, block storage,
+entropy, and networking drivers behind shared resource and DMA contracts. In
+parallel, the proof scheduler still needs per-CPU state and interrupt
+interfaces, runnable work on secondaries, a versioned syscall ABI, executable
+loading, and a minimal VFS. A compositor follows after surface ownership and
+graphical input are defined.

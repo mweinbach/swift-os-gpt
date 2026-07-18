@@ -225,12 +225,34 @@ driver, including resource backing, scanout, transfer, and flush. That device is
 part of the QEMU reference board and has no relationship to Raspberry Pi 5's
 VideoCore VII GPU, HVS, HDMI controllers, firmware interfaces, or display clocks.
 
-The Pi artifact contains the backend-independent display mode, damage, and DMA
-mapping types, but selects no Pi display backend and still reports serial-only.
-Physical Pi display work must discover the firmware-patched display graph, own
-clocks and scanout memory, establish device-specific DMA/cache rules, and prove
-an HDMI frame on the board. VideoCore 3D acceleration is a later milestone after
-basic scanout; the QEMU VirtIO-GPU test is not evidence for either Pi capability.
+The packaged Pi configuration sets `disable_fw_kms_setup=0`, requests a 32-bit
+legacy framebuffer, and leaves firmware to read HDMI EDID and choose the boot
+mode. If firmware publishes a valid `/chosen/simple-framebuffer`, the Swift Pi
+driver:
+
+1. validates its address, size, width, height, stride, and pixel format;
+2. reserves the page-normalized scanout span before the physical allocator can
+   reuse it, including when its format is not yet renderable;
+3. adds an exact normal-memory mapping to the final tables and separately maps
+   the firmware mailbox aperture as Device memory;
+4. binds supported 32-bit XRGB/ARGB modes to the shared scanout backend; and
+5. cleans each presented damage range from the data cache with a system-scope
+   completion barrier.
+
+QEMU and Pi therefore use the same renderer, terminal, display-mode, damage,
+DMA-mapping, and driver-resource contracts while retaining different hardware
+drivers. The logical desktop is 800 x 600: a 1920 x 1080 scanout uses centered
+1x rendering, while 3840 x 2160 uses centered 3x rendering. Letterbox pixels
+are cleared by the shared canvas.
+
+This first Pi backend consumes firmware-configured scanout. It does not program
+HVS, HDMI clocks/controllers, or VideoCore, and it is not a GPU-acceleration
+claim. Simple framebuffer reports neither refresh rate nor physical display
+dimensions, so refresh and PPI remain unknown until SwiftOS owns live EDID/DDC
+or equivalent firmware metadata. A bounded PSF2 loader and glyph rasterizer are
+host-tested, but no font asset or live font-selection path is packaged yet.
+When no supported framebuffer is present, boot remains serial-only. Physical
+execution and HDMI output remain unverified.
 
 ## Hardware validation gate
 
@@ -251,18 +273,28 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 - PSCI brings all four cores online with unique stacks and per-CPU identifiers.
 - Allocator stress crosses the 4 GiB boundary without corrupting the DTB, image,
   page tables, DMA buffers, or reserved regions.
+- The runtime-patched framebuffer remains reserved and mapped, and the serial
+  log reaches `SWIFTOS:SIMPLE_FB_OK`, `SWIFTOS:PLATFORM_FB_OK`, and
+  `SWIFTOS:FRAMEBUFFER_READY` in order.
+- HDMI capture shows the Swift-rendered desktop at the firmware-selected mode;
+  the captured mode, reported refresh, display EDID, viewport scale, and visible
+  letterbox bounds are retained with the boot evidence.
 - At least three power-cycle boots and three warm resets produce the same staged
   serial protocol.
 - ELF inspection confirms AArch64, no Darwin load commands or framework symbols,
   and only reviewed freestanding unresolved symbols.
 
-Display, USB input, storage, RP1 ownership, networking, and accelerated graphics
-are later gates. A serial/timer/SMP success would establish core board bring-up,
-not a GUI-capable Raspberry Pi release.
+Native display modesetting, USB input, storage, RP1 ownership, networking, and
+accelerated graphics are later gates. A firmware-framebuffer image establishes
+early display output, not a compositor or GPU-capable Raspberry Pi release.
 
 ## Primary sources
 
 - [Raspberry Pi `config.txt` reference](https://www.raspberrypi.com/documentation/computers/config_txt.html)
+- [Raspberry Pi EEPROM release notes](https://github.com/raspberrypi/rpi-eeprom/blob/master/firmware-2712/release-notes.md)
+- [Linux simple-framebuffer Device Tree binding](https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/display/simple-framebuffer.yaml)
+- [Raspberry Pi mailbox property interface](https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface)
+- [Raspberry Pi mailbox register interface](https://github.com/raspberrypi/firmware/wiki/Mailboxes)
 - [Raspberry Pi boot files, Device Tree, and UART documentation](https://www.raspberrypi.com/documentation/computers/configuration.html)
 - [Raspberry Pi 5 hardware documentation](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#raspberry-pi-5)
 - [Raspberry Pi BCM2712 documentation](https://www.raspberrypi.com/documentation/computers/processors.html#bcm2712)

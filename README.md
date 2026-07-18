@@ -21,8 +21,11 @@ the project a deterministic place to build the kernel before ports to physical
 ARM64 systems.
 
 The repository also builds and statically inspects a Raspberry Pi 5
-firmware-loadable kernel image. That image has **not** been run on physical
-hardware, and neither Pi 5 execution nor a Pi 5 GUI is verified or supported.
+firmware-loadable kernel image. Its board package can retain a firmware-created
+Device Tree `simple-framebuffer`, map it into the final address space, and use
+the same Swift software renderer as QEMU with explicit cache maintenance. That
+image has **not** been run on physical hardware, so Pi 5 execution and HDMI
+output remain unverified and unsupported.
 
 Apple Silicon is a separate future board port. Booting directly on a modern Mac
 requires machine-specific firmware handoff, interrupt-controller, timer,
@@ -53,8 +56,9 @@ The verified QEMU path now includes:
 4. a separately linked Embedded Swift EL0 image, two isolated user stacks, a
    narrow SVC report ABI, and two CPU0-pinned threads preempted by timer IRQs;
 5. a backend-independent software surface presented through QEMU ramfb or a
-   native Swift modern VirtIO-MMIO GPU 2D driver, plus the single-CPU
-   interactive kernel monitor.
+   native Swift modern VirtIO-MMIO GPU 2D driver, a centered integer-scaled
+   logical desktop for arbitrary scanout sizes, plus the single-CPU interactive
+   kernel monitor.
 
 This is not yet a general-purpose OS. The next layers include multicore task
 scheduling, an executable loader, VFS/storage, input drivers, a compositor,
@@ -114,8 +118,10 @@ RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware make rpi5-package
 `rpi5-inspect` validates the Image header, link addresses, BCM2712 high-MMIO
 bootstrap descriptor, architecture, and unresolved-symbol contract. Packaging
 first probes the pinned firmware DTB for the exact UART10, GICv2, PSCI, CPU, and
-ATF-reservation contract, then adds it and byte hashes. Neither target executes
-the image on a Pi.
+ATF-reservation contract, then adds it and byte hashes. The packaged
+`config.txt` asks Pi firmware to select an HDMI mode from EDID and retain a
+32-bit boot framebuffer for the Swift driver. Neither target executes the image
+on a Pi.
 
 ## Honest status
 
@@ -126,5 +132,8 @@ presents its own QEMU desktop through two display backends.
 The scheduler currently runs both user threads only on CPU0; secondary CPUs
 publish online state and park. There is no loader, VFS, persistent storage,
 graphical input, compositor/window protocol, or stable application ABI. Physical
-Raspberry Pi 5 execution remains unverified. Each milestone must leave behind a
-repeatable boot or unit test rather than a mock UI.
+Raspberry Pi 5 execution remains unverified. The Pi path currently consumes a
+firmware-configured scanout; it does not yet own native HVS/HDMI modesetting or
+VideoCore 3D. A bounded PSF2 font parser and glyph renderer are host-tested, but
+no font asset is packaged into the live desktop yet. Each milestone must leave
+behind a repeatable boot or unit test rather than a mock UI.

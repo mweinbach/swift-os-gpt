@@ -38,10 +38,11 @@ work that must precede Swift:
 
 The kernel validates the DTB, selects a board description, then discovers its
 serial, memory, reservations, CPU affinities, PSCI conduit, interrupt controller,
-QEMU `fw_cfg`, and the bounded `virtio,mmio` transport aperture where present.
-QEMU `virt` is the verified contract.
-The Raspberry Pi 5 linker/header/bootstrap descriptors build and pass static
-inspection, but the resulting image has not executed on physical hardware.
+QEMU `fw_cfg`, and bounded driver resources such as `virtio,mmio`, a Pi firmware
+mailbox, or `/chosen/simple-framebuffer`. QEMU `virt` is the verified contract.
+The Raspberry Pi 5 linker/header/bootstrap descriptors and firmware-framebuffer
+driver build and pass host/static inspection, but the resulting image has not
+executed on physical hardware.
 
 Secondary CPUs are not allowed to run the primary reset path. After memory,
 vectors, and final tables are ready, CPU0 issues PSCI `CPU_ON`. Each selected
@@ -74,6 +75,14 @@ secondary callers cannot race the shared ledger. Only system DRAM is discovered
 at runtime today; additional firmware/device memory domains still need board-
 specific discovery. There is not yet a general kernel heap or pageable object
 layer.
+
+Early board drivers emit a fixed-capacity `BootDriverResourceSet` before this
+allocator activates. A shared resource planner rejects partial RAM overlap and
+collisions with the kernel, DTB, or base platform devices; retains RAM-backed
+driver memory as explicit reservations; and produces exact normal-memory or
+Device mappings for the final tables. This makes adding framebuffer, mailbox,
+and future DMA/MMIO drivers a data-driven extension instead of a second Pi- or
+QEMU-specific memory path.
 
 The kernel builds a 39-bit, 4 KiB-granule final address space and switches
 `TTBR0_EL1` to it with a nonzero ASID. Exact mappings enforce these roles:
@@ -142,12 +151,19 @@ a general process manager, or a stable syscall ABI.
 
 ## Graphics and monitor model
 
-The renderer owns a validated linear XRGB8888 surface and performs software
-rasterization independently of presentation. A closed backend policy currently
-selects modern VirtIO-MMIO GPU 2D first and QEMU ramfb as fallback. DMA mappings
-carry separate CPU-physical and device-visible addresses, address width, byte
-extent, and coherency. The current QEMU path requires a DT `dma-coherent`
-transport; cache-maintained and IOMMU-backed mappings remain future work.
+The renderer owns a validated 32-bit linear surface and performs software
+rasterization independently of presentation. A shared logical canvas maps its
+800 x 600 coordinate space into each physical mode with centered integer
+scaling and letterboxing. QEMU policy selects modern VirtIO-MMIO GPU 2D first
+and ramfb as fallback; the Pi board path can instead bind a firmware-created
+simple framebuffer. DMA mappings carry separate CPU-physical and device-visible
+addresses, address width, byte extent, and coherency.
+
+The QEMU VirtIO path requires a DT `dma-coherent` transport. The Pi firmware
+scanout is software-managed: the renderer writes its retained normal-memory
+mapping and presentation cleans the damaged cache range with an architectural
+completion barrier. This exercises the same display/driver resource contracts
+without putting Pi conditionals into the renderer.
 
 The VirtIO driver negotiates a modern split queue, fences each control command,
 creates a host 2D resource, attaches the Swift-owned framebuffer as backing,
@@ -155,6 +171,13 @@ selects a scanout, and performs explicit transfer and flush operations for
 monitor updates. The end-to-end smoke removes ramfb and validates both the
 initial 800 x 600 desktop and a later command update through QEMU's GPU device.
 This is a guest 2D scanout driver, not virgl/Venus 3D acceleration.
+
+The Pi backend consumes a mode already selected by firmware and described by
+the runtime-patched Device Tree. It is not native HVS/HDMI modesetting and does
+not submit work to VideoCore. Simple framebuffer also carries neither refresh
+rate nor physical display dimensions, so pixel-fit scaling is available but
+refresh/PPI-aware policy waits for a live EDID/DDC or equivalent metadata
+driver. The implementation remains hardware-unverified.
 
 Desktop panels and a terminal are still drawn directly; there is no compositor,
 window/surface protocol, graphical input path, or EL0 application surface.

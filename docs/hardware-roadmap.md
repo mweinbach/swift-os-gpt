@@ -22,6 +22,13 @@ between the generic kernel and the board port. Required bring-up evidence is:
 - display scanout and compositor;
 - network traffic against an external peer.
 
+Raspberry Pi 5 is the active Stage 2 target. Its first display driver consumes
+the firmware-created `simple-framebuffer` through the generic boot-resource,
+scanout, and software-managed DMA contracts, so QEMU and Pi share the renderer
+without sharing device code. That path is host/static tested but has not yet
+produced a frame on physical hardware. Native HVS/HDMI modesetting and VideoCore
+acceleration remain separate later drivers.
+
 ## Stage 3: Apple Silicon research port
 
 Apple Silicon is not equivalent to generic AArch64. A direct boot needs a legal
@@ -42,4 +49,6 @@ domains and proximity, early console discovery, interrupt-controller creation,
 timers, DMA constraints, reset/power control, bus enumeration, and display
 resources. Generic subsystems consume bounded configurations, classified
 allocations, DMA mappings, and resource descriptors rather than board constants.
-This keeps the Pi and future Mac ports from forking the kernel.
+Driver discovery reserves memory and MMIO before the allocator and final page
+tables activate; each backend then implements the same presentation contract.
+This keeps the Pi, QEMU, and future Mac ports from forking the kernel.
