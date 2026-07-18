@@ -100,6 +100,12 @@ host-test:
 		Tests/Host/MonitorCommandTests.swift \
 		-o $(BUILD_DIR)/monitor-command-host-tests
 	$(BUILD_DIR)/monitor-command-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Scheduler/RunQueue.swift \
+		Tests/Host/RunQueueTests.swift \
+		-o $(BUILD_DIR)/run-queue-host-tests
+	$(BUILD_DIR)/run-queue-host-tests
 
 qemu-fdt-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
