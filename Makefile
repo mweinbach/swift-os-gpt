@@ -51,7 +51,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -269,13 +269,79 @@ host-test:
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/DamageRectangle.swift \
 		Kernel/Graphics/BitmapFont.swift \
 		Kernel/Graphics/LinearFramebuffer.swift \
+		Kernel/Graphics/SoftwareRasterizer.swift \
 		Kernel/Graphics/DisplayViewport.swift \
 		Kernel/Graphics/ScaledFramebufferCanvas.swift \
 		Tests/Host/DisplayViewportTests.swift \
 		-o $(BUILD_DIR)/display-viewport-host-tests
 	$(BUILD_DIR)/display-viewport-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/Animation.swift \
+		Tests/Host/AnimationTests.swift \
+		-o $(BUILD_DIR)/animation-host-tests
+	$(BUILD_DIR)/animation-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/DamageRegion.swift \
+		Tests/Host/DamageRegionTests.swift \
+		-o $(BUILD_DIR)/damage-region-host-tests
+	$(BUILD_DIR)/damage-region-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/RetainedLayerTree.swift \
+		Tests/Host/RetainedLayerTreeTests.swift \
+		-o $(BUILD_DIR)/retained-layer-tree-host-tests
+	$(BUILD_DIR)/retained-layer-tree-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/BitmapFont.swift \
+		Kernel/Graphics/LinearFramebuffer.swift \
+		Kernel/Graphics/SoftwareRasterizer.swift \
+		Tests/Host/SoftwareRasterizerTests.swift \
+		-o $(BUILD_DIR)/software-rasterizer-host-tests
+	$(BUILD_DIR)/software-rasterizer-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/DamageRectangle.swift \
+		Kernel/Graphics/DamageRegion.swift \
+		Kernel/Graphics/BitmapFont.swift \
+		Kernel/Graphics/LinearFramebuffer.swift \
+		Kernel/Graphics/SoftwareRasterizer.swift \
+		Kernel/Graphics/DisplayViewport.swift \
+		Kernel/Graphics/ScaledFramebufferCanvas.swift \
+		Kernel/Graphics/RetainedLayerTree.swift \
+		Kernel/Graphics/SoftwareLayerCompositor.swift \
+		Tests/Host/SoftwareLayerCompositorTests.swift \
+		-o $(BUILD_DIR)/software-layer-compositor-host-tests
+	$(BUILD_DIR)/software-layer-compositor-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/DamageRectangle.swift \
+		Kernel/Graphics/DamageRegion.swift \
+		Kernel/Graphics/BitmapFont.swift \
+		Kernel/Graphics/LinearFramebuffer.swift \
+		Kernel/Graphics/SoftwareRasterizer.swift \
+		Kernel/Graphics/DisplayViewport.swift \
+		Kernel/Graphics/ScaledFramebufferCanvas.swift \
+		Kernel/Graphics/RetainedLayerTree.swift \
+		Kernel/Graphics/SoftwareLayerCompositor.swift \
+		Kernel/Graphics/Animation.swift \
+		Kernel/Graphics/AnimatedStatusIndicator.swift \
+		Tests/Host/AnimatedStatusIndicatorTests.swift \
+		-o $(BUILD_DIR)/animated-status-indicator-host-tests
+	$(BUILD_DIR)/animated-status-indicator-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Core/PhysicalBytes.swift \
@@ -337,6 +403,10 @@ frame-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/frame_smoke.py \
 		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-frame.ppm
 
+animation-smoke: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/animation_smoke.py \
+		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-animation.ppm
+
 virtio-gpu-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/virtio_gpu_smoke.py \
 		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-virtio-gpu.ppm
@@ -350,7 +420,7 @@ cpu-config-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
 		$(KERNEL_BIN) --cpu cortex-a76 --cpus 2
 
-test: toolchain-check source-check host-test userland-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke rpi5-inspect
+test: toolchain-check source-check host-test userland-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke rpi5-inspect
 
 clean:
 	rm -rf $(BUILD_DIR)

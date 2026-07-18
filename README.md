@@ -57,16 +57,19 @@ The verified QEMU path now includes:
    narrow SVC report ABI, and two CPU0-pinned threads preempted by timer IRQs;
 5. a backend-independent software surface presented through QEMU ramfb or a
    native Swift modern VirtIO-MMIO GPU 2D driver, a centered integer-scaled
-   logical desktop for arbitrary scanout sizes, plus the single-CPU interactive
-   kernel monitor.
+   logical desktop for arbitrary scanout sizes, and a retained compositor
+   foundation with bounded damage, source-over alpha, antialiased rounded
+   layers, fixed-point easing, and paced animation in the single-CPU monitor.
 
 This is not yet a general-purpose OS. The next layers include multicore task
-scheduling, an executable loader, VFS/storage, input drivers, a compositor,
-networking, and a stable system library and syscall ABI.
+scheduling, an executable loader, VFS/storage, input drivers, a user-facing
+surface/window protocol, networking, GPU acceleration, and a stable system
+library and syscall ABI.
 
-See [Architecture](docs/architecture.md) and [Hardware roadmap](docs/hardware-roadmap.md)
-for the contracts behind those milestones. [Current status](docs/current-status.md)
-separates working guest code from the next kernel frontiers.
+See [Architecture](docs/architecture.md), [Renderer foundation](docs/renderer.md),
+and [Hardware roadmap](docs/hardware-roadmap.md) for the contracts behind those
+milestones. [Current status](docs/current-status.md) separates working guest code
+from the next kernel frontiers.
 
 ## Prerequisites
 
@@ -88,6 +91,7 @@ make inspect
 make smoke
 make monitor-smoke
 make frame-smoke
+make animation-smoke
 make virtio-gpu-smoke
 make smp-el0-smoke
 make cpu-config-smoke
@@ -102,6 +106,11 @@ and PL011 input updates both serial output and the guest terminal window.
 monitor update through a modern VirtIO-MMIO GPU scanout. This is a real guest
 2D display driver against QEMU's device model, not 3D acceleration or evidence
 of a Raspberry Pi display driver.
+
+`make animation-smoke` captures two paced guest frames and proves that a
+retained rounded layer is alpha-composited while presentation remains confined
+to its mapped damage rectangle. The live loop currently runs in the single-CPU
+EL1 monitor; the same renderer is compiled for every display backend.
 
 The linked artifact is
 `.build/swiftos.elf`; it must identify as AArch64 ELF, never Mach-O. QEMU boots
@@ -131,9 +140,10 @@ threads, brings multiple described CPUs online through PSCI, and renders and
 presents its own QEMU desktop through two display backends.
 The scheduler currently runs both user threads only on CPU0; secondary CPUs
 publish online state and park. There is no loader, VFS, persistent storage,
-graphical input, compositor/window protocol, or stable application ABI. Physical
-Raspberry Pi 5 execution remains unverified. The Pi path currently consumes a
-firmware-configured scanout; it does not yet own native HVS/HDMI modesetting or
-VideoCore 3D. A bounded PSF2 font parser and glyph renderer are host-tested, but
-no font asset is packaged into the live desktop yet. Each milestone must leave
-behind a repeatable boot or unit test rather than a mock UI.
+graphical input, user compositor/window protocol, or stable application ABI.
+Physical Raspberry Pi 5 execution remains unverified. The Pi path currently
+consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
+modesetting or VideoCore 3D. A bounded PSF2 font parser and glyph renderer are
+host-tested, but no font asset is packaged into the live desktop yet. The retained compositor is
+a kernel-side bootstrap renderer, not yet an EL0 window system. Each milestone
+must leave behind a repeatable boot or unit test rather than a mock UI.

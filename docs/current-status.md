@@ -54,6 +54,10 @@ unless a guest implementation and a repeatable test sit behind it.
   commands, resource backing, scanout selection, and explicit transfer/flush.
   The renderer uses a backend-independent scanout/DMA contract and keeps ramfb
   as the default fallback.
+- A fixed-capacity retained layer tree and damage region, deterministic Q16
+  timelines and frame pacing, and a software compositor with source-over alpha
+  and antialiased rounded rectangles. The single-CPU monitor continuously
+  animates one retained status layer and presents only its mapped damage.
 - A fixed-capacity interactive EL1 kernel monitor in single-CPU mode. `help`,
   `uname`, `status`, `clear`, `about`, and `uptime` use PL011 input/output while
   updating the rendered terminal.
@@ -71,7 +75,9 @@ system or graphical input path.
 
 Use `QEMU_CPUS=1 make run` for monitor mode. The single-CPU boot retains the
 interactive EL1 monitor after the same memory, exception, GIC, timer, and ramfb
-stages; it intentionally does not enter the multicore/EL0 acceptance path.
+stages. Its architectural-counter-driven status indicator is the current live
+retained-compositor proof. This mode intentionally does not enter the
+multicore/EL0 acceptance path.
 
 `make virtio-gpu-smoke` runs single-CPU monitor mode without a ramfb device. It
 requires the modern VirtIO transport and GPU markers, validates the initial
@@ -87,16 +93,18 @@ evidence only; it is not a Raspberry Pi or accelerated 3D graphics claim.
 2. host tests for FDT parsing, monitor parsing, run-queue behavior, exception
    layout, unclassified and classified memory allocation, final-table
    integration, boot-driver resource planning, simple-framebuffer safety,
-   display scaling/DMA contracts, PSF2 fonts, VirtIO-GPU protocol layouts,
-   preemptive EL0 scheduling, PSCI topology, and SMP publication/runtime logic;
+   display scaling/DMA contracts, PSF2 fonts, fixed-point animation, retained
+   layers, damage coalescing, software composition/rasterization, VirtIO-GPU
+   protocol layouts, preemptive EL0 scheduling, PSCI topology, and SMP
+   publication/runtime logic;
 3. separate user-image compilation/link inspection and a parser probe against a
    DTB emitted by the installed QEMU;
 4. static ELF inspection proving AArch64 architecture, the expected entry/link
    contract, and no unresolved symbols;
 5. three ordered EL1 cold boots plus an EL2-to-EL1 boot in single-CPU mode,
    including final paging, exception/GIC setup, ramfb publication, and timer IRQs;
-6. interactive single-CPU monitor, exact ramfb rendering, and modern
-   VirtIO-MMIO GPU scanout/update smoke tests;
+6. interactive single-CPU monitor, exact ramfb rendering, bounded retained
+   animation, and modern VirtIO-MMIO GPU scanout/update smoke tests;
 7. four-CPU SMP/EL0 boots from both EL1 and EL2, requiring ordered evidence for
    owned memory, final tables, three online secondaries, both user threads, SVC
    reporting, context switches, and timer-driven preemption;
@@ -106,9 +114,11 @@ evidence only; it is not a Raspberry Pi or accelerated 3D graphics claim.
 9. an alternate two-Cortex-A76 CPU configuration reaching the same secondary-
    startup and EL0-preemption acceptance markers.
 
-The ramfb and GPU visual artifacts are `.build/swiftos-frame.ppm` and
-`.build/swiftos-virtio-gpu.ppm`. They prove guest-rendered GUI-shaped frames and
-presentation, not a compositor, window system, or graphical input stack.
+The visual artifacts include `.build/swiftos-frame.ppm`, the low/peak
+`.build/swiftos-animation*.ppm` pair, and `.build/swiftos-virtio-gpu.ppm`. They
+prove guest-rendered frames, a bounded retained compositor update, and two
+presentation backends; they do not prove an EL0 window system, graphical input,
+or accelerated graphics.
 
 ## Implemented but hardware-unverified Raspberry Pi display path
 
@@ -145,14 +155,14 @@ Pi hardware yet.
 - accelerated VirtIO 3D, native BCM2712 HVS/HDMI modesetting, VideoCore GPU
   submission, live EDID/DDC ownership, and IOMMU-backed device address
   translation;
-- a compositor, window/surface protocol, graphical applications, or graphical
-  input routing;
+- a user-facing compositor service, window/surface protocol, graphical
+  applications, textures/transforms/paths, or graphical input routing;
 - physical Raspberry Pi 5 execution and a Raspberry Pi 5 GUI;
 - an Apple Silicon board port or its machine-specific drivers.
 
 The only current SVC contract is the proof-oriented user-thread report call. It
-must not be described as a general syscall layer. The current renderer and EL1
-monitor must not be described as a compositor or user desktop.
+must not be described as a general syscall layer. The retained renderer is a
+kernel bootstrap compositor, not a compositor service or user desktop.
 
 ## Raspberry Pi 5 boundary
 
@@ -173,7 +183,8 @@ been verified.
 The next work is driver-first: physically validate the Pi firmware-framebuffer
 handoff and then add bounded EDID/display metadata, input, block storage,
 entropy, and networking drivers behind shared resource and DMA contracts. In
-parallel, the proof scheduler still needs per-CPU state and interrupt
-interfaces, runnable work on secondaries, a versioned syscall ABI, executable
-loading, and a minimal VFS. A compositor follows after surface ownership and
-graphical input are defined.
+parallel, the renderer needs owned application surfaces, more retained content
+types, font assets, transforms, and a vblank-capable scheduling contract. The
+proof scheduler still needs per-CPU state and interrupt interfaces, runnable
+work on secondaries, a versioned syscall ABI, executable loading, and a minimal
+VFS before the renderer can become a user-facing compositor service.

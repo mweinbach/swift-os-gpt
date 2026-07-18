@@ -4,9 +4,13 @@ struct KernelMonitor {
 
     private var terminal: KernelTerminal
     private var display: ActiveDisplayBackend
+    private let canvas: ScaledFramebufferCanvas
     private let serial: PL011
     private let boardKind: BoardKind
     private let mode: DisplayMode
+    private var statusIndicator: AnimatedStatusIndicator?
+    private var wroteAnimationFrameMarker = false
+    private var wroteAnimationPeakMarker = false
     private let lineStorageAddress: UInt
     private var lineLength = 0
     private var lastInputWasCarriageReturn = false
@@ -22,9 +26,15 @@ struct KernelMonitor {
             canvas: canvas,
             storageAddress: storageAddress
         )
+        self.canvas = canvas
         self.display = display
         self.boardKind = boardKind
         mode = display.mode
+        statusIndicator = AnimatedStatusIndicator(
+            logicalBounds: canvas.viewport.logicalBounds,
+            counterFrequency: AArch64.counterFrequency,
+            startingAt: AArch64.counterValue
+        )
         self.serial = serial
         lineStorageAddress = UInt(storageAddress) + Self.lineStorageOffset
     }
@@ -40,16 +50,58 @@ struct KernelMonitor {
         }
         emit("TYPE HELP FOR COMMANDS\n\n", color: KernelTerminal.muted)
         prompt()
-        return display.presentFullFrame()
+        guard statusIndicator?.renderInitial(on: canvas) == true,
+              display.presentFullFrame()
+        else {
+            return false
+        }
+        serialWrite("SWIFTOS:COMPOSITOR_READY\n")
+        return true
     }
 
     mutating func run() -> Never {
         while true {
+            guard let animationResult = statusIndicator?.renderIfDue(
+                      counterTick: AArch64.counterValue,
+                      on: canvas
+                  )
+            else {
+                displayPanic()
+            }
+            switch animationResult {
+            case .idle:
+                break
+            case .failed:
+                displayPanic()
+            case .rendered(let damage, _):
+                guard let logicalDamage = damage.boundingRectangle else {
+                    displayPanic()
+                }
+                // A valid logical layer can be completely cropped on a mode
+                // smaller than the 800 x 600 desktop. Its retained state still
+                // advances, but there is no physical damage to present.
+                if let physicalDamage = canvas.damageRectangle(
+                    for: logicalDamage,
+                    mode: mode
+                ), !display.present(physicalDamage) {
+                    displayPanic()
+                }
+                if !wroteAnimationFrameMarker {
+                    serialWrite("SWIFTOS:ANIMATION_FRAME_OK\n")
+                    wroteAnimationFrameMarker = true
+                }
+                if !wroteAnimationPeakMarker,
+                   (statusIndicator?.currentOpacity ?? 0)
+                    >= AnimatedStatusIndicator.peakMarkerOpacity {
+                    serialWrite("SWIFTOS:ANIMATION_PEAK_OK\n")
+                    wroteAnimationPeakMarker = true
+                }
+            }
+
             if let byte = serial.readByteIfAvailable() {
                 let submittedCommand = handle(byte)
                 guard display.presentFullFrame() else {
-                    serialWrite("SWIFTOS:PANIC:DISPLAY_PRESENT\n")
-                    while true { AArch64.waitForEvent() }
+                    displayPanic()
                 }
                 if submittedCommand && display.kind == .virtIOGPU {
                     serialWrite("SWIFTOS:DISPLAY_UPDATE_OK\n")
@@ -58,6 +110,11 @@ struct KernelMonitor {
                 AArch64.spinHint()
             }
         }
+    }
+
+    private func displayPanic() -> Never {
+        serialWrite("SWIFTOS:PANIC:DISPLAY_PRESENT\n")
+        while true { AArch64.waitForEvent() }
     }
 
     private mutating func handle(_ byte: UInt8) -> Bool {

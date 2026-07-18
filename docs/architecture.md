@@ -152,12 +152,21 @@ a general process manager, or a stable syscall ABI.
 ## Graphics and monitor model
 
 The renderer owns a validated 32-bit linear surface and performs software
-rasterization independently of presentation. A shared logical canvas maps its
-800 x 600 coordinate space into each physical mode with centered integer
-scaling and letterboxing. QEMU policy selects modern VirtIO-MMIO GPU 2D first
-and ramfb as fallback; the Pi board path can instead bind a firmware-created
-simple framebuffer. DMA mappings carry separate CPU-physical and device-visible
-addresses, address width, byte extent, and coherency.
+rasterization independently of presentation. Its first retained path is a
+fixed-capacity layer tree in deterministic painter order, a bounded logical
+damage region, and a software compositor with source-over alpha and four-sample
+antialiased rounded rectangles. Animation uses normalized Q16 progress,
+overflow-safe integer interpolation, deterministic easing curves, and a
+phase-preserving frame pacer driven by the architectural counter. None of these
+types contains a QEMU or Pi branch.
+
+A shared logical canvas maps the 800 x 600 coordinate space into each physical
+mode with centered integer scaling and letterboxing, then maps logical damage
+back to the physical presentation contract. QEMU policy selects modern
+VirtIO-MMIO GPU 2D first and ramfb as fallback; the Pi board path can instead
+bind a firmware-created simple framebuffer. DMA mappings carry separate
+CPU-physical and device-visible addresses, address width, byte extent, and
+coherency.
 
 The QEMU VirtIO path requires a DT `dma-coherent` transport. The Pi firmware
 scanout is software-managed: the renderer writes its retained normal-memory
@@ -179,18 +188,23 @@ rate nor physical display dimensions, so pixel-fit scaling is available but
 refresh/PPI-aware policy waits for a live EDID/DDC or equivalent metadata
 driver. The implementation remains hardware-unverified.
 
-Desktop panels and a terminal are still drawn directly; there is no compositor,
-window/surface protocol, graphical input path, or EL0 application surface.
+Desktop panels and terminal glyphs are still drawn directly. A retained rounded
+status layer exercises mutation, damage repaint, alpha composition, frame
+pacing, and partial presentation in the single-CPU monitor. The bootstrap tree
+currently holds at most eight solid-color layers; there are no transforms,
+textures, paths, shadows, font atlas, window/surface protocol, graphical input
+path, or EL0 application surface yet.
 
 With four CPUs, `make run` publishes the ramfb frame and then follows the SMP/EL0
 path. `QEMU_CPUS=1 make run` retains the interactive EL1 kernel monitor after
 boot. The monitor, framebuffer, and VirtIO scanout are useful diagnostics, not
 userland and not evidence of a complete desktop environment.
 
-The target compositor will own scanout. Applications will submit owned surfaces
-and damage rectangles through handles rather than receiving the scanout mapping.
-A physical board port must implement the same backend contract through its own
-display and input drivers.
+The eventual user compositor will build on this renderer and own scanout.
+Applications will submit owned surfaces and damage rectangles through handles
+rather than receiving the scanout mapping. A physical board port implements the
+same backend contract through its own display and input drivers; renderer and
+animation policy remain shared.
 
 ## User ABI direction
 

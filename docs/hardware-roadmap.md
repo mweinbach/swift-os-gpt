@@ -7,7 +7,9 @@ The expected devices are PL011 serial, the ARM generic timer, GICv3, virtio-mmio
 transports, fw_cfg/ramfb or virtio-gpu, and a flattened device tree. Every driver
 is exercised without a host OS inside the guest. The modern VirtIO-MMIO GPU 2D
 path now owns a split queue, resource backing, scanout, transfer, and flush; the
-next virtual-board device work is input, block storage, entropy, and networking.
+shared renderer now owns retained layers, bounded damage, alpha/rounded software
+composition, and counter-paced animation. The next virtual-board device work is
+input, block storage, entropy, networking, and a vblank-capable present path.
 
 ## Stage 2: documented physical ARM64 board
 

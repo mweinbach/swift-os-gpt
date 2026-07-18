@@ -12,6 +12,7 @@ import tty
 
 from frame_smoke import (
     DeadlineLineReader,
+    assert_no_panic,
     execute_qmp,
     find_serial_pty,
     parse_ppm,
@@ -19,31 +20,56 @@ from frame_smoke import (
     read_serial_until,
     remaining,
     validate_screenshot,
-    write_serial,
 )
 
 
-ANIMATED_INDICATOR_BOUNDS = (774, 11, 786, 23)
+INDICATOR_BOUNDS = (774, 11, 786, 23)
 
 
-def changed_pixel_count(before: Path, after: Path) -> int:
-    before_width, before_height, before_pixels = parse_ppm(before)
-    after_width, after_height, after_pixels = parse_ppm(after)
+def changed_pixels(
+    before_path: Path,
+    after_path: Path,
+) -> tuple[int, int]:
+    before_width, before_height, before = parse_ppm(before_path)
+    after_width, after_height, after = parse_ppm(after_path)
     if (before_width, before_height) != (after_width, after_height):
-        raise AssertionError("VirtIO-GPU mode changed after monitor input")
-    start_x, start_y, end_x, end_y = ANIMATED_INDICATOR_BOUNDS
-    changed = 0
+        raise AssertionError("animation changed the display mode")
+
+    start_x, start_y, end_x, end_y = INDICATOR_BOUNDS
+    inside = 0
+    outside = 0
     for y in range(before_height):
         for x in range(before_width):
-            if start_x <= x < end_x and start_y <= y < end_y:
-                continue
             offset = (y * before_width + x) * 3
-            if (
-                before_pixels[offset:offset + 3]
-                != after_pixels[offset:offset + 3]
-            ):
-                changed += 1
-    return changed
+            if before[offset:offset + 3] == after[offset:offset + 3]:
+                continue
+            if start_x <= x < end_x and start_y <= y < end_y:
+                inside += 1
+            else:
+                outside += 1
+    return inside, outside
+
+
+def screenshot(
+    qmp: DeadlineLineReader,
+    writer,
+    path: Path,
+    command_id: str,
+    timeout: float,
+) -> None:
+    execute_qmp(
+        qmp,
+        writer,
+        "screendump",
+        command_id,
+        {
+            "filename": str(path),
+            "device": "ramfb0",
+            "head": 0,
+            "format": "ppm",
+        },
+        timeout=timeout,
+    )
 
 
 def main() -> int:
@@ -54,16 +80,16 @@ def main() -> int:
     arguments = parser.parse_args()
 
     qemu = os.environ.get("QEMU", "qemu-system-aarch64")
-    output = arguments.output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    low_output = arguments.output.resolve()
+    peak_output = low_output.with_name(
+        f"{low_output.stem}-peak{low_output.suffix}"
+    )
+    low_output.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(
-        prefix="swiftos-virtio-gpu-",
-        dir=str(output.parent),
+        prefix="swiftos-animation-",
+        dir=str(low_output.parent),
     ):
-        updated_output = output.with_name(
-            f"{output.stem}-updated{output.suffix}"
-        )
         command = [
             qemu,
             "-machine", "virt,gic-version=3",
@@ -71,8 +97,7 @@ def main() -> int:
             "-accel", "tcg",
             "-smp", "1",
             "-m", "512M",
-            "-global", "virtio-mmio.force-legacy=false",
-            "-device", "virtio-gpu-device,id=gpu0,xres=800,yres=600",
+            "-device", "ramfb,id=ramfb0",
             "-display", "none",
             "-monitor", "none",
             "-S",
@@ -125,91 +150,79 @@ def main() -> int:
                 process,
                 serial_descriptor,
                 transcript,
-                b"SWIFTOS:READY",
+                b"SWIFTOS:ANIMATION_FRAME_OK",
                 remaining(deadline),
             )
+            assert_no_panic(transcript)
             for marker in (
-                b"SWIFTOS:VIRTIO_MMIO_OK",
-                b"SWIFTOS:VIRTIO_GPU_OK",
+                b"SWIFTOS:COMPOSITOR_READY",
                 b"SWIFTOS:FRAMEBUFFER_READY",
+                b"SWIFTOS:READY",
             ):
                 if marker not in transcript:
-                    raise AssertionError(f"serial transcript omitted {marker!r}")
-            if b"SWIFTOS:RAMFB_OK" in transcript:
-                raise AssertionError("VirtIO-GPU smoke silently used ramfb")
+                    raise AssertionError(f"animation boot omitted {marker!r}")
 
             execute_qmp(
                 qmp,
                 process.stdin,
                 "stop",
-                "stop-base",
+                "stop-low",
                 timeout=remaining(deadline),
             )
-            execute_qmp(
+            screenshot(
                 qmp,
                 process.stdin,
-                "screendump",
-                "shot-base",
-                {
-                    "filename": str(output),
-                    "device": "gpu0",
-                    "head": 0,
-                    "format": "ppm",
-                },
-                timeout=remaining(deadline),
+                low_output,
+                "shot-low",
+                remaining(deadline),
             )
-            validate_screenshot(output)
+            validate_screenshot(low_output)
 
             execute_qmp(
                 qmp,
                 process.stdin,
                 "cont",
-                "monitor-command",
+                "seek-peak",
                 timeout=remaining(deadline),
             )
-            write_serial(serial_descriptor, b"status\r", remaining(deadline))
             read_serial_until(
                 process,
                 serial_descriptor,
                 transcript,
-                b"FRAMEBUFFER: 800X600 XRGB8888",
+                b"SWIFTOS:ANIMATION_PEAK_OK",
                 remaining(deadline),
             )
-            read_serial_until(
-                process,
-                serial_descriptor,
-                transcript,
-                b"SWIFTOS:DISPLAY_UPDATE_OK",
-                remaining(deadline),
-            )
+            assert_no_panic(transcript)
             execute_qmp(
                 qmp,
                 process.stdin,
                 "stop",
-                "stop-updated",
+                "stop-peak",
                 timeout=remaining(deadline),
             )
-            execute_qmp(
+            screenshot(
                 qmp,
                 process.stdin,
-                "screendump",
-                "shot-updated",
-                {
-                    "filename": str(updated_output),
-                    "device": "gpu0",
-                    "head": 0,
-                    "format": "ppm",
-                },
-                timeout=remaining(deadline),
+                peak_output,
+                "shot-peak",
+                remaining(deadline),
             )
-            if changed_pixel_count(output, updated_output) < 100:
+            validate_screenshot(peak_output)
+
+            inside, outside = changed_pixels(low_output, peak_output)
+            if inside < 20:
                 raise AssertionError(
-                    "monitor updates outside the animated layer were not "
-                    "presented by VirtIO-GPU"
+                    f"animation changed only {inside} indicator pixels"
+                )
+            if outside != 0:
+                raise AssertionError(
+                    f"damage presentation changed {outside} pixels outside "
+                    "the retained layer"
                 )
 
             print(
-                "VirtIO-GPU smoke: modern MMIO 2D scanout and monitor updates passed"
+                "animation smoke: paced retained layer, alpha, rounded "
+                "rasterization, and bounded damage passed"
             )
             execute_qmp(
                 qmp,
@@ -236,5 +249,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (AssertionError, OSError, subprocess.SubprocessError, ValueError) as error:
-        print(f"VirtIO-GPU smoke failed: {error}", file=sys.stderr)
+        print(f"animation smoke failed: {error}", file=sys.stderr)
         raise SystemExit(1)

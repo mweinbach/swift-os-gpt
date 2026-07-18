@@ -239,11 +239,14 @@ driver:
 5. cleans each presented damage range from the data cache with a system-scope
    completion barrier.
 
-QEMU and Pi therefore use the same renderer, terminal, display-mode, damage,
-DMA-mapping, and driver-resource contracts while retaining different hardware
-drivers. The logical desktop is 800 x 600: a 1920 x 1080 scanout uses centered
-1x rendering, while 3840 x 2160 uses centered 3x rendering. Letterbox pixels
-are cleared by the shared canvas.
+QEMU and Pi therefore use the same renderer, retained-layer/damage model,
+software compositor, terminal, display-mode, DMA-mapping, and driver-resource
+contracts while retaining different hardware drivers. The logical desktop is
+800 x 600: a 1920 x 1080 scanout uses centered 1x rendering, while 3840 x 2160
+uses centered 3x rendering. Letterbox pixels are cleared by the shared canvas.
+The Pi image renders the retained indicator's initial state before the first
+full-frame presentation. Continuous animation is currently exercised only by
+the single-CPU QEMU monitor, not by the Pi multicore/EL0 path.
 
 This first Pi backend consumes firmware-configured scanout. It does not program
 HVS, HDMI clocks/controllers, or VideoCore, and it is not a GPU-acceleration
@@ -284,9 +287,11 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 - ELF inspection confirms AArch64, no Darwin load commands or framework symbols,
   and only reviewed freestanding unresolved symbols.
 
-Native display modesetting, USB input, storage, RP1 ownership, networking, and
-accelerated graphics are later gates. A firmware-framebuffer image establishes
-early display output, not a compositor or GPU-capable Raspberry Pi release.
+Native display modesetting, vblank-driven animation, USB input, storage, RP1
+ownership, networking, and accelerated graphics are later gates. A
+firmware-framebuffer image establishes early display output and can run the
+shared software compositor; it is not a user window system or GPU-capable
+Raspberry Pi release.
 
 ## Primary sources
 
