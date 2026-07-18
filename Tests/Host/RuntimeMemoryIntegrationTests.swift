@@ -2,20 +2,19 @@
 struct RuntimeMemoryIntegrationTests {
     static func main() {
         testFirmwareMemorySanitizationAtEightGiBScale()
+        testDeviceTreeMustFitInsideDeclaredRAM()
+        testExplicitReservationsMustFitInsideDeclaredRAM()
+        testEL0StackBackingIsScrubbedExactly()
+        testEL0StackScrubRejectsMalformedPairsBeforeWriting()
         testFinalTablesUseBlocksAndExactPermissions()
         testFinalTableFailuresAreResettable()
-        print("runtime memory integration host tests: 3 groups passed")
+        print("runtime memory integration host tests: 7 groups passed")
     }
 
     private static func testFirmwareMemorySanitizationAtEightGiBScale() {
-        let bytes = makeRuntimeMemoryDeviceTree()
-        bytes.withUnsafeBytes { blob in
-            let address = UInt64(UInt(bitPattern: blob.baseAddress!))
-            guard let platform = Platform.discover(deviceTreeAddress: address)
-            else {
-                fatalError("runtime-memory FDT rejected")
-            }
-
+        withRuntimeMemoryPlatform(
+            deviceTreeMemoryLength: MemoryPageGeometry.pageSize
+        ) { platform in
             let reservations = [
                 PhysicalByteSpan(
                     baseAddress: 0x4008_0123,
@@ -57,9 +56,9 @@ struct RuntimeMemoryIntegrationTests {
 
                         let eightGiBPages: UInt64 = (8 * 1024 * 1024 * 1024)
                             / MemoryPageGeometry.pageSize
-                        expect(summary.memoryTupleCount == 1, "memory tuple count")
+                        expect(summary.memoryTupleCount == 2, "memory tuple count")
                         expect(
-                            summary.discoveredPageCount == eightGiBPages,
+                            summary.discoveredPageCount == eightGiBPages + 1,
                             "8 GiB discovery used per-page metadata"
                         )
                         expect(
@@ -100,6 +99,186 @@ struct RuntimeMemoryIntegrationTests {
                 }
             }
         }
+    }
+
+    private static func testDeviceTreeMustFitInsideDeclaredRAM() {
+        withRuntimeMemoryPlatform(
+            deviceTreeMemoryLength: UInt64(runtimeMemoryDeviceTreeSize() - 1)
+        ) { platform in
+            let reservations: [PhysicalByteSpan] = []
+            var mapStorage = Array(
+                repeating: PhysicalPageRange.empty,
+                count: 16
+            )
+            var allocatorStorage = Array(
+                repeating: PhysicalPageRange.empty,
+                count: 32
+            )
+            reservations.withUnsafeBufferPointer { reserved in
+                mapStorage.withUnsafeMutableBufferPointer { mapBuffer in
+                    allocatorStorage.withUnsafeMutableBufferPointer {
+                        allocatorBuffer in
+                        var map = PhysicalMemoryMap(storage: mapBuffer)
+                        var allocator = PhysicalPageAllocator(
+                            storage: allocatorBuffer
+                        )
+                        let tablePool = PhysicalPageRange(
+                            baseAddress: 0x5200_0000,
+                            pageCount: 16
+                        )!
+                        expect(
+                            RuntimePhysicalMemoryBootstrap.initialize(
+                                platform: platform,
+                                layout: RuntimeMemoryBootstrapLayout(
+                                    explicitReservations: reserved,
+                                    translationTablePool: tablePool
+                                ),
+                                memoryMap: &map,
+                                allocator: &allocator
+                            ) == .failed(.deviceTreeOutsideRAM),
+                            "partially out-of-RAM DTB was accepted"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private static func testExplicitReservationsMustFitInsideDeclaredRAM() {
+        withRuntimeMemoryPlatform(
+            deviceTreeMemoryLength: MemoryPageGeometry.pageSize
+        ) { platform in
+            let reservations = [PhysicalByteSpan(
+                baseAddress: 0x3_0000_0000,
+                length: MemoryPageGeometry.pageSize
+            )!]
+            var mapStorage = Array(
+                repeating: PhysicalPageRange.empty,
+                count: 16
+            )
+            var allocatorStorage = Array(
+                repeating: PhysicalPageRange.empty,
+                count: 32
+            )
+            reservations.withUnsafeBufferPointer { reserved in
+                mapStorage.withUnsafeMutableBufferPointer { mapBuffer in
+                    allocatorStorage.withUnsafeMutableBufferPointer {
+                        allocatorBuffer in
+                        var map = PhysicalMemoryMap(storage: mapBuffer)
+                        var allocator = PhysicalPageAllocator(
+                            storage: allocatorBuffer
+                        )
+                        let tablePool = PhysicalPageRange(
+                            baseAddress: 0x5200_0000,
+                            pageCount: 16
+                        )!
+                        expect(
+                            RuntimePhysicalMemoryBootstrap.initialize(
+                                platform: platform,
+                                layout: RuntimeMemoryBootstrapLayout(
+                                    explicitReservations: reserved,
+                                    translationTablePool: tablePool
+                                ),
+                                memoryMap: &map,
+                                allocator: &allocator
+                            ) == .failed(.explicitReservationOutsideRAM),
+                            "out-of-RAM kernel reservation was accepted"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private static func testEL0StackBackingIsScrubbedExactly() {
+        let pageSize = Int(MemoryPageGeometry.pageSize)
+        let allocation = UnsafeMutableRawPointer.allocate(
+            byteCount: pageSize * 6,
+            alignment: pageSize
+        )
+        defer { allocation.deallocate() }
+        fill(allocation, byteCount: pageSize * 6, with: 0xa5)
+
+        let base = UInt64(UInt(bitPattern: allocation))
+        let first = PhysicalByteSpan(
+            baseAddress: base + UInt64(pageSize),
+            length: UInt64(pageSize * 2)
+        )!
+        let second = PhysicalByteSpan(
+            baseAddress: base + UInt64(pageSize * 3),
+            length: UInt64(pageSize * 2)
+        )!
+        expect(
+            EL0StackMemoryScrubber.scrub(first: first, second: second),
+            "valid EL0 stack pair was rejected"
+        )
+        expect(
+            bytes(in: allocation, offset: 0, count: pageSize)
+                .allSatisfy { $0 == 0xa5 },
+            "scrub wrote before the first stack"
+        )
+        expect(
+            bytes(in: allocation, offset: pageSize, count: pageSize * 4)
+                .allSatisfy { $0 == 0 },
+            "EL0 stack backing retained stale bytes"
+        )
+        expect(
+            bytes(
+                in: allocation,
+                offset: pageSize * 5,
+                count: pageSize
+            ).allSatisfy { $0 == 0xa5 },
+            "scrub wrote after the second stack"
+        )
+    }
+
+    private static func testEL0StackScrubRejectsMalformedPairsBeforeWriting() {
+        let pageSize = Int(MemoryPageGeometry.pageSize)
+        let allocation = UnsafeMutableRawPointer.allocate(
+            byteCount: pageSize * 4,
+            alignment: pageSize
+        )
+        defer { allocation.deallocate() }
+        let base = UInt64(UInt(bitPattern: allocation))
+        let first = PhysicalByteSpan(
+            baseAddress: base,
+            length: UInt64(pageSize * 2)
+        )!
+        let overlappingSecond = PhysicalByteSpan(
+            baseAddress: base + UInt64(pageSize),
+            length: UInt64(pageSize * 2)
+        )!
+        let misalignedSecond = PhysicalByteSpan(
+            baseAddress: base + UInt64(pageSize * 2 + 1),
+            length: UInt64(pageSize)
+        )!
+
+        fill(allocation, byteCount: pageSize * 4, with: 0x5a)
+        expect(
+            !EL0StackMemoryScrubber.scrub(
+                first: first,
+                second: overlappingSecond
+            ),
+            "overlapping EL0 stack pair was accepted"
+        )
+        expect(
+            bytes(in: allocation, offset: 0, count: pageSize * 4)
+                .allSatisfy { $0 == 0x5a },
+            "rejected overlapping pair was partially scrubbed"
+        )
+
+        expect(
+            !EL0StackMemoryScrubber.scrub(
+                first: first,
+                second: misalignedSecond
+            ),
+            "misaligned EL0 stack pair was accepted"
+        )
+        expect(
+            bytes(in: allocation, offset: 0, count: pageSize * 4)
+                .allSatisfy { $0 == 0x5a },
+            "rejected misaligned pair was partially scrubbed"
+        )
     }
 
     private static func testFinalTablesUseBlocksAndExactPermissions() {
@@ -469,6 +648,39 @@ private func withTableStorage(
     body(entries)
 }
 
+private func fill(
+    _ destination: UnsafeMutableRawPointer,
+    byteCount: Int,
+    with byte: UInt8
+) {
+    var offset = 0
+    while offset < byteCount {
+        destination.storeBytes(
+            of: byte,
+            toByteOffset: offset,
+            as: UInt8.self
+        )
+        offset += 1
+    }
+}
+
+private func bytes(
+    in source: UnsafeRawPointer,
+    offset: Int,
+    count: Int
+) -> [UInt8] {
+    var result: [UInt8] = []
+    result.reserveCapacity(count)
+    var index = 0
+    while index < count {
+        result.append(
+            source.load(fromByteOffset: offset + index, as: UInt8.self)
+        )
+        index += 1
+    }
+    return result
+}
+
 private func expect(
     _ condition: @autoclosure () -> Bool,
     _ message: String
@@ -476,9 +688,46 @@ private func expect(
     if !condition() { fatalError(message) }
 }
 
-// A purpose-built DT fixture: one 8 GiB bank, one memreserve tuple, one
-// /reserved-memory tuple, and the minimum QEMU platform devices.
-private func makeRuntimeMemoryDeviceTree() -> [UInt8] {
+private func runtimeMemoryDeviceTreeSize() -> Int {
+    makeRuntimeMemoryDeviceTree(
+        deviceTreeMemory: DeviceResource(baseAddress: 0x1000, length: 0x1000)
+    ).count
+}
+
+private func withRuntimeMemoryPlatform(
+    deviceTreeMemoryLength: UInt64,
+    _ body: (Platform) -> Void
+) {
+    let pageSize = Int(MemoryPageGeometry.pageSize)
+    let storage = UnsafeMutableRawPointer.allocate(
+        byteCount: pageSize,
+        alignment: pageSize
+    )
+    defer { storage.deallocate() }
+
+    let bytes = makeRuntimeMemoryDeviceTree(
+        deviceTreeMemory: DeviceResource(
+            baseAddress: UInt64(UInt(bitPattern: storage)),
+            length: deviceTreeMemoryLength
+        )
+    )
+    expect(bytes.count <= pageSize, "runtime-memory FDT exceeds fixture page")
+    bytes.withUnsafeBytes { source in
+        storage.copyMemory(from: source.baseAddress!, byteCount: bytes.count)
+    }
+    guard let platform = Platform.discover(
+        deviceTreeAddress: UInt64(UInt(bitPattern: storage))
+    ) else {
+        fatalError("runtime-memory FDT rejected")
+    }
+    body(platform)
+}
+
+// A purpose-built DT fixture: one 8 GiB bank, a host-backed DTB bank, one
+// memreserve tuple, one /reserved-memory tuple, and the minimum QEMU devices.
+private func makeRuntimeMemoryDeviceTree(
+    deviceTreeMemory: DeviceResource
+) -> [UInt8] {
     let propertyNames = [
         "#address-cells", "#size-cells", "compatible", "device_type",
         "ranges", "reg",
@@ -510,6 +759,20 @@ private func makeRuntimeMemoryDeviceTree() -> [UInt8] {
     fdtProperty(
         offsets["reg"]!,
         fdtBE64(0x4000_0000) + fdtBE64(8 * 1024 * 1024 * 1024),
+        to: &structure
+    )
+    fdtWord(2, to: &structure)
+
+    fdtNode("memory@dtb", to: &structure)
+    fdtProperty(
+        offsets["device_type"]!,
+        Array("memory".utf8) + [0],
+        to: &structure
+    )
+    fdtProperty(
+        offsets["reg"]!,
+        fdtBE64(deviceTreeMemory.baseAddress)
+            + fdtBE64(deviceTreeMemory.length),
         to: &structure
     )
     fdtWord(2, to: &structure)

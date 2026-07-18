@@ -37,7 +37,7 @@ struct Platform {
             compatibleWith: "qemu,fw-cfg-mmio"
         )
         if tree.contains(compatibleWith: "raspberrypi,5-model-b")
-            || tree.contains(compatibleWith: "brcm,bcm2712") {
+            && tree.contains(compatibleWith: "brcm,bcm2712") {
             kind = .raspberryPi5
         } else if firmwareConfiguration != nil {
             kind = .qemuVirt

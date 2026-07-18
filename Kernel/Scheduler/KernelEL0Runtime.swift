@@ -254,7 +254,8 @@ enum KernelEL0Runtime {
             // cannot attempt to arm the shared physical timer twice.
             timerStarted = true
             guard InterruptSubsystem.startPhysicalTimer(
-                periodTicks: timerPeriodTicks
+                periodTicks: timerPeriodTicks,
+                unmaskIRQs: false
             ) else {
                 timerStarted = false
                 return 0

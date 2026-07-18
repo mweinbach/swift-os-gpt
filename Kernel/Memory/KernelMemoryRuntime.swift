@@ -84,6 +84,7 @@ enum KernelMemoryRuntime {
         )
         guard case let .ready(memorySummary) = bootstrap,
               let userMappings = KernelEL0Runtime.addressSpaceMappings(),
+              scrubUserStackBacking(),
               let layout = finalLayout(
                   platform: platform,
                   userMappings: userMappings
@@ -156,6 +157,28 @@ enum KernelMemoryRuntime {
         )
         ownedPageAllocator = allocator
         return result
+    }
+
+    /// Runs while the bootstrap identity map still exposes the physical
+    /// NOLOAD spans and before the final EL0 aliases are constructed.
+    private static func scrubUserStackBacking() -> Bool {
+        let first = KernelLinkerLayout.userStack0
+        let second = KernelLinkerLayout.userStack1
+        guard let firstSpan = PhysicalByteSpan(
+                  startAddress: first.start,
+                  endAddress: first.end
+              ),
+              let secondSpan = PhysicalByteSpan(
+                  startAddress: second.start,
+                  endAddress: second.end
+              )
+        else {
+            return false
+        }
+        return EL0StackMemoryScrubber.scrub(
+            first: firstSpan,
+            second: secondSpan
+        )
     }
 
     private static func finalLayout(

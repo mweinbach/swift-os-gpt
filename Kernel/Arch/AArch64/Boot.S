@@ -60,6 +60,7 @@ _start:
     mrs     x1, cpacr_el1
     orr     x1, x1, #(3 << 20)
     msr     cpacr_el1, x1
+    msr     cntkctl_el1, xzr       /* EL0 cannot own/read kernel timers */
     isb
 
     ldr     x1, =early_vectors
@@ -190,6 +191,7 @@ _secondary_start:
     mrs     x1, cpacr_el1
     orr     x1, x1, #(3 << 20)
     msr     cpacr_el1, x1
+    msr     cntkctl_el1, xzr
 
     mov     x1, #0xff00
     msr     mair_el1, x1
@@ -691,6 +693,7 @@ arch_enter_el0:
     msr     elr_el1, x0
     msr     sp_el0, x1
     msr     tpidr_el0, x3
+    msr     tpidrro_el0, xzr       /* never expose firmware/kernel residue */
     msr     spsr_el1, xzr          /* EL0t with DAIF unmasked */
     mov     x0, x2
     mov     x1, xzr

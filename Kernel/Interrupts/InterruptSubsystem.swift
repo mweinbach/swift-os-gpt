@@ -173,7 +173,10 @@ enum InterruptSubsystem {
         synchronousHook = hook
     }
 
-    static func startPhysicalTimer(periodTicks: UInt64) -> Bool {
+    static func startPhysicalTimer(
+        periodTicks: UInt64,
+        unmaskIRQs: Bool = true
+    ) -> Bool {
         guard configured,
               controller.timerInterruptID
                 == GenericPhysicalTimer.architecturalInterruptID,
@@ -181,7 +184,9 @@ enum InterruptSubsystem {
         else {
             return false
         }
-        AArch64.enableIRQs()
+        if unmaskIRQs {
+            AArch64.enableIRQs()
+        }
         return true
     }
 
