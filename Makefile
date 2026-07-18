@@ -236,6 +236,15 @@ host-test:
 	$(BUILD_DIR)/display-contract-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/BitmapFont.swift \
+		Kernel/Graphics/LinearFramebuffer.swift \
+		Kernel/Graphics/PSF2Font.swift \
+		Tests/Host/PSF2FontTests.swift \
+		-o $(BUILD_DIR)/psf2-font-host-tests
+	$(BUILD_DIR)/psf2-font-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Core/PhysicalBytes.swift \
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/DisplayMemory.swift \
