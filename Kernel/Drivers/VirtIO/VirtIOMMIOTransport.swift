@@ -53,6 +53,8 @@ struct VirtIOMMIOTransport {
         static let queueDriverHigh: UInt = 0x094
         static let queueDeviceLow: UInt = 0x0a0
         static let queueDeviceHigh: UInt = 0x0a4
+        static let configurationGeneration: UInt = 0x0fc
+        static let deviceConfiguration: UInt = 0x100
     }
 
     private enum Status {
@@ -110,6 +112,44 @@ struct VirtIOMMIOTransport {
 
     var hasVirtIOMagic: Bool {
         read(Register.magic) == Self.magicValue
+    }
+
+    /// Reads the GPU device-specific configuration as one generation-stable
+    /// snapshot. The bounded retry is required because its four fields are not
+    /// one atomic MMIO operation.
+    func readGPUDeviceConfiguration(
+        maximumAttempts: Int = 8
+    ) -> VirtIOGPUDeviceConfigurationReadResult {
+        guard maximumAttempts > 0 else { return .invalidAttemptLimit }
+        let discovered = identity
+        guard hasVirtIOMagic,
+              discovered.version == Self.modernVersion,
+              discovered.deviceID == Self.gpuDeviceID
+        else {
+            return .wrongDevice
+        }
+
+        var attempt = 0
+        while attempt < maximumAttempts {
+            let before = read(Register.configurationGeneration) & 0xff
+            let pendingEvents = read(Register.deviceConfiguration)
+            let scanoutCount = read(Register.deviceConfiguration + 8)
+            let capsetCount = read(Register.deviceConfiguration + 12)
+            let after = read(Register.configurationGeneration) & 0xff
+            if before == after {
+                guard let configuration = VirtIOGPUDeviceConfiguration(
+                          pendingEvents: pendingEvents,
+                          scanoutCount: scanoutCount,
+                          capsetCount: capsetCount
+                      )
+                else {
+                    return .invalidConfiguration
+                }
+                return .ready(configuration)
+            }
+            attempt += 1
+        }
+        return .unstable
     }
 
     mutating func initializeModernGPU(

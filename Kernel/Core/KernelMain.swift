@@ -334,6 +334,11 @@ private func activateVirtIOGPU(
                   requestedDeviceFeatures:
                     VirtIOGPU3DFeatures.baseline3DRequestMask
               ) == .ready,
+              case let .ready(configuration) =
+                transport.readGPUDeviceConfiguration(),
+              configuration.capsetCount > 0
+                || transport.negotiatedFeatures
+                    & VirtIOGPU3DFeatures.baseline3DRequestMask == 0,
               var gpu = VirtIOGPU(transport: transport, scanout: scanout),
               gpu.configure()
         else {
