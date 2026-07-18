@@ -84,13 +84,21 @@ struct KernelTerminal {
     }
 
     mutating func backspace() {
-        guard cursorColumn > 0,
-              let characters = characterPointer,
+        guard let characters = characterPointer,
               let colors = colorPointer
         else {
             return
         }
-        cursorColumn -= 1
+
+        if cursorColumn > 0 {
+            cursorColumn -= 1
+        } else if cursorRow > 0 {
+            cursorRow -= 1
+            cursorColumn = Self.columns - 1
+        } else {
+            return
+        }
+
         let index = cursorRow * Self.columns + cursorColumn
         characters[index] = 32
         colors[index] = Self.white

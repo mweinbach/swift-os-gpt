@@ -18,7 +18,7 @@ EXPECTED = [
     "SWIFTOS:DATA_OK",
     "SWIFTOS:FDT_OK",
     "SWIFTOS:RAMFB_OK",
-    "SWIFTOS:GUI_READY",
+    "SWIFTOS:FRAMEBUFFER_READY",
     "SWIFTOS:SWIFT_OK",
     "SWIFTOS:TIMER_1",
     "SWIFTOS:TIMER_2",
@@ -27,10 +27,18 @@ EXPECTED = [
 ]
 
 
-def boot_once(qemu: str, kernel: Path, timeout: float) -> str:
+def boot_once(
+    qemu: str,
+    kernel: Path,
+    timeout: float,
+    virtualization: bool,
+) -> str:
+    machine = "virt,gic-version=3"
+    if virtualization:
+        machine += ",virtualization=on"
     command = [
         qemu,
-        "-machine", "virt,gic-version=3",
+        "-machine", machine,
         "-cpu", "cortex-a72",
         "-accel", "tcg",
         "-smp", "1",
@@ -99,17 +107,27 @@ def main() -> int:
     parser.add_argument("kernel", type=Path)
     parser.add_argument("--boots", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument("--virtualization", action="store_true")
     arguments = parser.parse_args()
 
     qemu = os.environ.get("QEMU", "qemu-system-aarch64")
     for index in range(arguments.boots):
-        transcript = boot_once(qemu, arguments.kernel.resolve(), arguments.timeout)
+        transcript = boot_once(
+            qemu,
+            arguments.kernel.resolve(),
+            arguments.timeout,
+            arguments.virtualization,
+        )
         try:
             validate(transcript)
         except AssertionError as error:
             print(f"boot {index + 1}/{arguments.boots} failed: {error}", file=sys.stderr)
             return 1
-        print(f"boot {index + 1}/{arguments.boots}: ordered serial contract passed")
+        entry = "EL2 handoff" if arguments.virtualization else "EL1 entry"
+        print(
+            f"boot {index + 1}/{arguments.boots} ({entry}): "
+            "ordered serial contract passed"
+        )
 
     return 0
 

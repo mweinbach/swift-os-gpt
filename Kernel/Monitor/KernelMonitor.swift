@@ -1,4 +1,4 @@
-struct EarlyShell {
+struct KernelMonitor {
     private static let lineStorageOffset: UInt = 7168
     private static let maximumLineLength = 127
 
@@ -19,8 +19,8 @@ struct EarlyShell {
 
     mutating func start() {
         terminal.clear()
-        emit("SWIFTOS INTERACTIVE SHELL\n", color: KernelTerminal.cyan)
-        emit("BARE METAL AARCH64  EMBEDDED SWIFT\n", color: KernelTerminal.muted)
+        emit("SWIFTOS KERNEL MONITOR\n", color: KernelTerminal.cyan)
+        emit("QEMU VIRT AARCH64  EMBEDDED SWIFT\n", color: KernelTerminal.muted)
         emit("TYPE HELP FOR COMMANDS\n\n", color: KernelTerminal.muted)
         prompt()
         AArch64.synchronizeData()
@@ -85,10 +85,10 @@ struct EarlyShell {
 
     private mutating func executeCurrentLine() {
         guard let line = linePointer else {
-            emit("SHELL STORAGE UNAVAILABLE\n", color: KernelTerminal.red)
+            emit("MONITOR STORAGE UNAVAILABLE\n", color: KernelTerminal.red)
             return
         }
-        let command = ShellCommand.parse(
+        let command = MonitorCommand.parse(
             UnsafeBufferPointer(start: line, count: lineLength)
         )
 
@@ -115,8 +115,8 @@ struct EarlyShell {
             serialWrite("[SCREEN CLEARED]\n")
 
         case .about:
-            emit("CLEAN-ROOM KERNEL AND SOFTWARE WRITTEN IN SWIFT\n")
-            emit("NO DARWIN OR APPLE FRAMEWORKS UNDER THIS SHELL\n", color: KernelTerminal.muted)
+            emit("KERNEL POLICY DRIVERS RENDERER MONITOR IN SWIFT\n")
+            emit("NO DARWIN OR APPLE FRAMEWORKS UNDER THIS MONITOR\n", color: KernelTerminal.muted)
 
         case .uptime:
             let frequency = AArch64.counterFrequency
@@ -139,7 +139,7 @@ struct EarlyShell {
     }
 
     private mutating func prompt() {
-        emit("SWIFT@METAL:~> ", color: KernelTerminal.cyan)
+        emit("SWIFT@QEMU:~> ", color: KernelTerminal.cyan)
     }
 
     private mutating func emit(

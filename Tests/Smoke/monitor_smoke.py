@@ -38,7 +38,7 @@ def read_until(
 
     if marker not in transcript:
         raise AssertionError(
-            f"missing shell marker {marker!r}:\n"
+            f"missing monitor marker {marker!r}:\n"
             + transcript.decode("utf-8", errors="replace")
         )
 
@@ -84,14 +84,18 @@ def main() -> int:
             (b"uptime\r", b"SECONDS: "),
             (b"bogus\r", b"COMMAND NOT FOUND: bogus"),
             (b"clear\r", b"[SCREEN CLEARED]"),
-            (b"about\r", b"NO DARWIN OR APPLE FRAMEWORKS UNDER THIS SHELL"),
+            (b"about\r", b"NO DARWIN OR APPLE FRAMEWORKS UNDER THIS MONITOR"),
+            (
+                (b"a" * 60) + (b"\x7f" * 6) + b"\r",
+                b"COMMAND NOT FOUND: " + (b"a" * 54),
+            ),
         ]
         for command_bytes, expected in commands:
             process.stdin.write(command_bytes)
             process.stdin.flush()
             read_until(process, transcript, expected, arguments.timeout)
 
-        print("shell smoke: 7 interactive commands passed over PL011")
+        print("monitor smoke: 8 commands including wrapped backspace passed over PL011")
         return 0
     finally:
         if process.poll() is None:
@@ -107,6 +111,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (AssertionError, OSError, subprocess.SubprocessError) as error:
-        print(f"shell smoke failed: {error}", file=sys.stderr)
+        print(f"monitor smoke failed: {error}", file=sys.stderr)
         raise SystemExit(1)
-

@@ -1,4 +1,4 @@
-enum ShellCommand: UInt8, Equatable {
+enum MonitorCommand: UInt8, Equatable {
     case empty
     case help
     case uname
@@ -8,7 +8,7 @@ enum ShellCommand: UInt8, Equatable {
     case uptime
     case unknown
 
-    static func parse(_ bytes: UnsafeBufferPointer<UInt8>) -> ShellCommand {
+    static func parse(_ bytes: UnsafeBufferPointer<UInt8>) -> MonitorCommand {
         if bytes.isEmpty { return .empty }
         if equals(bytes, "HELP") { return .help }
         if equals(bytes, "UNAME") { return .uname }
@@ -42,4 +42,3 @@ enum ShellCommand: UInt8, Equatable {
         }
     }
 }
-

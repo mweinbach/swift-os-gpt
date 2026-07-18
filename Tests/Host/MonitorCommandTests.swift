@@ -1,5 +1,5 @@
 @main
-struct ShellCommandTests {
+struct MonitorCommandTests {
     static func main() {
         expect(parse("") == .empty, "empty command")
         expect(parse("help") == .help, "lowercase help")
@@ -10,13 +10,13 @@ struct ShellCommandTests {
         expect(parse("uptime") == .uptime, "uptime")
         expect(parse("help ") == .unknown, "trailing bytes")
         expect(parse("nope") == .unknown, "unknown")
-        print("shell command host tests: 9 passed")
+        print("monitor command host tests: 9 passed")
     }
 
-    private static func parse(_ command: String) -> ShellCommand {
+    private static func parse(_ command: String) -> MonitorCommand {
         let bytes = Array(command.utf8)
         return bytes.withUnsafeBufferPointer { buffer in
-            ShellCommand.parse(buffer)
+            MonitorCommand.parse(buffer)
         }
     }
 }
@@ -26,4 +26,3 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
         fatalError(message)
     }
 }
-

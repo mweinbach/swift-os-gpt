@@ -17,7 +17,7 @@ QEMU ?= qemu-system-aarch64
 PYTHON ?= python3
 
 TARGET := aarch64-none-none-elf
-SWIFT_SOURCES := $(shell find Kernel Userland -name '*.swift' -type f | sort)
+SWIFT_SOURCES := $(shell find Kernel -name '*.swift' -type f | sort)
 
 SWIFT_FLAGS := \
 	-target $(TARGET) \
@@ -41,14 +41,21 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke shell-smoke gui-smoke test host-test qemu-fdt-test clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke test host-test qemu-fdt-test clean toolchain-check source-check
 
 all: build
 
 build: $(KERNEL_ELF) $(KERNEL_BIN)
 
-toolchain-check:
+toolchain-check: | $(BUILD_DIR)
 	@$(SWIFTC) -print-target-info -target $(TARGET) >/dev/null
+	@$(SWIFTC) -target $(TARGET) \
+		-enable-experimental-feature Embedded \
+		-wmo -parse-as-library -Osize \
+		-module-cache-path $(MODULE_CACHE) \
+		-Xfrontend -disable-stack-protector \
+		-emit-object Tests/Toolchain/EmbeddedProbe.swift \
+		-o $(BUILD_DIR)/embedded-toolchain-probe.o
 	@$(CLANG) --target=$(TARGET) --version >/dev/null
 	@$(LD_LLD) --version >/dev/null
 	@$(LLVM_OBJCOPY) --version >/dev/null
@@ -88,12 +95,13 @@ host-test:
 	$(BUILD_DIR)/fdt-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
-		Userland/ShellCommand.swift \
-		Tests/Host/ShellCommandTests.swift \
-		-o $(BUILD_DIR)/shell-command-host-tests
-	$(BUILD_DIR)/shell-command-host-tests
+		Kernel/Monitor/MonitorCommand.swift \
+		Tests/Host/MonitorCommandTests.swift \
+		-o $(BUILD_DIR)/monitor-command-host-tests
+	$(BUILD_DIR)/monitor-command-host-tests
 
 qemu-fdt-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(QEMU) -machine virt,dumpdtb=$(BUILD_DIR)/qemu-virt.dtb \
 		-cpu cortex-a72 -m 512M -display none -monitor none -serial none
 	$(SWIFTC) -parse-as-library \
@@ -111,15 +119,17 @@ inspect: build
 
 smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/boot_smoke.py $(KERNEL_BIN) --boots 3
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/boot_smoke.py $(KERNEL_BIN) \
+		--boots 1 --virtualization
 
-shell-smoke: build
-	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/shell_smoke.py $(KERNEL_BIN)
+monitor-smoke: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/monitor_smoke.py $(KERNEL_BIN)
 
-gui-smoke: build
-	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/gui_smoke.py \
-		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-gui.ppm
+frame-smoke: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/frame_smoke.py \
+		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-frame.ppm
 
-test: toolchain-check source-check host-test qemu-fdt-test inspect smoke shell-smoke gui-smoke
+test: toolchain-check source-check host-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke
 
 clean:
 	rm -rf $(BUILD_DIR)

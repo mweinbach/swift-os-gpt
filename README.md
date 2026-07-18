@@ -1,14 +1,15 @@
 # SwiftOS
 
-SwiftOS is a clean-room operating system whose kernel, drivers, graphics stack,
-and software are written in Swift and run without macOS, Darwin, or Apple
-frameworks underneath them.
+SwiftOS is a clean-room operating-system project. Its current artifact is a
+bootable kernel prototype whose long-lived kernel logic, drivers, renderer, and
+monitor are Swift running without macOS, Darwin, or Apple frameworks underneath.
 
 This repository is intentionally not a SwiftUI desktop pretending to be an OS.
 Its primary artifact is an AArch64 kernel ELF loaded directly by a virtual
-machine. The kernel owns its exception level, memory, devices, framebuffer, and
-event loop. A host application may eventually be useful as a debugger, but it
-will never be the operating system.
+machine. The kernel owns its exception level, fixed linker-reserved regions,
+PL011 and fw_cfg access, framebuffer, and event loop. It does not yet have a
+physical page allocator. A host application may eventually be useful as a
+debugger, but it will never be the operating system.
 
 ## Current target
 
@@ -25,11 +26,12 @@ through its own driver stack.
 
 ## Language boundary
 
-All operating-system behavior is Swift. A tiny AArch64 assembly entry shim is
-unavoidable: a CPU begins executing instructions before a Swift stack or runtime
-environment exists. The shim establishes a stack and exception level, clears
-zero-initialized memory, then transfers control permanently to Swift. Assembly
-will also be used only for privileged instructions Swift cannot emit directly.
+All long-lived kernel subsystems are intended to be Swift. A small AArch64
+assembly boundary is unavoidable: a CPU begins executing before a Swift stack or
+runtime environment exists. It establishes bootstrap architectural state,
+including the exception level, stack, boot page table, MMU/cache controls, and
+zero-initialized memory. Assembly is otherwise reserved for exception/context
+veneers and privileged instructions Swift cannot emit.
 
 ## Milestones
 
@@ -47,17 +49,20 @@ will also be used only for privileged instructions Swift cannot emit directly.
    reverse-engineered hardware program rather than a build flag.
 
 See [Architecture](docs/architecture.md) and [Hardware roadmap](docs/hardware-roadmap.md)
-for the contracts behind those milestones.
+for the contracts behind those milestones. [Current status](docs/current-status.md)
+separates working guest code from the next kernel frontiers.
 
 ## Prerequisites
 
-- Swift 6.2 or newer with Embedded Swift support
+- Swift 6.2 with the bare-metal `aarch64-none-none-elf` Embedded Swift standard
+  library (some newer Xcode toolchains do not install this target)
 - LLVM tools (`clang`, `ld.lld`, and `llvm-objcopy`)
 - `qemu-system-aarch64`
 - Python 3 for smoke tests
 
 The build is deliberately dependency-light and does not fetch an SDK or reuse a
-third-party kernel.
+third-party kernel. `make toolchain-check` performs a real cross-compile probe so
+an incompatible selected `swiftc` fails before stale build output can hide it.
 
 ## Build and verify
 
@@ -65,17 +70,24 @@ third-party kernel.
 make build
 make inspect
 make smoke
+make monitor-smoke
+make frame-smoke
 make test
 ```
 
-Use `make run` for an interactive serial session. The linked artifact is
+Use `make run` to open the guest ramfb display. Type monitor commands in the
+terminal that launched QEMU; PL011 input updates both serial output and the guest
+terminal window. The linked artifact is
 `.build/swiftos.elf`; it must identify as AArch64 ELF, never Mach-O. QEMU boots
 the derived `.build/swiftos.bin` so it follows the AArch64 boot protocol and
 passes the device-tree address in `x0`.
 
 ## Honest status
 
-The repository starts at the boot vertical slice. It is not yet a general-
-purpose OS and must not be described as one until memory isolation, processes,
-storage, input, and native graphics all work in the guest. Each milestone is
-expected to leave behind a repeatable boot or unit test rather than a mock UI.
+The repository now boots a freestanding EL1 Swift kernel, discovers devices,
+publishes a linker-owned framebuffer, renders its own desktop, and runs an
+interactive kernel monitor written in Swift. It is a real bootable kernel, not
+yet a general-purpose or self-hosting OS: interrupts, a physical allocator,
+preemptive tasks, EL0 isolation, storage, and graphical keyboard/pointer drivers
+remain. Each milestone must leave behind a repeatable boot or unit test rather
+than a mock UI.

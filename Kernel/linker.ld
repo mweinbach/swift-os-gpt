@@ -36,6 +36,7 @@ SECTIONS
         __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
+        . = ALIGN(16);
         __bss_end = .;
     }
 
@@ -86,6 +87,7 @@ SECTIONS
 }
 
 ASSERT((__boot_stack_top & 15) == 0, "boot stack must be 16-byte aligned")
+ASSERT(((__bss_end - __bss_start) & 15) == 0, "BSS clear span must be 16-byte aligned")
 ASSERT((__dma_scratch_start & 4095) == 0, "DMA scratch must be page aligned")
 ASSERT((__terminal_storage_start & 4095) == 0, "terminal storage must be page aligned")
 ASSERT((__framebuffer_start & 4095) == 0, "framebuffer must be page aligned")

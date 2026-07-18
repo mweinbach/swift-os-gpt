@@ -21,7 +21,7 @@ enum DesktopRenderer {
             scale: 2
         )
         framebuffer.drawText(
-            "EL1  MMU ON  SWIFT NATIVE",
+            "EL1  MMU ON  QEMU VIRT",
             at: Point(x: 530, y: 13),
             color: .muted
         )
@@ -32,10 +32,8 @@ enum DesktopRenderer {
         framebuffer.fill(Rectangle(x: 48, y: 78, width: 470, height: 354), color: .terminal)
         framebuffer.stroke(Rectangle(x: 48, y: 78, width: 470, height: 354), color: .panel)
         framebuffer.fill(Rectangle(x: 49, y: 79, width: 468, height: 31), color: .panel)
-        framebuffer.fill(Rectangle(x: 63, y: 91, width: 8, height: 8), color: .red)
-        framebuffer.fill(Rectangle(x: 79, y: 91, width: 8, height: 8), color: .yellow)
-        framebuffer.fill(Rectangle(x: 95, y: 91, width: 8, height: 8), color: .green)
-        framebuffer.drawText("TERMINAL", at: Point(x: 232, y: 91), color: .muted)
+        framebuffer.fill(Rectangle(x: 63, y: 91, width: 8, height: 8), color: .cyan)
+        framebuffer.drawText("KERNEL MONITOR", at: Point(x: 238, y: 91), color: .muted)
     }
 
     private static func drawSystemPanel(on framebuffer: LinearFramebuffer) {
@@ -76,21 +74,20 @@ enum DesktopRenderer {
         framebuffer.fill(Rectangle(x: 188, y: 536, width: 412, height: 46), color: .chrome)
         framebuffer.stroke(Rectangle(x: 188, y: 536, width: 412, height: 46), color: .panel)
 
-        dockIcon("T", x: 216, color: .cyan, on: framebuffer)
-        dockIcon("F", x: 284, color: .blue, on: framebuffer)
-        dockIcon("S", x: 352, color: .green, on: framebuffer)
-        dockIcon("N", x: 420, color: .yellow, on: framebuffer)
-        dockIcon(">", x: 488, color: .red, on: framebuffer)
-        framebuffer.drawText("SWIFT TO METAL", at: Point(x: 520, y: 556), color: .muted)
+        capabilityChip("EL1", x: 206, color: .cyan, on: framebuffer)
+        capabilityChip("DTB", x: 274, color: .blue, on: framebuffer)
+        capabilityChip("UART", x: 342, color: .green, on: framebuffer)
+        capabilityChip("FB", x: 410, color: .yellow, on: framebuffer)
+        framebuffer.drawText("PROVEN IN GUEST", at: Point(x: 492, y: 556), color: .muted)
     }
 
-    private static func dockIcon(
+    private static func capabilityChip(
         _ label: StaticString,
         x: Int,
         color: PixelColor,
         on framebuffer: LinearFramebuffer
     ) {
-        framebuffer.fill(Rectangle(x: x, y: 544, width: 30, height: 30), color: color)
-        framebuffer.drawText(label, at: Point(x: x + 10, y: 552), color: .wallpaper, scale: 2)
+        framebuffer.fill(Rectangle(x: x, y: 546, width: 54, height: 26), color: color)
+        framebuffer.drawText(label, at: Point(x: x + 10, y: 555), color: .wallpaper)
     }
 }

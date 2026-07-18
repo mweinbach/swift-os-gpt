@@ -60,8 +60,8 @@ _start:
 .Lbss_done:
 
     /*
-     * Temporary 4 KiB-granule identity map for the low device GiB and first
-     * RAM GiB. Swift replaces this coarse table during full MMU bring-up.
+     * Boot-time 4 KiB-granule identity map for the low device GiB and first
+     * RAM GiB. It remains active until the future owned-memory milestone.
      */
     ldr     x1, =__early_l1_table
     mov     x2, #0
@@ -81,11 +81,11 @@ _start:
     mov     x2, #0xff00             /* MAIR attr0=device, attr1=normal WB */
     msr     mair_el1, x2
 
-    /* T0SZ=32, 4 KiB, inner-shareable, WBWA, CPU physical-address width. */
-    mov     x2, #32
-    orr     x2, x2, #(1 << 8)
-    orr     x2, x2, #(1 << 10)
-    orr     x2, x2, #(3 << 12)
+    /*
+     * T0SZ/T1SZ=32, 4 KiB granules, inner-shareable WBWA. TTBR1 walks are
+     * disabled explicitly so no reset-unknown upper table can be consulted.
+     */
+    ldr     x2, =0x00000000b5a03520
     mrs     x3, id_aa64mmfr0_el1
     and     x3, x3, #0xf
     lsl     x3, x3, #32
@@ -93,15 +93,17 @@ _start:
     msr     tcr_el1, x2
     ldr     x2, =__early_l1_table
     msr     ttbr0_el1, x2
+    msr     ttbr1_el1, xzr
     isb
 
     tlbi    vmalle1
     dsb     sy
     isb
-    mrs     x2, sctlr_el1
-    orr     x2, x2, #1             /* MMU */
-    orr     x2, x2, #4             /* data cache */
-    orr     x2, x2, #(1 << 12)     /* instruction cache */
+    ic      iallu
+    dsb     nsh
+    isb
+    /* Armv8.0 RES1 bits + M/C/I + EL0/EL1 stack alignment checks. */
+    ldr     x2, =0x0000000030d0181d
     msr     sctlr_el1, x2
     isb
 
@@ -113,7 +115,7 @@ _start:
     b       .Lpark
 .size _start, . - _start
 
-/* Early vectors park safely. Swift installs diagnostic vectors before IRQs. */
+/* Early vectors park safely. Typed diagnostic vectors are the next milestone. */
 .align 11
 early_vectors:
 .macro EARLY_VECTOR
