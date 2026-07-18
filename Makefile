@@ -344,6 +344,15 @@ host-test:
 	$(BUILD_DIR)/animated-status-indicator-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/GPU/GPUPrimitives.swift \
+		Kernel/Graphics/GPU/GPURenderCommands.swift \
+		Kernel/Graphics/GPU/GPUCommandBuffer.swift \
+		Kernel/Graphics/GPU/GPUSubmission.swift \
+		Tests/Host/GPUCommandIRTests.swift \
+		-o $(BUILD_DIR)/gpu-command-ir-host-tests
+	$(BUILD_DIR)/gpu-command-ir-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Core/PhysicalBytes.swift \
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/DisplayMemory.swift \
