@@ -94,7 +94,7 @@ struct VirtIOMMIOTransport {
 
     init?(resource: DeviceResource) {
         guard resource.baseAddress <= UInt64(UInt.max),
-              resource.length >= 0x100,
+              resource.length >= 0x110,
               resource.baseAddress & 0x3 == 0
         else {
             return nil
