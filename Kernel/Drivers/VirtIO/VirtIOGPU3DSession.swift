@@ -61,6 +61,8 @@ private struct VirtIOGPU3DScanoutMode {
 /// scanout resource. Copying this value would duplicate mutable transport and
 /// fence state, so callers must keep one mutable owner after construction.
 struct VirtIOGPU3DSession {
+    static let readyMarker: StaticString = "SWIFTOS:VIRTIO_GPU_3D_OK\n"
+
     // Values are fixed by the public VirGL/Gallium wire protocol pinned by
     // VirGLCommandEncoder and VirGLCapabilityParser.
     private static let texture2DTarget: UInt32 = 2

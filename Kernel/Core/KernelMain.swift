@@ -1,5 +1,9 @@
 private nonisolated(unsafe) var zeroProbe: UInt64 = 0
 private nonisolated(unsafe) var dataProbe: UInt64 = 0x5357_4946_544f_5301
+private nonisolated(unsafe) var activeVirtIOGPU3DSession:
+    VirtIOGPU3DSession?
+private nonisolated(unsafe) var activeVirtIOGPU3DAllocation:
+    ClassifiedPageAllocationToken?
 
 @_cdecl("swiftos_main")
 func swiftOSMain(_ deviceTreeAddress: UInt64) {
@@ -136,6 +140,24 @@ private func runQEMUDesktop(
     platform: Platform,
     memory: KernelMemoryActivation
 ) -> Never {
+    switch activateVirtIOGPU3D(platform: platform) {
+    case .ready(let configuration):
+        runQEMUAcceleratedDesktop(
+            console: console,
+            platform: platform,
+            memory: memory,
+            configuration: configuration
+        )
+    case .failed:
+        console.write("SWIFTOS:PANIC:VIRTIO_GPU_3D\n")
+        park()
+    case .unavailable:
+        // The existing framebuffer renderer is an explicit bring-up and smoke
+        // diagnostic. It is never entered after an accelerated device starts
+        // a session and then fails.
+        console.write("SWIFTOS:GRAPHICS_DIAGNOSTIC\n")
+    }
+
     guard let firmwareConfiguration = platform.firmwareConfiguration else {
         console.write("SWIFTOS:PANIC:FW_CFG\n")
         park()
@@ -182,6 +204,139 @@ private func runQEMUDesktop(
         memory: memory,
         scanout: scanout,
         display: display
+    )
+}
+
+private enum VirtIOGPU3DActivationResult {
+    case ready(VirtIOGPU3DSessionConfiguration)
+    case unavailable
+    case failed
+}
+
+/// Crosses from backend-neutral allocator/DMA contracts into one VirtIO/VirGL
+/// session. QEMU's transport consumes identity system-bus addresses; another
+/// platform or IOMMU can construct the same workspace with translated device
+/// addresses without changing the session itself.
+private func activateVirtIOGPU3D(
+    platform: Platform
+) -> VirtIOGPU3DActivationResult {
+    guard activeVirtIOGPU3DSession == nil,
+          activeVirtIOGPU3DAllocation == nil
+    else {
+        return .failed
+    }
+
+    let requiredCapabilities = PhysicalMemoryCapabilities.cpuAccessible
+        .union(.deviceAccessible)
+        .union(.cacheCoherent)
+    let allocationResult = KernelMemoryRuntime.allocateClassifiedPages(
+        ClassifiedPageAllocationConstraints(
+            pageCount: VirtIOGPU3DBootstrapMemory.pageCount,
+            requiredCapabilities: requiredCapabilities,
+            domainSelection: .preferred(
+                KernelMemoryRuntime.defaultSystemMemoryDomain,
+                fallback: .disallowed
+            )
+        )
+    )
+    guard case .allocated(let allocation) = allocationResult else {
+        return .unavailable
+    }
+    guard let workspace = VirtIOGPU3DBootstrapMemory(
+              allocation: allocation,
+              deviceBaseAddress: allocation.range.baseAddress,
+              deviceAddressWidth: .bits64,
+              coherency: .hardwareCoherent
+          ),
+          let queueMapping = DMAMapping(
+              cpuPhysicalAddress: AArch64.dmaScratchAddress,
+              deviceAddress: AArch64.dmaScratchAddress,
+              byteCount: MemoryPageGeometry.pageSize,
+              deviceAddressWidth: .bits64,
+              coherency: .hardwareCoherent
+          )
+    else {
+        _ = KernelMemoryRuntime.releaseClassifiedPages(allocation)
+        return .unavailable
+    }
+
+    var index = 0
+    while index < 64, let resource = platform.virtioTransport(at: index) {
+        defer { index += 1 }
+        guard platform.virtioTransportIsDMACoherent(at: index),
+              var transport = VirtIOMMIOTransport(resource: resource),
+              transport.hasVirtIOMagic,
+              transport.identity.version == VirtIOMMIOTransport.modernVersion,
+              transport.identity.deviceID == VirtIOMMIOTransport.gpuDeviceID,
+              transport.initializeModernGPU(
+                  queueMapping: queueMapping,
+                  requestedDeviceFeatures:
+                    VirtIOGPU3DFeatures.acceleratedRequestMask
+              ) == .ready
+        else {
+            continue
+        }
+
+        guard transport.negotiatedFeatures
+                & VirtIOGPU3DFeatures.baseline3DRequestMask
+                == VirtIOGPU3DFeatures.baseline3DRequestMask
+        else {
+            continue
+        }
+
+        var session = VirtIOGPU3DSession(
+            transport: transport,
+            commandArenaMapping: workspace.commandArena,
+            requestMapping: workspace.request,
+            responseMapping: workspace.response,
+            protectedQueueMapping: queueMapping
+        )
+        let clear = VirtIOGPU3DClearColor(
+            redBits: 0x3d23_d70a,
+            greenBits: 0x3d75_c28f,
+            blueBits: 0x3df5_c28f,
+            alphaBits: 0x3f80_0000
+        )
+        switch session.configureAndClear(color: clear) {
+        case .configured(let configuration):
+            activeVirtIOGPU3DAllocation = allocation
+            activeVirtIOGPU3DSession = session
+            return .ready(configuration)
+        case .failed:
+            // The session may have timed out. Preserve its pages and queue
+            // ownership rather than allowing another device or the CPU
+            // diagnostic path to reuse memory that could still be referenced.
+            activeVirtIOGPU3DAllocation = allocation
+            activeVirtIOGPU3DSession = session
+            return .failed
+        }
+    }
+
+    _ = KernelMemoryRuntime.releaseClassifiedPages(allocation)
+    return .unavailable
+}
+
+private func runQEMUAcceleratedDesktop(
+    console: EarlyConsole,
+    platform: Platform,
+    memory: KernelMemoryActivation,
+    configuration: VirtIOGPU3DSessionConfiguration
+) -> Never {
+    console.write(VirtIOGPU.transportReadyMarker)
+    console.write(VirtIOGPU3DSession.readyMarker)
+    console.write("SWIFTOS:GPU_MODE=")
+    console.writeHex(UInt64(configuration.width))
+    console.write("x")
+    console.writeHex(UInt64(configuration.height))
+    console.write("\n")
+    console.write("SWIFTOS:GPU_FRAME_READY\n")
+    console.write("SWIFTOS:SWIFT_OK\n")
+
+    proveTimerInterrupts(console: console)
+    runScheduledOrPark(
+        console: console,
+        platform: platform,
+        memory: memory
     )
 }
 

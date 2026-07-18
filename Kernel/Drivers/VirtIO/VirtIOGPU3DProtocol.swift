@@ -14,10 +14,16 @@ enum VirtIOGPU3DFeatureBit {
 struct VirtIOGPU3DFeatures: Equatable {
     static let knownMask: UInt64 = (UInt64(1) << 6) - 1
     /// The smallest accelerated contract SwiftOS can safely request before
-    /// capset discovery. Context-init and blob features are negotiated only
-    /// when the corresponding backend lifecycle is implemented.
+    /// capset discovery.
     static let baseline3DRequestMask: UInt64 = UInt64(1)
         << UInt64(VirtIOGPU3DFeatureBit.virgl)
+    /// Optional features consumed by the complete session. Feature selection
+    /// intersects this mask with the offer, so VIRGL is still required by the
+    /// session while context initialization is used when available.
+    static let acceleratedRequestMask: UInt64 = baseline3DRequestMask
+        | (UInt64(1) << UInt64(
+            VirtIOGPU3DFeatureBit.contextInitialization
+        ))
     static let none = VirtIOGPU3DFeatures(uncheckedRawValue: 0)
 
     let rawValue: UInt64

@@ -20,6 +20,10 @@ struct VirtIOGPU3DProtocolTests {
             VirtIOGPU3DFeatures.baseline3DRequestMask == 1,
             "baseline 3D request must contain only VIRGL"
         )
+        expect(
+            VirtIOGPU3DFeatures.acceleratedRequestMask == 0x11,
+            "accelerated request must add context initialization"
+        )
         expect(VirtIOGPU3DFeatureBit.edid == 1, "EDID feature bit drifted")
         expect(
             VirtIOGPU3DFeatureBit.resourceUUID == 2,

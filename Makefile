@@ -144,6 +144,7 @@ run: build
 
 source-check:
 	$(PYTHON) tools/validate_source_boundary.py
+	$(PYTHON) tools/validate_gpu_only_path.py Kernel/Core/KernelMain.swift
 
 host-test:
 	$(SWIFTC) --version
@@ -432,6 +433,16 @@ host-test:
 		Tests/Host/VirtIOGPU3DSessionTests.swift \
 		-o $(BUILD_DIR)/virtio-gpu-3d-session-host-tests
 	$(BUILD_DIR)/virtio-gpu-3d-session-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Memory/PhysicalMemory.swift \
+		Kernel/Memory/ClassifiedPhysicalMemory.swift \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Drivers/VirtIO/VirtIOGPU3DBootstrapMemory.swift \
+		Tests/Host/VirtIOGPU3DBootstrapMemoryTests.swift \
+		-o $(BUILD_DIR)/virtio-gpu-3d-bootstrap-memory-host-tests
+	$(BUILD_DIR)/virtio-gpu-3d-bootstrap-memory-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Drivers/VirtIO/VirtIOGPUDeviceConfiguration.swift \
