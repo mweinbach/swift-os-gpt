@@ -163,9 +163,13 @@ def main() -> int:
                 b"FRAMEBUFFER: 800X600 XRGB8888",
                 remaining(deadline),
             )
-            # The serial line is emitted while the command mutates the Swift
-            # surface; presentation runs immediately after the handler returns.
-            time.sleep(0.05)
+            read_serial_until(
+                process,
+                serial_descriptor,
+                transcript,
+                b"SWIFTOS:DISPLAY_UPDATE_OK",
+                remaining(deadline),
+            )
             execute_qmp(
                 qmp,
                 process.stdin,

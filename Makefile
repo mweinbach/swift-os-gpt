@@ -51,7 +51,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke smp-el0-smoke test host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -184,6 +184,13 @@ host-test:
 	$(BUILD_DIR)/memory-foundation-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Memory/PhysicalMemory.swift \
+		Kernel/Memory/ClassifiedPhysicalMemory.swift \
+		Tests/Host/ClassifiedPhysicalMemoryTests.swift \
+		-o $(BUILD_DIR)/classified-memory-host-tests
+	$(BUILD_DIR)/classified-memory-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Platform/FlattenedDeviceTree.swift \
 		Kernel/Platform/Platform.swift \
 		Kernel/Memory/PhysicalMemory.swift \
@@ -218,6 +225,25 @@ host-test:
 		Tests/Host/SMPRuntimeTests.swift \
 		-o $(BUILD_DIR)/smp-runtime-host-tests
 	$(BUILD_DIR)/smp-runtime-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Graphics/DamageRectangle.swift \
+		Kernel/Graphics/DisplayBackendPolicy.swift \
+		Tests/Host/DisplayContractTests.swift \
+		-o $(BUILD_DIR)/display-contract-host-tests
+	$(BUILD_DIR)/display-contract-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Core/PhysicalBytes.swift \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Graphics/DamageRectangle.swift \
+		Kernel/Drivers/VirtIO/VirtIOGPU.swift \
+		Tests/Host/VirtIOGPUProtocolTests.swift \
+		-o $(BUILD_DIR)/virtio-gpu-protocol-host-tests
+	$(BUILD_DIR)/virtio-gpu-protocol-host-tests
 
 userland-test: $(USERLAND_TEST_ELF)
 	$(PYTHON) Tests/Toolchain/validate_userland_objects.py \
@@ -269,12 +295,20 @@ frame-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/frame_smoke.py \
 		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-frame.ppm
 
+virtio-gpu-smoke: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/virtio_gpu_smoke.py \
+		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-virtio-gpu.ppm
+
 smp-el0-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py $(KERNEL_BIN)
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
 		$(KERNEL_BIN) --virtualization
 
-test: toolchain-check source-check host-test userland-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke smp-el0-smoke rpi5-inspect
+cpu-config-smoke: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
+		$(KERNEL_BIN) --cpu cortex-a76 --cpus 2
+
+test: toolchain-check source-check host-test userland-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke rpi5-inspect
 
 clean:
 	rm -rf $(BUILD_DIR)

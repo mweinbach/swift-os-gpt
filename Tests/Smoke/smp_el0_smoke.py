@@ -11,7 +11,7 @@ import sys
 import time
 
 
-EXPECTED = [
+EXPECTED_BEFORE_SMP = [
     "SWIFTOS:BOOT",
     "SWIFTOS:EL1",
     "SWIFTOS:BSS_OK",
@@ -28,9 +28,9 @@ EXPECTED = [
     "SWIFTOS:TIMER_1",
     "SWIFTOS:TIMER_2",
     "SWIFTOS:TIMER_3",
-    "SWIFTOS:SMP_CPU1_ONLINE",
-    "SWIFTOS:SMP_CPU2_ONLINE",
-    "SWIFTOS:SMP_CPU3_ONLINE",
+]
+
+EXPECTED_AFTER_SMP = [
     "SWIFTOS:SMP_OK",
     "SWIFTOS:READY",
     "SWIFTOS:SCHEDULER_READY",
@@ -46,6 +46,8 @@ def run_kernel(
     kernel: Path,
     timeout: float,
     virtualization: bool,
+    cpu: str,
+    processor_count: int,
 ) -> str:
     machine = "virt,gic-version=3"
     if virtualization:
@@ -53,9 +55,9 @@ def run_kernel(
     command = [
         qemu,
         "-machine", machine,
-        "-cpu", "cortex-a72",
+        "-cpu", cpu,
         "-accel", "tcg",
-        "-smp", "4",
+        "-smp", str(processor_count),
         "-m", "512M",
         "-device", "ramfb,id=ramfb0",
         "-display", "none",
@@ -99,11 +101,19 @@ def run_kernel(
     return transcript.decode("utf-8", errors="replace").replace("\r", "")
 
 
-def validate(transcript: str) -> None:
+def validate(transcript: str, processor_count: int) -> None:
     if "SWIFTOS:PANIC" in transcript:
         raise AssertionError(f"kernel panic:\n{transcript}")
     position = -1
-    for marker in EXPECTED:
+    expected = (
+        EXPECTED_BEFORE_SMP
+        + [
+            f"SWIFTOS:SMP_CPU{processor_id}_ONLINE"
+            for processor_id in range(1, processor_count)
+        ]
+        + EXPECTED_AFTER_SMP
+    )
+    for marker in expected:
         position = transcript.find(marker, position + 1)
         if position < 0:
             raise AssertionError(f"missing ordered marker {marker}:\n{transcript}")
@@ -114,22 +124,29 @@ def main() -> int:
     parser.add_argument("kernel", type=Path)
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--virtualization", action="store_true")
+    parser.add_argument("--cpu", default="cortex-a72")
+    parser.add_argument("--cpus", type=int, default=4)
     arguments = parser.parse_args()
+    if arguments.cpus < 2 or arguments.cpus > 4:
+        parser.error("--cpus must be between 2 and 4")
     transcript = run_kernel(
         os.environ.get("QEMU", "qemu-system-aarch64"),
         arguments.kernel.resolve(),
         arguments.timeout,
         arguments.virtualization,
+        arguments.cpu,
+        arguments.cpus,
     )
     try:
-        validate(transcript)
+        validate(transcript, arguments.cpus)
     except AssertionError as error:
         print(f"SMP/EL0 smoke failed: {error}", file=sys.stderr)
         return 1
     entry = "EL2 handoff" if arguments.virtualization else "EL1 entry"
     print(
-        "SMP/EL0 smoke: 4 CPUs, isolated Swift threads, and preemption passed "
-        f"({entry})"
+        "SMP/EL0 smoke: "
+        f"{arguments.cpus} {arguments.cpu} CPUs, isolated Swift threads, "
+        f"and preemption passed ({entry})"
     )
     return 0
 

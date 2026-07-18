@@ -36,10 +36,13 @@ struct KernelMonitor {
     mutating func run() -> Never {
         while true {
             if let byte = serial.readByteIfAvailable() {
-                handle(byte)
+                let submittedCommand = handle(byte)
                 guard display.presentFullFrame() else {
                     serialWrite("SWIFTOS:PANIC:DISPLAY_PRESENT\n")
                     while true { AArch64.waitForEvent() }
+                }
+                if submittedCommand && display.kind == .virtIOGPU {
+                    serialWrite("SWIFTOS:DISPLAY_UPDATE_OK\n")
                 }
             } else {
                 AArch64.spinHint()
@@ -47,30 +50,30 @@ struct KernelMonitor {
         }
     }
 
-    private mutating func handle(_ byte: UInt8) {
+    private mutating func handle(_ byte: UInt8) -> Bool {
         if byte == 13 {
             lastInputWasCarriageReturn = true
             submitLine()
-            return
+            return true
         }
         if byte == 10 {
             if lastInputWasCarriageReturn {
                 lastInputWasCarriageReturn = false
-                return
+                return false
             }
             submitLine()
-            return
+            return true
         }
         lastInputWasCarriageReturn = false
 
         if byte == 8 || byte == 127 {
-            guard lineLength > 0 else { return }
+            guard lineLength > 0 else { return false }
             lineLength -= 1
             terminal.backspace()
             serial.write(byte: 8)
             serial.write(byte: 32)
             serial.write(byte: 8)
-            return
+            return false
         }
 
         guard byte >= 32,
@@ -78,12 +81,13 @@ struct KernelMonitor {
               lineLength < Self.maximumLineLength,
               let line = linePointer
         else {
-            return
+            return false
         }
         line[lineLength] = byte
         lineLength += 1
         terminal.write(byte: byte, color: KernelTerminal.cyan)
         serial.write(byte: byte)
+        return false
     }
 
     private mutating func submitLine() {
