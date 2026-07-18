@@ -353,6 +353,14 @@ host-test:
 	$(BUILD_DIR)/gpu-command-ir-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/GPU/GPUPrimitives.swift \
+		Kernel/Graphics/GPU/GPUSubmission.swift \
+		Kernel/Graphics/GPU/GPUFrameScheduler.swift \
+		Tests/Host/GPUFrameSchedulerTests.swift \
+		-o $(BUILD_DIR)/gpu-frame-scheduler-host-tests
+	$(BUILD_DIR)/gpu-frame-scheduler-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Graphics/Geometry.swift \
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/DisplayViewport.swift \
