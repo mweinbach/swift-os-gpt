@@ -35,6 +35,19 @@ def main() -> int:
 
     path = pathlib.Path(sys.argv[1])
     source = path.read_text(encoding="utf-8")
+    session_path = (
+        path.parents[1]
+        / "Drivers"
+        / "VirtIO"
+        / "VirtIOGPU3DSession.swift"
+    )
+    if not session_path.is_file():
+        print(
+            f"gpu-only path: missing accelerated session {session_path}",
+            file=sys.stderr,
+        )
+        return 1
+    session = session_path.read_text(encoding="utf-8")
     try:
         activation = function_source(source, "activateVirtIOGPU3D")
         accelerated = function_source(source, "runQEMUAcceleratedDesktop")
@@ -42,7 +55,7 @@ def main() -> int:
         print(f"gpu-only path: {error}", file=sys.stderr)
         return 1
 
-    combined = activation + accelerated
+    combined = activation + accelerated + session
     forbidden = (
         "LinearFramebuffer",
         "ScaledFramebufferCanvas",
@@ -50,6 +63,8 @@ def main() -> int:
         "SoftwareRasterizer",
         "SoftwareLayerCompositor",
         "ScanoutBuffer",
+        "resourceAttachBacking",
+        "transferToHost2D",
     )
     violations = [token for token in forbidden if token in combined]
     if violations:
@@ -67,6 +82,11 @@ def main() -> int:
         "configureAndRenderDesktop",
         "VirtIOGPU3DSession.readyMarker",
         "SWIFTOS:GPU_FRAME_READY",
+        "VirGLIRCompiler",
+        "encodeResourceInlineWrite",
+        "b8g8r8a8SRGB",
+        "unitQuadResourceID",
+        "mutating func render(",
     )
     missing = [token for token in required if token not in combined]
     if missing:
