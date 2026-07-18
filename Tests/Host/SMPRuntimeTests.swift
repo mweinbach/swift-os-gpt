@@ -110,7 +110,7 @@ private func withRuntime(
     conduit: PSCIConduit,
     body: (inout SMPRuntime) -> Void
 ) {
-    let topologyStorage = UnsafeMutableBufferPointer<ProcessorAffinity>
+    let topologyStorage = UnsafeMutableBufferPointer<ProcessorDescription>
         .allocate(capacity: processorCount)
     let targetStorage = UnsafeMutableBufferPointer<SecondaryProcessorTarget>
         .allocate(capacity: max(0, processorCount - 1))
@@ -136,7 +136,15 @@ private func withRuntime(
     let plan = ProcessorStartupPlan(
         topology: topology,
         bootMPIDR: 0,
-        maximumProcessorCount: processorCount,
+        configuration: ProcessorBootConfiguration(
+            requestedProcessorLimit: processorCount,
+            resources: ProcessorBootResourceCapacity(
+                topologyDescriptions: topologyStorage.count,
+                secondaryTargets: targetStorage.count,
+                bootStates: stateStorage.count,
+                startupReports: reportStorage.count
+            )
+        )!,
         targetStorage: targetStorage
     )!
     var runtime = SMPRuntime(

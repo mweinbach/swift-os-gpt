@@ -20,9 +20,11 @@ struct SMPRuntime {
         reportStorage: UnsafeMutableBufferPointer<SecondaryProcessorStartReport>
     ) {
         guard plan.processorCount > 0,
-              plan.processorCount <= 8,
-              stateStorage.count >= plan.processorCount,
-              reportStorage.count >= plan.secondaryProcessorCount,
+              plan.processorCount
+                <= ProcessorStartupPlan.maximumOnlineProcessorCount,
+              stateStorage.count >= plan.configuration.resources.bootStates,
+              reportStorage.count
+                >= plan.configuration.resources.startupReports,
               let stateBase = stateStorage.baseAddress,
               UInt(bitPattern: stateBase) & 0x7 == 0
         else {

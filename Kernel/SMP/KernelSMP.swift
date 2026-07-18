@@ -16,7 +16,7 @@ enum KernelSMP {
     static func start(platform: Platform, console: EarlyConsole) -> Bool {
         guard storageLayoutIsValid(),
               let topologyStorage:
-                UnsafeMutableBufferPointer<ProcessorAffinity> = buffer(
+                UnsafeMutableBufferPointer<ProcessorDescription> = buffer(
                     at: KernelLinkerLayout.smpTopologyStorage,
                     count: topologyCapacity
                 ),
@@ -46,18 +46,28 @@ enum KernelSMP {
             switch topology.register(deviceTreeAffinity: affinity) {
             case .inserted, .duplicate:
                 break
-            case .invalidAffinity, .capacityExhausted:
+            case .conflictingDescription, .invalidAffinity, .capacityExhausted:
                 console.write("SWIFTOS:SMP_BAD_TOPOLOGY\n")
                 return false
             }
             deviceTreeIndex += 1
         }
+        let resources = ProcessorBootResourceCapacity(
+            topologyDescriptions: topologyStorage.count,
+            secondaryTargets: targetStorage.count,
+            bootStates: stateStorage.count,
+            startupReports: reportStorage.count
+        )
         guard topology.count > 0,
+              let configuration = ProcessorBootConfiguration(
+                  requestedProcessorLimit:
+                    ProcessorStartupPlan.maximumOnlineProcessorCount,
+                  resources: resources
+              ),
               let plan = ProcessorStartupPlan(
                   topology: topology,
                   bootMPIDR: AArch64.multiprocessorAffinity,
-                  maximumProcessorCount:
-                    ProcessorStartupPlan.maximumOnlineProcessorCount,
+                  configuration: configuration,
                   targetStorage: targetStorage
               )
         else {
@@ -162,7 +172,7 @@ enum KernelSMP {
             return false
         }
         return targets - topology >= requiredBytes(
-            ProcessorAffinity.self,
+            ProcessorDescription.self,
             count: topologyCapacity
         ) && states - targets >= requiredBytes(
             SecondaryProcessorTarget.self,
