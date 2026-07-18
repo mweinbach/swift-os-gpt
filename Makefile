@@ -90,6 +90,7 @@ host-test:
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Platform/FlattenedDeviceTree.swift \
+		Kernel/Platform/Platform.swift \
 		Tests/Host/FlattenedDeviceTreeTests.swift \
 		-o $(BUILD_DIR)/fdt-host-tests
 	$(BUILD_DIR)/fdt-host-tests
@@ -102,12 +103,13 @@ host-test:
 
 qemu-fdt-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
-	$(QEMU) -machine virt,dumpdtb=$(BUILD_DIR)/qemu-virt.dtb \
+	$(QEMU) -machine virt,gic-version=3,dumpdtb=$(BUILD_DIR)/qemu-virt.dtb \
 		-cpu cortex-a72 -m 512M -display none -monitor none -serial none
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		-emit-library \
 		Kernel/Platform/FlattenedDeviceTree.swift \
+		Kernel/Platform/Platform.swift \
 		Tests/Host/QEMUDeviceTreeProbe.swift \
 		-o $(BUILD_DIR)/libQEMUDeviceTreeProbe.dylib
 	$(PYTHON) Tests/Host/qemu_fdt_probe.py \

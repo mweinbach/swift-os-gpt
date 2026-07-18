@@ -3,6 +3,37 @@ struct DeviceResource: Equatable {
     let length: UInt64
 }
 
+private struct DeviceTreeSearchResult {
+    let resource: DeviceResource?
+}
+
+private struct AddressTranslation {
+    let childBase: UInt64
+    let rootBase: UInt64
+    let length: UInt64
+    let active: Bool
+
+    static let identity = AddressTranslation(
+        childBase: 0,
+        rootBase: 0,
+        length: UInt64.max,
+        active: false
+    )
+
+    func translate(address: UInt64, length resourceLength: UInt64) -> UInt64? {
+        guard active else { return address }
+        guard address >= childBase else { return nil }
+        let offset = address - childBase
+        guard offset <= length,
+              resourceLength <= length - offset,
+              rootBase <= UInt64.max - offset
+        else {
+            return nil
+        }
+        return rootBase + offset
+    }
+}
+
 struct FlattenedDeviceTree {
     private static let magic: UInt32 = 0xd00d_feed
     private static let headerSize: UInt = 40
@@ -19,6 +50,10 @@ struct FlattenedDeviceTree {
     private let structureEnd: UInt
     private let stringsStart: UInt
     private let stringsEnd: UInt
+
+    var blobSize: UInt64 {
+        UInt64(totalSize)
+    }
 
     init?(address rawAddress: UInt64) {
         guard rawAddress != 0,
@@ -65,7 +100,52 @@ struct FlattenedDeviceTree {
         stringsEnd = stringsOffset + stringsSize
     }
 
-    func resource(compatibleWith compatibility: StaticString) -> DeviceResource? {
+    func contains(compatibleWith compatibility: StaticString) -> Bool {
+        var remainingMatches = 0
+        return search(
+            compatibleWith: compatibility,
+            deviceType: nil,
+            remainingMatches: &remainingMatches,
+            registerIndex: 0
+        ) != nil
+    }
+
+    func resource(
+        compatibleWith compatibility: StaticString,
+        nodeIndex: Int = 0,
+        registerIndex: Int = 0
+    ) -> DeviceResource? {
+        guard nodeIndex >= 0, registerIndex >= 0 else { return nil }
+        var remainingMatches = nodeIndex
+        return search(
+            compatibleWith: compatibility,
+            deviceType: nil,
+            remainingMatches: &remainingMatches,
+            registerIndex: registerIndex
+        )?.resource
+    }
+
+    func resource(
+        deviceType: StaticString,
+        nodeIndex: Int = 0,
+        registerIndex: Int = 0
+    ) -> DeviceResource? {
+        guard nodeIndex >= 0, registerIndex >= 0 else { return nil }
+        var remainingMatches = nodeIndex
+        return search(
+            compatibleWith: nil,
+            deviceType: deviceType,
+            remainingMatches: &remainingMatches,
+            registerIndex: registerIndex
+        )?.resource
+    }
+
+    private func search(
+        compatibleWith compatibility: StaticString?,
+        deviceType: StaticString?,
+        remainingMatches: inout Int,
+        registerIndex: Int
+    ) -> DeviceTreeSearchResult? {
         var cursor = structureStart
         while cursor < structureEnd {
             guard let token = readStructureWord(at: cursor) else {
@@ -82,7 +162,11 @@ struct FlattenedDeviceTree {
                 cursor: &cursor,
                 inheritedAddressCells: 2,
                 inheritedSizeCells: 1,
-                compatibility: compatibility
+                parentTranslation: .identity,
+                compatibility: compatibility,
+                deviceType: deviceType,
+                remainingMatches: &remainingMatches,
+                registerIndex: registerIndex
             )
         }
         return nil
@@ -92,8 +176,12 @@ struct FlattenedDeviceTree {
         cursor: inout UInt,
         inheritedAddressCells: UInt32,
         inheritedSizeCells: UInt32,
-        compatibility: StaticString
-    ) -> DeviceResource? {
+        parentTranslation: AddressTranslation,
+        compatibility: StaticString?,
+        deviceType: StaticString?,
+        remainingMatches: inout Int,
+        registerIndex: Int
+    ) -> DeviceTreeSearchResult? {
         guard readStructureWord(at: cursor) == Self.beginNode else {
             return nil
         }
@@ -106,8 +194,11 @@ struct FlattenedDeviceTree {
         // direct parent that omits them supplies the architectural defaults.
         var childAddressCells: UInt32 = 2
         var childSizeCells: UInt32 = 1
-        var matches = false
+        var compatibleMatches = compatibility == nil
+        var deviceTypeMatches = deviceType == nil
+        var enabled = true
         var resource: DeviceResource?
+        var childTranslation = parentTranslation
 
         while cursor < structureEnd {
             guard let token = readStructureWord(at: cursor) else {
@@ -122,7 +213,11 @@ struct FlattenedDeviceTree {
                     cursor: &cursor,
                     inheritedAddressCells: childAddressCells,
                     inheritedSizeCells: childSizeCells,
-                    compatibility: compatibility
+                    parentTranslation: childTranslation,
+                    compatibility: compatibility,
+                    deviceType: deviceType,
+                    remainingMatches: &remainingMatches,
+                    registerIndex: registerIndex
                 ) {
                     return found
                 }
@@ -165,8 +260,24 @@ struct FlattenedDeviceTree {
                     }
                     childSizeCells = value
                 } else if propertyName(at: UInt(nameOffset), equals: "compatible") {
-                    matches = containsCString(
-                        compatibility,
+                    if let compatibility {
+                        compatibleMatches = containsCString(
+                            compatibility,
+                            at: valueOffset,
+                            length: valueLength
+                        )
+                    }
+                } else if propertyName(at: UInt(nameOffset), equals: "device_type") {
+                    if let deviceType {
+                        deviceTypeMatches = cStringEquals(
+                            deviceType,
+                            at: valueOffset,
+                            length: valueLength
+                        )
+                    }
+                } else if propertyName(at: UInt(nameOffset), equals: "status") {
+                    enabled = !cStringEquals(
+                        "disabled",
                         at: valueOffset,
                         length: valueLength
                     )
@@ -175,12 +286,29 @@ struct FlattenedDeviceTree {
                         at: valueOffset,
                         length: valueLength,
                         addressCells: inheritedAddressCells,
-                        sizeCells: inheritedSizeCells
+                        sizeCells: inheritedSizeCells,
+                        registerIndex: registerIndex,
+                        translation: parentTranslation
                     )
+                } else if propertyName(at: UInt(nameOffset), equals: "ranges") {
+                    childTranslation = decodeTranslation(
+                        at: valueOffset,
+                        length: valueLength,
+                        childAddressCells: childAddressCells,
+                        parentAddressCells: inheritedAddressCells,
+                        sizeCells: childSizeCells,
+                        parentTranslation: parentTranslation
+                    ) ?? parentTranslation
                 }
 
             case Self.endNode:
-                return matches ? resource : nil
+                if compatibleMatches && deviceTypeMatches && enabled {
+                    if remainingMatches == 0 {
+                        return DeviceTreeSearchResult(resource: resource)
+                    }
+                    remainingMatches -= 1
+                }
+                return nil
 
             case Self.noOperation:
                 continue
@@ -199,7 +327,9 @@ struct FlattenedDeviceTree {
         at offset: UInt,
         length: UInt,
         addressCells: UInt32,
-        sizeCells: UInt32
+        sizeCells: UInt32,
+        registerIndex: Int,
+        translation: AddressTranslation
     ) -> DeviceResource? {
         guard addressCells <= 2,
               sizeCells <= 2
@@ -208,16 +338,76 @@ struct FlattenedDeviceTree {
         }
         let addressByteCount = UInt(addressCells) * 4
         let sizeByteCount = UInt(sizeCells) * 4
-        guard length >= addressByteCount + sizeByteCount,
-              let baseAddress = readCells(at: offset, count: addressCells),
+        let entryByteCount = addressByteCount + sizeByteCount
+        guard entryByteCount > 0,
+              registerIndex <= Int.max / Int(entryByteCount),
+              let entryOffset = UInt(exactly: registerIndex * Int(entryByteCount)),
+              entryOffset <= length,
+              entryByteCount <= length - entryOffset,
+              let baseAddress = readCells(
+                  at: offset + entryOffset,
+                  count: addressCells
+              ),
               let resourceLength = readCells(
-                  at: offset + addressByteCount,
+                  at: offset + entryOffset + addressByteCount,
                   count: sizeCells
+              ),
+              let translatedAddress = translation.translate(
+                  address: baseAddress,
+                  length: resourceLength
               )
         else {
             return nil
         }
-        return DeviceResource(baseAddress: baseAddress, length: resourceLength)
+        return DeviceResource(
+            baseAddress: translatedAddress,
+            length: resourceLength
+        )
+    }
+
+    private func decodeTranslation(
+        at offset: UInt,
+        length: UInt,
+        childAddressCells: UInt32,
+        parentAddressCells: UInt32,
+        sizeCells: UInt32,
+        parentTranslation: AddressTranslation
+    ) -> AddressTranslation? {
+        if length == 0 { return parentTranslation }
+        guard childAddressCells <= 2,
+              parentAddressCells <= 2,
+              sizeCells <= 2
+        else {
+            return nil
+        }
+        let childBytes = UInt(childAddressCells) * 4
+        let parentBytes = UInt(parentAddressCells) * 4
+        let sizeBytes = UInt(sizeCells) * 4
+        let entryBytes = childBytes + parentBytes + sizeBytes
+        guard entryBytes > 0,
+              length >= entryBytes,
+              let childBase = readCells(at: offset, count: childAddressCells),
+              let parentBase = readCells(
+                  at: offset + childBytes,
+                  count: parentAddressCells
+              ),
+              let translationLength = readCells(
+                  at: offset + childBytes + parentBytes,
+                  count: sizeCells
+              ),
+              let rootBase = parentTranslation.translate(
+                  address: parentBase,
+                  length: translationLength
+              )
+        else {
+            return nil
+        }
+        return AddressTranslation(
+            childBase: childBase,
+            rootBase: rootBase,
+            length: translationLength,
+            active: true
+        )
     }
 
     private func readCells(at offset: UInt, count: UInt32) -> UInt64? {
@@ -312,6 +502,24 @@ struct FlattenedDeviceTree {
                 index += 1
             }
             return false
+        }
+    }
+
+    private func cStringEquals(
+        _ expected: StaticString,
+        at offset: UInt,
+        length: UInt
+    ) -> Bool {
+        expected.withUTF8Buffer { expectedBytes in
+            guard length == UInt(expectedBytes.count + 1) else { return false }
+            var index = 0
+            while index < expectedBytes.count {
+                guard readByte(at: offset + UInt(index)) == expectedBytes[index] else {
+                    return false
+                }
+                index += 1
+            }
+            return readByte(at: offset + UInt(expectedBytes.count)) == 0
         }
     }
 

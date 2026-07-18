@@ -2,8 +2,9 @@
 struct FlattenedDeviceTreeTests {
     static func main() {
         findsNestedResourcesAndCompatibleListEntries()
+        readsPlatformMemoryCPUAndRegisterIndexes()
         rejectsBadMagicAndTruncatedStructure()
-        print("FDT host tests: 2 passed")
+        print("FDT host tests: 3 passed")
     }
 
     private static func findsNestedResourcesAndCompatibleListEntries() {
@@ -24,12 +25,61 @@ struct FlattenedDeviceTreeTests {
             )
             expect(
                 tree.resource(compatibleWith: "arm,pl011")
-                    == DeviceResource(baseAddress: 0x0900_0000, length: 0x1000),
+                    == DeviceResource(baseAddress: 0x10_0900_0000, length: 0x1000),
                 "PL011 resource mismatch"
             )
             expect(
                 tree.resource(compatibleWith: "swiftos,missing") == nil,
                 "missing resource unexpectedly matched"
+            )
+        }
+    }
+
+    private static func readsPlatformMemoryCPUAndRegisterIndexes() {
+        let bytes = makeDeviceTree()
+        bytes.withUnsafeBytes { storage in
+            let tree = FlattenedDeviceTree(
+                address: UInt64(UInt(bitPattern: storage.baseAddress!))
+            )!
+            expect(
+                tree.contains(compatibleWith: "qemu,virt"),
+                "root compatibility was not found"
+            )
+            expect(
+                tree.resource(deviceType: "memory")
+                    == DeviceResource(baseAddress: 0x4000_0000, length: 0x2000_0000),
+                "memory resource mismatch"
+            )
+            expect(
+                tree.resource(deviceType: "cpu")
+                    == DeviceResource(baseAddress: 0x100, length: 0),
+                "CPU affinity resource mismatch"
+            )
+            expect(
+                tree.resource(
+                    compatibleWith: "arm,gic-v3",
+                    registerIndex: 1
+                ) == DeviceResource(baseAddress: 0x080a_0000, length: 0x20_0000),
+                "second GIC register mismatch"
+            )
+            let platform = Platform.discover(
+                deviceTreeAddress: UInt64(UInt(bitPattern: storage.baseAddress!))
+            )
+            expect(platform?.kind == .qemuVirt, "QEMU platform mismatch")
+            expect(platform?.processorCount == 1, "processor count mismatch")
+            expect(platform?.processorAffinity(at: 0) == 0x100, "CPU affinity mismatch")
+            expect(
+                platform?.interruptController == .gicV3(
+                    distributor: DeviceResource(
+                        baseAddress: 0x0800_0000,
+                        length: 0x1_0000
+                    ),
+                    redistributor: DeviceResource(
+                        baseAddress: 0x080a_0000,
+                        length: 0x20_0000
+                    )
+                ),
+                "platform GIC mismatch"
             )
         }
     }
@@ -62,7 +112,14 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 private func makeDeviceTree() -> [UInt8] {
-    let names = ["#address-cells", "#size-cells", "compatible", "reg"]
+    let names = [
+        "#address-cells",
+        "#size-cells",
+        "compatible",
+        "device_type",
+        "ranges",
+        "reg",
+    ]
     var strings: [UInt8] = []
     var offsets: [String: UInt32] = [:]
     for name in names {
@@ -75,6 +132,11 @@ private func makeDeviceTree() -> [UInt8] {
     appendBeginNode("", to: &structure)
     appendProperty(nameOffset: offsets["#address-cells"]!, value: be32(2), to: &structure)
     appendProperty(nameOffset: offsets["#size-cells"]!, value: be32(2), to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("qemu,virt".utf8) + [0],
+        to: &structure
+    )
 
     appendBeginNode("fw-cfg@9020000", to: &structure)
     appendProperty(
@@ -89,6 +151,33 @@ private func makeDeviceTree() -> [UInt8] {
     )
     appendBE32(2, to: &structure)
 
+    appendBeginNode("memory@40000000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["device_type"]!,
+        value: Array("memory".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be32(0) + be32(0x4000_0000) + be32(0) + be32(0x2000_0000),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("interrupt-controller@8000000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("arm,gic-v3".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be32(0) + be32(0x0800_0000) + be32(0) + be32(0x1_0000)
+            + be32(0) + be32(0x080a_0000) + be32(0) + be32(0x20_0000),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
     appendBeginNode("soc", to: &structure)
     appendProperty(
         nameOffset: offsets["compatible"]!,
@@ -97,6 +186,13 @@ private func makeDeviceTree() -> [UInt8] {
     )
     appendProperty(nameOffset: offsets["#address-cells"]!, value: be32(2), to: &structure)
     appendProperty(nameOffset: offsets["#size-cells"]!, value: be32(2), to: &structure)
+    appendProperty(
+        nameOffset: offsets["ranges"]!,
+        value: be32(0) + be32(0)
+            + be32(0x10) + be32(0)
+            + be32(0) + be32(0x1000_0000),
+        to: &structure
+    )
     appendBeginNode("pl011@9000000", to: &structure)
     appendProperty(
         nameOffset: offsets["compatible"]!,
@@ -108,6 +204,18 @@ private func makeDeviceTree() -> [UInt8] {
         value: be32(0) + be32(0x0900_0000) + be32(0) + be32(0x1000),
         to: &structure
     )
+    appendBE32(2, to: &structure)
+    appendBE32(2, to: &structure)
+    appendBeginNode("cpus", to: &structure)
+    appendProperty(nameOffset: offsets["#address-cells"]!, value: be32(1), to: &structure)
+    appendProperty(nameOffset: offsets["#size-cells"]!, value: be32(0), to: &structure)
+    appendBeginNode("cpu@100", to: &structure)
+    appendProperty(
+        nameOffset: offsets["device_type"]!,
+        value: Array("cpu".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(nameOffset: offsets["reg"]!, value: be32(0x100), to: &structure)
     appendBE32(2, to: &structure)
     appendBE32(2, to: &structure)
     appendBE32(2, to: &structure)
