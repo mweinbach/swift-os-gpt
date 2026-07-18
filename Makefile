@@ -418,6 +418,22 @@ host-test:
 	$(BUILD_DIR)/virgl-capability-parser-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Core/PhysicalBytes.swift \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Graphics/DamageRectangle.swift \
+		Kernel/Drivers/VirtIO/VirtIOGPU.swift \
+		Kernel/Drivers/VirtIO/VirtIOGPU3DProtocol.swift \
+		Kernel/Drivers/VirtIO/VirtIOGPUDeviceConfiguration.swift \
+		Kernel/Drivers/VirtIO/VirtIOQueueBufferPair.swift \
+		Kernel/Drivers/VirtIO/VirGLCapabilityParser.swift \
+		Kernel/Drivers/VirtIO/VirGLCommandEncoder.swift \
+		Kernel/Drivers/VirtIO/VirtIOGPU3DSession.swift \
+		Tests/Host/VirtIOGPU3DSessionTests.swift \
+		-o $(BUILD_DIR)/virtio-gpu-3d-session-host-tests
+	$(BUILD_DIR)/virtio-gpu-3d-session-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Drivers/VirtIO/VirtIOGPUDeviceConfiguration.swift \
 		Tests/Host/VirtIOGPUDeviceConfigurationTests.swift \
 		-o $(BUILD_DIR)/virtio-gpu-device-configuration-host-tests

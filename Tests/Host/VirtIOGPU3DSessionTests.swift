@@ -1,0 +1,539 @@
+// The real transport is volatile MMIO. This deterministic transport shim
+// behaves like one VIRGL2 device and rejects any lifecycle packet that arrives
+// out of order or with the wrong fields.
+
+enum VirtIOMMIORequestResult: Equatable {
+    case completed(responseByteCount: UInt32)
+    case invalidRequest
+    case timedOut
+    case malformedCompletion
+    case deviceNeedsReset
+}
+
+enum AArch64 {
+    static func synchronizeData() {}
+}
+
+struct VirtIOMMIOTransport {
+    enum Behavior: Equatable {
+        case normal
+        case timeoutAt(step: Int)
+        case wrongFenceAt(step: Int)
+        case noEnabledScanout
+    }
+
+    var requestAddress: UInt64 = 0
+    var responseAddress: UInt64 = 0
+    var negotiatedFeatures: UInt64
+    var configuration: VirtIOGPUDeviceConfiguration
+    var behavior: Behavior
+    private var step = 0
+
+    init(
+        negotiatedFeatures: UInt64,
+        configuration: VirtIOGPUDeviceConfiguration,
+        behavior: Behavior
+    ) {
+        self.negotiatedFeatures = negotiatedFeatures
+        self.configuration = configuration
+        self.behavior = behavior
+    }
+
+    mutating func readGPUDeviceConfiguration(
+        maximumAttempts: Int = 8
+    ) -> VirtIOGPUDeviceConfigurationReadResult {
+        guard maximumAttempts > 0 else { return .invalidAttemptLimit }
+        return .ready(configuration)
+    }
+
+    mutating func submit(
+        buffers: VirtIOQueueBufferPair,
+        pollLimit: UInt64 = 5_000_000
+    ) -> VirtIOMMIORequestResult {
+        guard pollLimit > 0 else { return .invalidRequest }
+        if behavior == .timeoutAt(step: step) {
+            return .timedOut
+        }
+        guard requestIsValid(
+                  at: buffers.request.cpuPhysicalAddress,
+                  byteCount: buffers.requestByteCount,
+                  step: step
+              )
+        else {
+            return .invalidRequest
+        }
+        let responseByteCount = writeResponse(
+            at: buffers.response.cpuPhysicalAddress,
+            capacity: buffers.responseCapacity,
+            requestAddress: buffers.request.cpuPhysicalAddress,
+            step: step
+        )
+        guard responseByteCount >= 24 else {
+            return .malformedCompletion
+        }
+        step += 1
+        return .completed(responseByteCount: responseByteCount)
+    }
+
+    // Required only because the production 2D driver shares its source file
+    // with VirtIOGPUProtocol in this host build.
+    mutating func prepareBuffers() -> Bool { false }
+
+    mutating func submit(
+        requestByteCount: UInt32,
+        responseCapacity: UInt32
+    ) -> VirtIOMMIORequestResult {
+        _ = requestByteCount
+        _ = responseCapacity
+        return .invalidRequest
+    }
+
+    mutating func failDevice() {}
+
+    private func requestIsValid(
+        at address: UInt64,
+        byteCount: UInt32,
+        step: Int
+    ) -> Bool {
+        let expectedType: UInt32
+        let expectedByteCount: UInt32
+        switch step {
+        case 0:
+            expectedType = VirtIOGPUControlType.getDisplayInfo
+            expectedByteCount = 24
+        case 1:
+            expectedType = VirtIOGPU3DControlType.getCapsetInfo
+            expectedByteCount = 32
+        case 2:
+            expectedType = VirtIOGPU3DControlType.getCapsetInfo
+            expectedByteCount = 32
+        case 3:
+            expectedType = VirtIOGPU3DControlType.getCapset
+            expectedByteCount = 32
+        case 4:
+            expectedType = VirtIOGPU3DControlType.contextCreate
+            expectedByteCount = 96
+        case 5:
+            expectedType = VirtIOGPU3DControlType.resourceCreate3D
+            expectedByteCount = 72
+        case 6:
+            expectedType = VirtIOGPU3DControlType.contextAttachResource
+            expectedByteCount = 32
+        case 7:
+            expectedType = VirtIOGPU3DControlType.submit3D
+            expectedByteCount = 108
+        case 8:
+            expectedType = VirtIOGPUControlType.setScanout
+            expectedByteCount = 48
+        case 9:
+            expectedType = VirtIOGPUControlType.resourceFlush
+            expectedByteCount = 48
+        default:
+            return false
+        }
+        guard byteCount == expectedByteCount,
+              PhysicalBytes.readLE32(at: address) == expectedType,
+              PhysicalBytes.readLE32(at: address + 4)
+                & VirtIOGPUProtocol.fenceFlag != 0,
+              PhysicalBytes.readLE64(at: address + 8) == UInt64(step + 1)
+        else {
+            return false
+        }
+
+        switch step {
+        case 0:
+            return PhysicalBytes.readLE32(at: address + 16) == 0
+        case 1:
+            return PhysicalBytes.readLE32(at: address + 24) == 0
+                && PhysicalBytes.readLE32(at: address + 16) == 0
+        case 2:
+            return PhysicalBytes.readLE32(at: address + 24) == 1
+                && PhysicalBytes.readLE32(at: address + 16) == 0
+        case 3:
+            return PhysicalBytes.readLE32(at: address + 24) == 2
+                && PhysicalBytes.readLE32(at: address + 28) == 2
+        case 4:
+            return PhysicalBytes.readLE32(at: address + 16) == 1
+                && PhysicalBytes.readLE32(at: address + 24) == 0
+                && PhysicalBytes.readLE32(at: address + 28)
+                    == (negotiatedFeatures & (1 << 4) != 0 ? 2 : 0)
+        case 5:
+            return PhysicalBytes.readLE32(at: address + 16) == 0
+                && PhysicalBytes.readLE32(at: address + 24) == 1
+                && PhysicalBytes.readLE32(at: address + 28) == 2
+                && PhysicalBytes.readLE32(at: address + 32) == 2
+                && PhysicalBytes.readLE32(at: address + 36) == 0x0004_0002
+                && PhysicalBytes.readLE32(at: address + 40) == 1_920
+                && PhysicalBytes.readLE32(at: address + 44) == 1_080
+                && PhysicalBytes.readLE32(at: address + 48) == 1
+                && PhysicalBytes.readLE32(at: address + 52) == 1
+                && PhysicalBytes.readLE32(at: address + 56) == 0
+                && PhysicalBytes.readLE32(at: address + 60) == 0
+                && PhysicalBytes.readLE32(at: address + 64) == 1
+        case 6:
+            return PhysicalBytes.readLE32(at: address + 16) == 1
+                && PhysicalBytes.readLE32(at: address + 24) == 1
+        case 7:
+            return submitCommandStreamIsValid(at: address)
+        case 8:
+            return rectangleIsFullDisplay(at: address + 24)
+                && PhysicalBytes.readLE32(at: address + 40) == 0
+                && PhysicalBytes.readLE32(at: address + 44) == 1
+        case 9:
+            return rectangleIsFullDisplay(at: address + 24)
+                && PhysicalBytes.readLE32(at: address + 40) == 1
+                && PhysicalBytes.readLE32(at: address + 44) == 0
+        default:
+            return false
+        }
+    }
+
+    private func submitCommandStreamIsValid(at address: UInt64) -> Bool {
+        guard PhysicalBytes.readLE32(at: address + 16) == 1,
+              PhysicalBytes.readLE32(at: address + 24) == 76
+        else {
+            return false
+        }
+        let stream = address + 32
+        let createSurfaceHeader: UInt32 = 1 | (8 << 8) | (5 << 16)
+        let framebufferHeader: UInt32 = 5 | (3 << 16)
+        let clearHeader: UInt32 = 7 | (8 << 16)
+        return PhysicalBytes.readLE32(at: stream) == createSurfaceHeader
+            && PhysicalBytes.readLE32(at: stream + 4) == 1
+            && PhysicalBytes.readLE32(at: stream + 8) == 1
+            && PhysicalBytes.readLE32(at: stream + 12) == 2
+            && PhysicalBytes.readLE32(at: stream + 24)
+                == framebufferHeader
+            && PhysicalBytes.readLE32(at: stream + 28) == 1
+            && PhysicalBytes.readLE32(at: stream + 32) == 0
+            && PhysicalBytes.readLE32(at: stream + 36) == 1
+            && PhysicalBytes.readLE32(at: stream + 40) == clearHeader
+            && PhysicalBytes.readLE32(at: stream + 44) == 4
+            && PhysicalBytes.readLE32(at: stream + 48) == 0x3e80_0000
+            && PhysicalBytes.readLE32(at: stream + 52) == 0x3f00_0000
+            && PhysicalBytes.readLE32(at: stream + 56) == 0x3f40_0000
+            && PhysicalBytes.readLE32(at: stream + 60) == 0x3f80_0000
+    }
+
+    private func rectangleIsFullDisplay(at address: UInt64) -> Bool {
+        PhysicalBytes.readLE32(at: address) == 0
+            && PhysicalBytes.readLE32(at: address + 4) == 0
+            && PhysicalBytes.readLE32(at: address + 8) == 1_920
+            && PhysicalBytes.readLE32(at: address + 12) == 1_080
+    }
+
+    private func writeResponse(
+        at address: UInt64,
+        capacity: UInt32,
+        requestAddress: UInt64,
+        step: Int
+    ) -> UInt32 {
+        guard PhysicalBytes.zero(
+                  address: address,
+                  byteCount: UInt64(capacity)
+              )
+        else {
+            return 0
+        }
+        var fence = PhysicalBytes.readLE64(at: requestAddress + 8)
+        if behavior == .wrongFenceAt(step: step) { fence &+= 1 }
+
+        let responseType: UInt32
+        let byteCount: UInt32
+        switch step {
+        case 0:
+            responseType = VirtIOGPUControlType.responseOKDisplayInfo
+            byteCount = 408
+        case 1:
+            responseType = VirtIOGPU3DControlType.responseOKCapsetInfo
+            byteCount = 40
+        case 2:
+            responseType = VirtIOGPU3DControlType.responseOKCapsetInfo
+            byteCount = 40
+        case 3:
+            responseType = VirtIOGPU3DControlType.responseOKCapset
+            byteCount = 1_400
+        default:
+            responseType = VirtIOGPU3DControlType.responseOKNoData
+            byteCount = 24
+        }
+        guard byteCount <= capacity else { return 0 }
+        VirtIOGPUProtocol.writeHeader(
+            type: responseType,
+            fenceID: fence,
+            at: address
+        )
+
+        switch step {
+        case 0:
+            let mode = address + 24
+            PhysicalBytes.writeLE32(1_920, at: mode + 8)
+            PhysicalBytes.writeLE32(1_080, at: mode + 12)
+            PhysicalBytes.writeLE32(
+                behavior == .noEnabledScanout ? 0 : 1,
+                at: mode + 16
+            )
+        case 1:
+            // Unknown but valid extension: the session must count and ignore
+            // it while continuing bounded enumeration.
+            PhysicalBytes.writeLE32(0x80, at: address + 24)
+            PhysicalBytes.writeLE32(7, at: address + 28)
+            PhysicalBytes.writeLE32(64, at: address + 32)
+        case 2:
+            PhysicalBytes.writeLE32(2, at: address + 24)
+            PhysicalBytes.writeLE32(2, at: address + 28)
+            PhysicalBytes.writeLE32(1_376, at: address + 32)
+        case 3:
+            writeValidVirGL2Capabilities(at: address + 24)
+        default:
+            break
+        }
+        return byteCount
+    }
+
+    private func writeValidVirGL2Capabilities(at address: UInt64) {
+        PhysicalBytes.writeLE32(2, at: address)
+        PhysicalBytes.writeLE32(1 << 2, at: address + 17 * 4)
+        PhysicalBytes.writeLE32(120, at: address + 66 * 4)
+        PhysicalBytes.writeLE32(8, at: address + 70 * 4)
+        PhysicalBytes.writeLE32(1 << 4, at: address + 72 * 4)
+        PhysicalBytes.writeLE32(8_192, at: address + 121 * 4)
+        PhysicalBytes.writeLE32(1 << 2, at: address + 156 * 4)
+    }
+}
+
+@main
+struct VirtIOGPU3DSessionTests {
+    static func main() {
+        testGPUClearCrossing()
+        testFeatureAndMemoryRejections()
+        testTransportFailureIsExact()
+        testFencedResponseIsRequired()
+        testEnabledScanoutIsRequired()
+        print("VirtIO-GPU 3D session host tests: 5 groups passed")
+    }
+
+    private static func testGPUClearCrossing() {
+        withMappings { command, request, response, queue in
+            var session = makeSession(
+                command: command,
+                request: request,
+                response: response,
+                queue: queue,
+                behavior: .normal
+            )
+            let result = session.configureAndClear(color: testColor)
+            guard case .configured(let configured) = result else {
+                fatalError("valid GPU clear crossing failed: \(result)")
+            }
+            expect(configured.scanoutID == 0, "wrong scanout selected")
+            expect(
+                configured.width == 1_920 && configured.height == 1_080,
+                "display mode was not preserved"
+            )
+            expect(
+                configured.contextID == 1 && configured.resourceID == 1,
+                "nonzero object identifiers were not preserved"
+            )
+            expect(
+                configured.capabilities.capset.kind == .virgl2,
+                "VIRGL2 capset was not selected"
+            )
+            expect(
+                configured.completionFenceID == 10,
+                "dependent operation did not complete on the tenth fence"
+            )
+            expect(session.isConfigured, "configured state was not published")
+            expect(
+                session.configureAndClear(color: testColor)
+                    == .failed(.alreadyConfigured),
+                "configured session accepted a second bootstrap"
+            )
+        }
+    }
+
+    private static func testFeatureAndMemoryRejections() {
+        withMappings { command, request, response, queue in
+            var missingFeature = makeSession(
+                command: command,
+                request: request,
+                response: response,
+                queue: queue,
+                behavior: .normal,
+                negotiatedFeatures: 0
+            )
+            expect(
+                missingFeature.configureAndClear(color: testColor)
+                    == .failed(.invalidNegotiatedFeatures),
+                "session accepted a transport without VIRGL"
+            )
+
+            var overlapping = makeSession(
+                command: request,
+                request: request,
+                response: response,
+                queue: queue,
+                behavior: .normal
+            )
+            expect(
+                overlapping.configureAndClear(color: testColor)
+                    == .failed(.invalidMemoryLayout),
+                "session accepted aliased command and request arenas"
+            )
+        }
+    }
+
+    private static func testTransportFailureIsExact() {
+        withMappings { command, request, response, queue in
+            var session = makeSession(
+                command: command,
+                request: request,
+                response: response,
+                queue: queue,
+                behavior: .timeoutAt(step: 7)
+            )
+            expect(
+                session.configureAndClear(color: testColor)
+                    == .failed(.transport(.timedOut)),
+                "SUBMIT_3D timeout lost its transport error"
+            )
+            expect(!session.isConfigured, "failed session was published")
+        }
+    }
+
+    private static func testFencedResponseIsRequired() {
+        withMappings { command, request, response, queue in
+            var session = makeSession(
+                command: command,
+                request: request,
+                response: response,
+                queue: queue,
+                behavior: .wrongFenceAt(step: 9)
+            )
+            expect(
+                session.configureAndClear(color: testColor)
+                    == .failed(.malformedResponse(
+                        commandType: VirtIOGPUControlType.resourceFlush
+                    )),
+                "flush accepted a response for the wrong fence"
+            )
+            expect(!session.isConfigured, "unflushed session was published")
+        }
+    }
+
+    private static func testEnabledScanoutIsRequired() {
+        withMappings { command, request, response, queue in
+            var session = makeSession(
+                command: command,
+                request: request,
+                response: response,
+                queue: queue,
+                behavior: .noEnabledScanout
+            )
+            expect(
+                session.configureAndClear(color: testColor)
+                    == .failed(.noEnabledScanout),
+                "disabled display was selected for scanout"
+            )
+        }
+    }
+
+    private static var testColor: VirtIOGPU3DClearColor {
+        VirtIOGPU3DClearColor(
+            redBits: 0x3e80_0000,
+            greenBits: 0x3f00_0000,
+            blueBits: 0x3f40_0000,
+            alphaBits: 0x3f80_0000
+        )
+    }
+
+    private static func makeSession(
+        command: DMAMapping,
+        request: DMAMapping,
+        response: DMAMapping,
+        queue: DMAMapping,
+        behavior: VirtIOMMIOTransport.Behavior,
+        negotiatedFeatures: UInt64 = 1 | (1 << 4)
+    ) -> VirtIOGPU3DSession {
+        guard let configuration = VirtIOGPUDeviceConfiguration(
+                  pendingEvents: 0,
+                  scanoutCount: 1,
+                  capsetCount: 2
+              )
+        else {
+            fatalError("test configuration was rejected")
+        }
+        return VirtIOGPU3DSession(
+            transport: VirtIOMMIOTransport(
+                negotiatedFeatures: negotiatedFeatures,
+                configuration: configuration,
+                behavior: behavior
+            ),
+            commandArenaMapping: command,
+            requestMapping: request,
+            responseMapping: response,
+            protectedQueueMapping: queue
+        )
+    }
+
+    private static func withMappings(
+        _ body: (DMAMapping, DMAMapping, DMAMapping, DMAMapping) -> Void
+    ) {
+        let command = UnsafeMutableRawPointer.allocate(
+            byteCount: 4_096,
+            alignment: 4_096
+        )
+        let request = UnsafeMutableRawPointer.allocate(
+            byteCount: 4_096,
+            alignment: 4_096
+        )
+        let response = UnsafeMutableRawPointer.allocate(
+            byteCount: 8_192,
+            alignment: 4_096
+        )
+        let queue = UnsafeMutableRawPointer.allocate(
+            byteCount: 4_096,
+            alignment: 4_096
+        )
+        defer {
+            command.deallocate()
+            request.deallocate()
+            response.deallocate()
+            queue.deallocate()
+        }
+        guard let commandMapping = mapping(for: command, byteCount: 4_096),
+              let requestMapping = mapping(for: request, byteCount: 4_096),
+              let responseMapping = mapping(for: response, byteCount: 8_192),
+              let queueMapping = mapping(for: queue, byteCount: 4_096)
+        else {
+            fatalError("test DMA mapping was rejected")
+        }
+        body(
+            commandMapping,
+            requestMapping,
+            responseMapping,
+            queueMapping
+        )
+    }
+
+    private static func mapping(
+        for pointer: UnsafeMutableRawPointer,
+        byteCount: UInt64
+    ) -> DMAMapping? {
+        let address = UInt64(UInt(bitPattern: pointer))
+        return DMAMapping(
+            cpuPhysicalAddress: address,
+            deviceAddress: address,
+            byteCount: byteCount,
+            deviceAddressWidth: .bits64,
+            coherency: .hardwareCoherent
+        )
+    }
+
+    private static func expect(
+        _ condition: @autoclosure () -> Bool,
+        _ message: String
+    ) {
+        if !condition() { fatalError(message) }
+    }
+}
