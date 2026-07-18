@@ -63,26 +63,36 @@ The verified QEMU path now includes:
    integer-scaled logical desktop for arbitrary scanout sizes, and a retained
    scene foundation with bounded damage, source-over alpha, antialiased rounded
    layers, fixed-point easing, and paced animation in the single-CPU monitor;
-6. the GPU-first architecture beneath the next live renderer: a bounded render
-   command model and retained-scene compiler, GPU frame-slot/fence scheduling,
-   a graphics-worker mailbox, strict production execution policy, VirtIO 3D
-   protocol/configuration/capability and VirGL command encoders, and Pi V3D/HVS
-   resource discovery and mapping.
+6. a production QEMU GPU path that negotiates VirGL, creates a host-private
+   format-100 `B8G8R8A8_SRGB` render/scanout target and GPU unit-quad buffer,
+   installs its shaders and fixed pipeline, lowers the first desktop into GPU
+   clear and source-over quad commands, and publishes scanout only after 13
+   ordered fenced transactions; the initialized session also accepts reusable
+   GPU-only render-IR submissions and flushes their declared damage; and
+7. shared GPU foundations around that path: bounded render commands and
+   retained-scene compilation, frame-slot/fence scheduling, a graphics-worker
+   mailbox, strict production execution policy, and Pi V3D/HVS resource
+   discovery and mapping.
 
 The production graphics invariant is now strict: CPUs may update retained scene
 state, compute animation and damage, and compile backend-neutral command buffers,
 but hardware GPU queues must produce every displayed pixel. The software
 rasterizer remains only as an explicit diagnostic path and reference oracle.
-The current QEMU boots and statically inspected Pi image path have not crossed
-that boundary yet: they still rasterize on the CPU and use ramfb, VirtIO-GPU 2D,
-or Pi simplefb for presentation. The GPU foundations above are host-tested
-infrastructure, not a claim of live accelerated rendering.
+The QEMU boot path now crosses that boundary when a compatible VirGL2 device is
+available: it uses no CPU pixel backing or upload, and a session failure parks
+the kernel instead of falling back to software. Ramfb and VirtIO-GPU 2D remain
+explicitly marked diagnostic modes. The installed local QEMU build cannot
+instantiate a VirGL GL device, so the accelerated path has source, protocol,
+and host-test coverage but its pixels have not been exercised locally on a
+hardware-accelerated QEMU backend. The statically inspected Pi image has not
+crossed the boundary: Pi simplefb is diagnostic only, and V3D VII/HVS/HDMI
+support remains discovery, mapping, and roadmap work.
 
-This is not yet a general-purpose OS. The next layers include wiring the
-VirtIO/VirGL GPU execution session, a native Pi V3D/HVS/HDMI path, multicore
-task scheduling, an executable loader, VFS/storage, input drivers, a user-facing
-surface/window protocol, networking, and a stable system library and syscall
-ABI.
+This is not yet a general-purpose OS. The next layers include sustained
+GPU-frame scheduling and richer GPU primitives, accelerated QEMU execution
+evidence, a native Pi V3D/HVS/HDMI path, multicore task scheduling, an
+executable loader, VFS/storage, input drivers, a user-facing surface/window
+protocol, networking, and a stable system library and syscall ABI.
 
 See [Architecture](docs/architecture.md), [Renderer foundation](docs/renderer.md),
 and [Hardware roadmap](docs/hardware-roadmap.md) for the contracts behind those
@@ -126,6 +136,13 @@ monitor update through a modern VirtIO-MMIO GPU scanout. This is a real guest
 still produced by the diagnostic CPU rasterizer. It is not 3D acceleration or
 evidence of a Raspberry Pi display driver.
 
+At boot, SwiftOS attempts the separate VirGL production route before selecting
+that diagnostic path. A compatible device reaches `SWIFTOS:VIRTIO_GPU_3D_OK`
+and `SWIFTOS:GPU_FRAME_READY` only after the GPU command stream has completed
+and the target has been scanned out and flushed. The currently installed QEMU
+does not expose the required GL-backed VirtIO-GPU device, so those accelerated
+markers and pixels are not part of the local smoke evidence yet.
+
 `make animation-smoke` captures two paced guest frames and proves that a
 retained rounded layer is alpha-composited while presentation remains confined
 to its mapped damage rectangle. The live loop currently runs in the single-CPU
@@ -157,7 +174,10 @@ on a Pi.
 The repository boots a freestanding EL1 Swift kernel, replaces its bootstrap map
 with owned final mappings, proves IRQ-driven preemption and isolated EL0 Swift
 threads, brings multiple described CPUs online through PSCI, and renders and
-presents its own QEMU desktop through two display backends.
+presents its diagnostic QEMU desktop through two display backends. It also
+contains a production VirGL boot route whose first desktop is generated from a
+GPU clear and five GPU quads, with no CPU pixel storage, but the local QEMU build
+cannot hardware-exercise that accelerated route.
 The scheduler currently runs both user threads only on CPU0; secondary CPUs
 publish online state and park. There is no loader, VFS, persistent storage,
 graphical input, user compositor/window protocol, or stable application ABI.

@@ -231,16 +231,17 @@ The generic graphics contracts are no longer tied to ramfb, VirtIO, or Pi. They
 separate a GPU rasterizer, display presenter, image-memory domain, command queue,
 fences, frame-slot lifetime, and scene publication. The shared retained-scene
 compiler can therefore feed the QEMU VirGL backend or native Pi V3D VII backend
-without duplicating UI policy. Neither backend's accelerated execution session
-is active in the current boot path.
+without duplicating UI policy. The QEMU boot path now contains an active VirGL
+session route; the Pi V3D VII route does not exist yet.
 
-QEMU can boot without ramfb through a Swift modern VirtIO-MMIO GPU 2D driver,
-including resource backing, scanout, transfer, and flush, but its current pixels
-are still CPU-rasterized diagnostics. The VirtIO 3D configuration, capability,
-context/resource/submit, VirGL command, frame-scheduling, and graphics-worker
-foundations are host-tested but not yet submitted during boot. The QEMU device
-has no relationship to Raspberry Pi 5's V3D VII GPU, HVS, HDMI controllers,
-firmware interfaces, or display clocks.
+QEMU can boot without ramfb through a Swift modern VirtIO-MMIO GPU 2D driver;
+that smoke remains CPU-rasterized diagnostic evidence. A separate production
+QEMU branch now creates a format-100 sRGB VirGL target and GPU unit quad,
+installs its pipeline, renders its first desktop as GPU quads, and retains a
+reusable GPU-only IR submission/damage-flush session. The installed local QEMU
+lacks a GL-backed VirGL device, so this route is source/protocol/host-tested but
+not locally hardware-exercised. None of it implements or validates Raspberry Pi
+5's V3D VII GPU, HVS, HDMI controllers, firmware interfaces, or display clocks.
 
 The packaged Pi configuration sets `disable_fw_kms_setup=0`, requests a 32-bit
 legacy framebuffer, and leaves firmware to read HDMI EDID and choose the boot

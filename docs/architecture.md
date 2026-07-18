@@ -178,14 +178,23 @@ domains model both CPU-visible system memory and device-local images, while
 queue/fence capabilities describe ownership without assuming a particular CPU
 or GPU configuration.
 
-The QEMU GPU foundation negotiates modern VirtIO and optional VirGL features,
-reads generation-stable GPU configuration, supports separate external control
-buffers, defines bounded capset/context/resource/submit packets, and encodes
-VirGL surface, framebuffer, clear, fixed-state, shader, draw, and GPU copy
-commands. The existing end-to-end smoke only exercises a host 2D resource with
-CPU-generated backing storage, transfer, flush, and scanout. No live boot path
-creates a VirGL context or submits the GPU command stream yet, so that smoke is
-presentation evidence, not GPU-rasterization evidence.
+The QEMU GPU backend negotiates modern VirtIO and optional VirGL features, reads
+generation-stable GPU configuration, supports separate external control
+buffers, validates bounded capsets, and creates a live context when a compatible
+VirGL2 device is available. Its production target is a host-private format-100
+`B8G8R8A8_SRGB` render/scanout resource; pixel backing is never mapped or
+uploaded by the CPU. The session creates and uploads an immutable GPU unit quad,
+installs its shaders and fixed pipeline, clears and draws the first desktop as
+five source-over GPU quads, then sets scanout and flushes after 13 ordered
+fenced transactions. The retained context/compiler can lower later immutable IR
+frames into the same target and issue a fenced flush for checked damage.
+
+The existing end-to-end QEMU smoke still exercises a separate host 2D resource
+with CPU-generated diagnostic backing, transfer, flush, and scanout. It is
+presentation evidence, not GPU-rasterization evidence. The installed local QEMU
+build has no GL-backed VirGL device, so the accelerated source path is covered
+by protocol/host tests and a GPU-only dependency audit but has not generated a
+locally hardware-exercised frame or screenshot.
 
 The diagnostic QEMU path selects VirtIO-MMIO GPU 2D first and ramfb as fallback.
 The diagnostic Pi path can bind a firmware-created simple framebuffer, write a
@@ -204,13 +213,14 @@ rate nor physical display dimensions, so pixel-fit scaling is available but
 refresh/PPI-aware policy waits for a live EDID/DDC or equivalent metadata
 driver. The implementation remains hardware-unverified.
 
-The current desktop panels and terminal glyphs are still drawn by the diagnostic
-CPU path. A retained rounded status layer exercises mutation, damage repaint,
-alpha composition, frame pacing, and partial presentation in the single-CPU
-monitor. The bootstrap tree currently holds at most eight solid-color layers;
-there are no live GPU-rendered frames, transforms, textures, paths, shadows,
-font atlas, window/surface protocol, graphical input path, or EL0 application
-surface yet.
+The production QEMU branch draws its initial clear, top bar, panel, sidebar,
+accent card, and dock on the GPU. Its bounded lowering supports solid quads,
+affine Q16 transforms, clear/load/store, clipping, and copy/source-over blend.
+Terminal glyphs, rounded coverage, and the continuous retained status animation
+still run only in the explicit diagnostic CPU path. There are no textures,
+paths, shadows, live font atlas, window/surface protocol, graphical input path,
+or EL0 application surface yet, and the local QEMU build cannot exercise the
+accelerated branch.
 
 With four CPUs, `make run` publishes the ramfb frame and then follows the SMP/EL0
 path. `QEMU_CPUS=1 make run` retains the interactive EL1 kernel monitor after

@@ -21,11 +21,46 @@ to CPU pixels. Presentation is a separate responsibility: a GPU may render into
 offscreen images while VirtIO scanout or a native HVS/HDMI driver displays the
 completed result.
 
-## Current diagnostic frame path
+## Production QEMU GPU path
 
-The live QEMU boot artifact has not yet been wired to the GPU execution path,
-and the statically inspected Pi display path is the same in this respect. Both
-still select the diagnostic CPU renderer:
+The QEMU boot artifact attempts a production VirtIO/VirGL session before any
+diagnostic framebuffer setup. On a compatible VirGL2 device, the guest:
+
+1. reads the active display mode and validates the renderer capset;
+2. creates a host-private format-100 `B8G8R8A8_SRGB` target with render-target
+   and scanout bindings, preserving alpha and applying the sRGB transfer on the
+   GPU;
+3. creates and attaches a GPU vertex buffer, then uploads six unit-quad
+   `R32G32_FLOAT` vertices without creating any pixel backing store;
+4. creates the color surface, framebuffer, shaders, vertex elements,
+   rasterizer, depth/stencil/alpha state, and copy/source-over blend state;
+5. clears the target and lowers the first desktop into five source-over solid
+   quads through the device-neutral render IR; and
+6. sets scanout and flushes only after all dependent queue work completes.
+
+The validated lifecycle uses 13 fenced control-queue transactions: display
+query; two capset metadata queries; selected-capset payload; context creation;
+create/attach for both the color target and unit quad; quad upload; render
+submission; scanout selection; and flush. The context, target, geometry, and
+initialized IR compiler remain owned by `VirtIOGPU3DSession`. Its reusable
+`render` entry point lowers another immutable command buffer, submits it to the
+same GPU target, and issues a fenced flush for the caller's checked damage
+rectangle. Neither bootstrap nor reusable submission maps or uploads CPU-made
+pixels.
+
+If no accelerated device is available, boot emits
+`SWIFTOS:GRAPHICS_DIAGNOSTIC` before entering the software route. Once an
+accelerated device starts a session, any failure is fatal and cannot fall back
+to CPU rendering; a source gate rejects CPU framebuffer dependencies in that
+crossing. The installed local QEMU build does not provide a GL-backed VirGL
+device, so this accelerated pixel path is source-, protocol-, and host-tested
+but has not produced locally hardware-exercised pixels or a captured
+accelerated frame.
+
+## Explicit diagnostic frame path
+
+QEMU ramfb, QEMU VirtIO-GPU 2D, and the statically inspected Pi simplefb path
+select the CPU renderer only as diagnostics:
 
 One animated frame follows this pipeline:
 
@@ -48,7 +83,7 @@ One animated frame follows this pipeline:
 All frame-state structures use inline bounded storage and no allocator. The
 bootstrap tree currently supports eight solid-color layers. This deliberately
 small diagnostic contract keeps clipping, ordering, overflow, and presentation
-behavior testable while the production GPU executor is brought online.
+behavior testable alongside the production GPU executor.
 
 `make virtio-gpu-smoke` proves a native guest VirtIO-MMIO 2D resource, transfer,
 flush, and scanout path. It does not prove GPU rasterization: the source pixels
@@ -69,12 +104,12 @@ The platform-independent path now includes:
 - an allocation-free scene mailbox for publishing work to a dedicated graphics
   CPU without sharing mutable scene storage.
 
-The QEMU backend foundations negotiate optional VirtIO 3D features, read stable
-device configuration, enumerate and validate bounded VirGL capability sets,
-encode context/resource/transfer/submit control messages, and encode VirGL
-surface, framebuffer, clear, fixed-state, shader, draw, and GPU-to-GPU copy
-commands. These components are host-tested, but there is not yet a live context
-session submitting them during boot.
+The QEMU backend negotiates optional VirtIO 3D features, reads stable device
+configuration, enumerates and validates bounded VirGL capability sets, encodes
+context/resource/transfer/submit control messages, and emits VirGL surface,
+framebuffer, clear, fixed-state, shader, draw, and GPU-to-GPU copy commands. The
+boot path now creates that context and submits a GPU-generated desktop, while a
+reusable session API accepts later GPU-only IR frames with bounded damage.
 
 The Pi backend uses the same generic commands and scheduling contracts. Device
 tree discovery identifies the enabled V3D VII hub/core/SMS regions, HVS scanout
@@ -89,7 +124,7 @@ render target while the display engine may still read the visible front image.
 QEMU and Pi implement that model with different queue and display drivers, not
 different UI semantics.
 
-## Verified proof
+## Verified proof and validation boundary
 
 `make animation-smoke` boots one QEMU CPU, captures a low-opacity diagnostic
 frame, waits for the retained indicator to reach its peak, captures a second
@@ -98,20 +133,28 @@ damage bounds. Host tests separately cover timeline wraparound, frame pacing,
 mutation order, damage overflow, clipping, alpha, rounded coverage, and
 compositor repaint.
 
-The live animation loop currently belongs to the single-CPU EL1 monitor. The Pi
-image and multicore QEMU path rasterize the same retained component's initial
-state through the diagnostic path, but they enter the EL0 scheduler instead of
-running the monitor loop. Physical Pi output and accelerated QEMU rendering
-remain unverified.
+The accelerated session and IR lowering have deterministic host tests for exact
+packet order, fence progression, format/capability rejection, unit-quad upload,
+pipeline state, initial quad draws, reusable submission, and damage flush. The
+GPU-only source audit separately prevents software rasterizer or framebuffer
+types from entering accelerated activation and execution.
+
+The live animation loop currently belongs to the single-CPU EL1 diagnostic
+monitor. The Pi image and diagnostic multicore QEMU path rasterize the same
+retained component's initial state through software before entering the EL0
+scheduler. The installed QEMU cannot run the VirGL GL route, and the Pi image
+has not run on physical hardware, so neither accelerated QEMU pixels nor
+physical Pi output are hardware-verified.
 
 ## Next renderer increments
 
-- Wire the bounded VirtIO/VirGL context session through capability selection,
-  resource creation, a fenced GPU-generated clear, scanout, and flush; publish
-  accelerated evidence only after pixels are generated by that queue.
-- Lower the shared quad, rounded-corner, blend, and glyph-atlas commands to the
-  VirtIO/VirGL backend, then execute the frame scheduler and graphics mailbox in
-  the live boot path.
+- Exercise the checked-in session on a GL-backed VirGL QEMU configuration and
+  retain accelerated serial, fence, and captured-frame evidence.
+- Route ongoing retained-scene updates through the reusable GPU submission API,
+  then execute the frame scheduler and graphics mailbox in the live boot path.
+- Lower rounded-corner and glyph-atlas commands to VirGL; solid quads, affine
+  transforms, clear/load/store, clipping, and copy/source-over blending already
+  have bounded lowering.
 - Add retained image, glyph-run, border, gradient, shadow, and transform content
   while preserving old/new damage reporting and GPU-only pixel production.
 - Package a PSF2 asset, then separate parsing, layout, shaping, atlas allocation,
@@ -126,6 +169,8 @@ remain unverified.
 - Add input hit testing, focus, window lifetime, and surface synchronization only
   after object handles and checked user-copy exist.
 
-This is the base of a modern UI renderer, not yet a window server: there are no
-EL0 surfaces, transforms, textures, paths, live font atlas, input routing, or
-GPU-rendered frames in the current boot artifact.
+This is the base of a modern UI renderer, not yet a window server. The QEMU
+accelerated branch currently produces a static clear-and-quad bootstrap frame;
+there are no EL0 surfaces, textures, paths, rounded GPU coverage, live font
+atlas, input routing, or sustained compositor loop yet, and the checked-in GPU
+frame has not been exercised by the installed local QEMU.

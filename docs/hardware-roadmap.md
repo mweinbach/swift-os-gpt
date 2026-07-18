@@ -7,13 +7,17 @@ The expected devices are PL011 serial, the ARM generic timer, GICv3, virtio-mmio
 transports, fw_cfg/ramfb or virtio-gpu, and a flattened device tree. Every driver
 is exercised without a host OS inside the guest. The modern VirtIO-MMIO GPU 2D
 path now owns a split queue, resource backing, scanout, transfer, and flush, but
-still presents CPU-rasterized diagnostic pixels. The GPU-first foundation now
-owns backend-neutral render commands, retained-scene compilation, frame/fence
-scheduling, a graphics-worker mailbox, VirtIO 3D/configuration/capability
-packets, and VirGL command encoding. The next graphics gate is a live fenced
-VirtIO/VirGL session and GPU-generated frame, followed by shared-scene lowering
-and a vblank-capable present path. Input, block storage, entropy, and networking
-remain parallel device work.
+still presents CPU-rasterized diagnostic pixels. Separately, the production
+boot branch now creates a fenced VirGL context, a format-100 sRGB GPU-only
+target, unit-quad geometry and pipeline state, lowers the first desktop into GPU
+quads, and scans out its result after 13 fenced transactions. The session is
+retained for reusable render-IR submission and damage flush. The installed
+local QEMU cannot instantiate a GL-backed VirGL device, so this crossing is
+source/protocol/host-tested rather than locally hardware-exercised. The next
+graphics gate is captured accelerated evidence on a capable QEMU build,
+followed by sustained frame scheduling, richer lowering, and vblank-capable
+presentation. Input, block storage, entropy, and networking remain parallel
+device work.
 
 ## Stage 2: documented physical ARM64 board
 
