@@ -353,6 +353,20 @@ host-test:
 	$(BUILD_DIR)/gpu-command-ir-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayViewport.swift \
+		Kernel/Graphics/DamageRegion.swift \
+		Kernel/Graphics/RetainedLayerTree.swift \
+		Kernel/Graphics/GPU/GPUPrimitives.swift \
+		Kernel/Graphics/GPU/GPURenderCommands.swift \
+		Kernel/Graphics/GPU/GPUCommandBuffer.swift \
+		Kernel/Graphics/GPU/GPURetainedSceneCompiler.swift \
+		Tests/Host/GPURetainedSceneCompilerTests.swift \
+		-o $(BUILD_DIR)/gpu-retained-scene-host-tests
+	$(BUILD_DIR)/gpu-retained-scene-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Core/PhysicalBytes.swift \
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/DisplayMemory.swift \
