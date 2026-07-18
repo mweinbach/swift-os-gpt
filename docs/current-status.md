@@ -14,16 +14,21 @@ unless a guest implementation and a repeatable test sit behind it.
   registers, FP/SIMD state, ELR/SPSR/ESR/FAR, `SP_EL0`, and `TPIDR_EL0` before
   bounded dispatch in Swift.
 - Device-tree discovery of memory, reservations, CPUs, PL011, `fw_cfg`, PSCI,
-  and GIC resources, including multiple `reg` tuples, disabled-node filtering,
-  and the range translation required by the current board fixtures.
+  GIC, and VirtIO-MMIO resources, including multiple `reg` tuples, disabled-
+  node filtering, DMA-coherency presence, and the range translation required by
+  the current board fixtures.
 - Device-tree-selected GICv3 initialization on QEMU, physical timer PPI delivery,
   acknowledgement/end-of-interrupt, rearming, and repeated IRQ evidence. A
   GICv2 implementation is linked for the Pi board contract, but has not been
   exercised on physical Pi hardware.
 - Range-based physical-memory ownership derived from all discovered RAM banks,
   minus firmware reservation-map entries, `/reserved-memory`, the DTB, kernel,
-  and final-table pool. A fixed-capacity page allocator owns the remaining
-  ranges and is covered for overlap, alignment, exhaustion, and allocation.
+  and final-table pool. A live fixed-capacity classified allocator owns the
+  remaining system-memory ranges with capability/proximity metadata and an
+  allocation-token ledger. Its model also covers CPU-inaccessible device-local
+  domains, constrained addresses, explicit fallback, and checked release. Live
+  operations share an IRQ-state-preserving lock and compatibility range release
+  resolves the original token under that lock.
 - Final 4 KiB translation tables with separate executable text, read-only data,
   writable non-executable data, user text/data/stacks, and Device mappings.
   Unmapped guards protect the boot stack, all three secondary stacks, and both
@@ -32,6 +37,10 @@ unless a guest implementation and a repeatable test sit behind it.
   SMC in the virtualization/EL2 configuration, brings three secondaries into a
   dedicated assembly entry and then Swift on distinct stacks. CPU0 verifies
   release/acquire online publication for all four selected processors.
+- Packed processor descriptions separate affinity, scheduling class,
+  capabilities, proximity, and startup eligibility from a validated boot-
+  resource configuration. In addition to the four Cortex-A72 proofs, a
+  two-Cortex-A76 QEMU path reaches the same isolated EL0 preemption milestone.
 - A separately compiled and linked Embedded Swift user image. It executes at
   EL0 with a high virtual alias and two isolated guarded stacks, reports through
   a deliberately narrow SVC ABI, and contains no kernel object dependency.
@@ -41,6 +50,10 @@ unless a guest implementation and a repeatable test sit behind it.
   switch.
 - Swift volatile MMIO, PL011 transmit/receive, QEMU `fw_cfg` DMA publication,
   and a linker-owned 800 x 600 XRGB8888 framebuffer with software rasterization.
+- A modern VirtIO-MMIO GPU 2D driver with split-queue negotiation, fenced
+  commands, resource backing, scanout selection, and explicit transfer/flush.
+  The renderer uses a backend-independent scanout/DMA contract and keeps ramfb
+  as the default fallback.
 - A fixed-capacity interactive EL1 kernel monitor in single-CPU mode. `help`,
   `uname`, `status`, `clear`, `about`, and `uptime` use PL011 input/output while
   updating the rendered terminal.
@@ -60,31 +73,41 @@ Use `QEMU_CPUS=1 make run` for monitor mode. The single-CPU boot retains the
 interactive EL1 monitor after the same memory, exception, GIC, timer, and ramfb
 stages; it intentionally does not enter the multicore/EL0 acceptance path.
 
+`make virtio-gpu-smoke` runs single-CPU monitor mode without a ramfb device. It
+requires the modern VirtIO transport and GPU markers, validates the initial
+desktop screenshot, submits a monitor command, waits for a post-presentation
+marker, and verifies that the updated scanout differs. This is QEMU 2D-device
+evidence only; it is not a Raspberry Pi or accelerated 3D graphics claim.
+
 ## Verification gates
 
 `make test` requires all of the following:
 
 1. a freestanding source-boundary audit for `Kernel/` and `Userland/`;
 2. host tests for FDT parsing, monitor parsing, run-queue behavior, exception
-   layout, memory-map/page-allocation foundations, final-table integration,
-   preemptive EL0 scheduling, PSCI topology, and SMP publication/runtime logic;
+   layout, unclassified and classified memory allocation, final-table
+   integration, display/DMA contracts, VirtIO-GPU protocol layouts, preemptive
+   EL0 scheduling, PSCI topology, and SMP publication/runtime logic;
 3. separate user-image compilation/link inspection and a parser probe against a
    DTB emitted by the installed QEMU;
 4. static ELF inspection proving AArch64 architecture, the expected entry/link
    contract, and no unresolved symbols;
 5. three ordered EL1 cold boots plus an EL2-to-EL1 boot in single-CPU mode,
    including final paging, exception/GIC setup, ramfb publication, and timer IRQs;
-6. interactive single-CPU monitor and exact framebuffer/render smoke tests;
+6. interactive single-CPU monitor, exact ramfb rendering, and modern
+   VirtIO-MMIO GPU scanout/update smoke tests;
 7. four-CPU SMP/EL0 boots from both EL1 and EL2, requiring ordered evidence for
    owned memory, final tables, three online secondaries, both user threads, SVC
    reporting, context switches, and timer-driven preemption;
 8. static Raspberry Pi 5 Image inspection, including its standard header,
    physical entry/reset addresses, 4 KiB page flags, BCM2712 high-MMIO bootstrap
-   descriptor, architecture, and unresolved-symbol contract.
+   descriptor, architecture, and unresolved-symbol contract;
+9. an alternate two-Cortex-A76 CPU configuration reaching the same secondary-
+   startup and EL0-preemption acceptance markers.
 
-The rendered visual artifact is `.build/swiftos-frame.ppm`. It proves a
-guest-rendered GUI-shaped frame, not a compositor, window system, or graphical
-input stack.
+The ramfb and GPU visual artifacts are `.build/swiftos-frame.ppm` and
+`.build/swiftos-virtio-gpu.ppm`. They prove guest-rendered GUI-shaped frames and
+presentation, not a compositor, window system, or graphical input stack.
 
 ## Not implemented yet
 
@@ -93,7 +116,9 @@ input stack.
 - an executable loader, process creation/destruction, demand paging, copy-on-
   write, signals, or a stable user system library and syscall ABI;
 - persistent block storage, VFS, filesystem, permissions, or recovery;
-- virtio/RP1 keyboard, pointer, GPU, block, entropy, USB, and network drivers;
+- virtio/RP1 keyboard, pointer, block, entropy, USB, and network drivers;
+- accelerated VirtIO 3D, a BCM2712/VideoCore display driver, cache-maintained
+  noncoherent DMA, and IOMMU-backed device address translation;
 - a compositor, window/surface protocol, graphical applications, or graphical
   input routing;
 - physical Raspberry Pi 5 execution and a Raspberry Pi 5 GUI;

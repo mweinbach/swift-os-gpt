@@ -38,7 +38,8 @@ work that must precede Swift:
 
 The kernel validates the DTB, selects a board description, then discovers its
 serial, memory, reservations, CPU affinities, PSCI conduit, interrupt controller,
-and QEMU `fw_cfg` resource where present. QEMU `virt` is the verified contract.
+QEMU `fw_cfg`, and the bounded `virtio,mmio` transport aperture where present.
+QEMU `virt` is the verified contract.
 The Raspberry Pi 5 linker/header/bootstrap descriptors build and pass static
 inspection, but the resulting image has not executed on physical hardware.
 
@@ -60,10 +61,19 @@ tuple and subtracts, with checked range arithmetic:
 - DTB pages, after requiring the complete blob to lie in described RAM; and
 - the physically contiguous final translation-table pool.
 
-A fixed-capacity range map owns the sanitized result. The physical-page
-allocator splits and coalesces those ranges without a heap and rejects overlap,
-overflow, invalid alignment, and exhaustion cases. This is genuine page
-ownership, but there is not yet a general kernel heap or pageable object layer.
+A fixed-capacity range map owns the sanitized result. The live classified
+allocator then imports those ranges as the system-memory domain and retains an
+active-allocation token ledger. Allocation domain, capabilities, proximity, and
+page-table attributes are separate concepts. The same allocator can represent
+CPU-inaccessible device-local memory and constrains requests by alignment,
+highest address, capabilities, preferred domain, and explicit fallback policy.
+It splits and coalesces ranges without a heap and rejects overlap, overflow,
+wrong-token release, invalid alignment, and metadata exhaustion. Live allocation
+and release are serialized by an IRQ-state-preserving AArch64 lock so future
+secondary callers cannot race the shared ledger. Only system DRAM is discovered
+at runtime today; additional firmware/device memory domains still need board-
+specific discovery. There is not yet a general kernel heap or pageable object
+layer.
 
 The kernel builds a 39-bit, 4 KiB-granule final address space and switches
 `TTBR0_EL1` to it with a nonzero ASID. Exact mappings enforce these roles:
@@ -73,7 +83,8 @@ The kernel builds a 39-bit, 4 KiB-granule final address space and switches
 - kernel mutable/linker storage: privileged read/write, non-executable;
 - EL0 text/read-only data: user-readable with execution only on text;
 - two EL0 stacks: user read/write and non-executable;
-- discovered UART, GIC, and QEMU firmware resources: Device memory; and
+- discovered UART, GIC, QEMU firmware, and VirtIO-MMIO resources: Device
+  memory; and
 - sanitized free RAM: privileged direct-map memory.
 
 Guard descriptors remain unmapped beneath the boot stack, each of the three
@@ -100,12 +111,18 @@ CPUs do not yet own per-CPU timer scheduling or accept runnable work.
 
 ## SMP and scheduling
 
-The DT supplies 64-bit CPU affinities and the PSCI method. A fixed-capacity Swift
-topology model identifies the boot CPU from all MPIDR affinity fields, selects at
-most four processors, and records each `CPU_ON` result. The direct-EL1 QEMU DT
-selects HVC, while the virtualization/EL2 QEMU DT and Pi board contract select
-SMC. Both QEMU smoke paths require CPU1, CPU2, and CPU3 to independently publish
-online before `SWIFTOS:SMP_OK` is accepted.
+The DT supplies 64-bit CPU affinities and the PSCI method. A packed, fixed-
+capacity Swift topology records affinity, processor class, capability mask,
+proximity domain, and startup eligibility while preserving the early 512-byte
+storage contract. A separate boot configuration validates requested CPU count
+against topology, target, state, and report capacities. It identifies the boot
+CPU from all MPIDR affinity fields, selects at most four processors, and records
+each `CPU_ON` result. The direct-EL1 QEMU DT selects HVC, while the
+virtualization/EL2 QEMU DT and Pi board contract select SMC. Both four-core QEMU
+smoke paths require CPU1, CPU2, and CPU3 to independently publish online before
+`SWIFTOS:SMP_OK` is accepted. A separate two-core Cortex-A76 smoke proves that a
+smaller topology follows the same startup and EL0-preemption path without
+assuming the four-core configuration.
 
 The current scheduler is an intentionally narrow first isolation milestone:
 
@@ -125,15 +142,27 @@ a general process manager, or a stable syscall ABI.
 
 ## Graphics and monitor model
 
-The renderer owns a linear XRGB8888 surface and performs software rasterization
-into QEMU ramfb. Desktop panels and a terminal are drawn directly; there is no
-compositor, window/surface protocol, graphical input path, or EL0 application
-surface.
+The renderer owns a validated linear XRGB8888 surface and performs software
+rasterization independently of presentation. A closed backend policy currently
+selects modern VirtIO-MMIO GPU 2D first and QEMU ramfb as fallback. DMA mappings
+carry separate CPU-physical and device-visible addresses, address width, byte
+extent, and coherency. The current QEMU path requires a DT `dma-coherent`
+transport; cache-maintained and IOMMU-backed mappings remain future work.
+
+The VirtIO driver negotiates a modern split queue, fences each control command,
+creates a host 2D resource, attaches the Swift-owned framebuffer as backing,
+selects a scanout, and performs explicit transfer and flush operations for
+monitor updates. The end-to-end smoke removes ramfb and validates both the
+initial 800 x 600 desktop and a later command update through QEMU's GPU device.
+This is a guest 2D scanout driver, not virgl/Venus 3D acceleration.
+
+Desktop panels and a terminal are still drawn directly; there is no compositor,
+window/surface protocol, graphical input path, or EL0 application surface.
 
 With four CPUs, `make run` publishes the ramfb frame and then follows the SMP/EL0
 path. `QEMU_CPUS=1 make run` retains the interactive EL1 kernel monitor after
-boot. The monitor and framebuffer are useful diagnostics, not userland and not
-evidence of a complete desktop environment.
+boot. The monitor, framebuffer, and VirtIO scanout are useful diagnostics, not
+userland and not evidence of a complete desktop environment.
 
 The target compositor will own scanout. Applications will submit owned surfaces
 and damage rectangles through handles rather than receiving the scanout mapping.

@@ -46,14 +46,15 @@ The verified QEMU path now includes:
 1. full EL1 exception frames, device-tree-selected GICv3 delivery, and repeating
    architectural timer interrupts;
 2. range-based RAM ownership with firmware/kernel/DTB/table reservations, a
-   fixed-capacity physical-page allocator, final permissioned page tables, and
-   unmapped stack guards;
-3. PSCI startup of four QEMU CPUs, with three secondaries entering Swift on
-   separate stacks and publishing online state;
+   live fixed-capacity classified allocator for distinct memory domains,
+   final permissioned page tables, and unmapped stack guards;
+3. bounded processor descriptions and startup configurations, with four
+   Cortex-A72 QEMU CPUs or two Cortex-A76 CPUs entering the same Swift path;
 4. a separately linked Embedded Swift EL0 image, two isolated user stacks, a
    narrow SVC report ABI, and two CPU0-pinned threads preempted by timer IRQs;
-5. the existing QEMU ramfb software desktop and single-CPU interactive kernel
-   monitor.
+5. a backend-independent software surface presented through QEMU ramfb or a
+   native Swift modern VirtIO-MMIO GPU 2D driver, plus the single-CPU
+   interactive kernel monitor.
 
 This is not yet a general-purpose OS. The next layers include multicore task
 scheduling, an executable loader, VFS/storage, input drivers, a compositor,
@@ -83,7 +84,9 @@ make inspect
 make smoke
 make monitor-smoke
 make frame-smoke
+make virtio-gpu-smoke
 make smp-el0-smoke
+make cpu-config-smoke
 make test
 ```
 
@@ -91,6 +94,10 @@ make test
 publishing the QEMU ramfb display. Use `QEMU_CPUS=1 make run` for the interactive
 EL1 kernel monitor; type monitor commands in the terminal that launched QEMU,
 and PL011 input updates both serial output and the guest terminal window.
+`make virtio-gpu-smoke` removes ramfb and proves the same surface plus a later
+monitor update through a modern VirtIO-MMIO GPU scanout. This is a real guest
+2D display driver against QEMU's device model, not 3D acceleration or evidence
+of a Raspberry Pi display driver.
 
 The linked artifact is
 `.build/swiftos.elf`; it must identify as AArch64 ELF, never Mach-O. QEMU boots
@@ -114,7 +121,8 @@ the image on a Pi.
 
 The repository boots a freestanding EL1 Swift kernel, replaces its bootstrap map
 with owned final mappings, proves IRQ-driven preemption and isolated EL0 Swift
-threads, brings four CPUs online through PSCI, and renders its own QEMU desktop.
+threads, brings multiple described CPUs online through PSCI, and renders and
+presents its own QEMU desktop through two display backends.
 The scheduler currently runs both user threads only on CPU0; secondary CPUs
 publish online state and park. There is no loader, VFS, persistent storage,
 graphical input, compositor/window protocol, or stable application ABI. Physical

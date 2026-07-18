@@ -5,7 +5,9 @@
 QEMU `virt` on AArch64 is the reference board while kernel invariants settle.
 The expected devices are PL011 serial, the ARM generic timer, GICv3, virtio-mmio
 transports, fw_cfg/ramfb or virtio-gpu, and a flattened device tree. Every driver
-is exercised without a host OS inside the guest.
+is exercised without a host OS inside the guest. The modern VirtIO-MMIO GPU 2D
+path now owns a split queue, resource backing, scanout, transfer, and flush; the
+next virtual-board device work is input, block storage, entropy, and networking.
 
 ## Stage 2: documented physical ARM64 board
 
@@ -35,8 +37,9 @@ running a window through Metal on macOS does not count.
 
 ## Portability contract
 
-Board packages provide boot CPU topology, early console discovery, interrupt
-controller creation, timers, DMA constraints, reset/power control, and bus
-enumeration. Generic subsystems consume protocols and resource descriptors, not
-board constants. This keeps the future Mac port from forking the kernel.
-
+Board packages provide described CPU classes/capabilities, physical-memory
+domains and proximity, early console discovery, interrupt-controller creation,
+timers, DMA constraints, reset/power control, bus enumeration, and display
+resources. Generic subsystems consume bounded configurations, classified
+allocations, DMA mappings, and resource descriptors rather than board constants.
+This keeps the Pi and future Mac ports from forking the kernel.

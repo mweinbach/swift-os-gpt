@@ -141,16 +141,21 @@ set `total_mem` in `config.txt`. The shared memory runtime enumerates every
 enabled memory tuple as checked `UInt64` ranges, requires the complete DTB span
 to lie inside described RAM, subtracts FDT reservation-map and
 `/reserved-memory` spans, and reserves the kernel and final-table pool before
-publishing pages to its allocator. The final map gives text/data/user/device
-regions distinct permissions and leaves boot, secondary, and user stack guards
-unmapped.
+publishing pages to its live classified allocator. The initial runtime class is
+system DRAM; the allocator independently represents allocation domain,
+capabilities, proximity, maximum address, and explicit fallback, with an active
+ownership-token ledger. Its tested model can also represent CPU-inaccessible
+device-local memory without mapping it as ordinary RAM. The final map gives
+text/data/user/device regions distinct permissions and leaves boot, secondary,
+and user stack guards unmapped.
 
 Those ownership and table transitions are exercised on QEMU, including host
 tests for split ranges, overlap, permissions, and guards. They have not been run
-against a firmware-patched 8 GB Pi memory map, have not allocated above 4 GiB on
-Pi, and do not yet enforce device-specific DMA constraints. Hardware acceptance
-still requires proving every reported byte is usable, reserved, or owned with no
-overflow, alias, or truncation.
+against a firmware-patched 8 GB Pi memory map and have not allocated above 4 GiB
+on Pi. The distinct-address DMA model and memory-domain allocator exist, but no
+Pi peripheral or IOMMU integration has supplied a non-identity or noncoherent
+mapping. Hardware acceptance still requires proving every reported byte is
+usable, reserved, or owned with no overflow, alias, or truncation.
 
 ## Early serial: BCM2712 UART10 only
 
@@ -201,12 +206,31 @@ contract is:
 6. Time out and report each failed PSCI return; never silently reduce the CPU
    count or assume spin-table release addresses.
 
+The CPU topology now carries packed processor class, capability, proximity, and
+startup-eligibility metadata separately from a validated boot-resource limit.
 This path is proven in QEMU through the DT-selected HVC conduit for direct EL1
 entry and SMC conduit for the virtualization/EL2 scenario: CPU1-CPU3 enter Swift,
 publish independently, and then park. The Pi SMC path and Pi affinity values are
-present in the artifact but have not run on a Pi. There is no per-secondary
-GIC/timer scheduling yet, and both preempted EL0 threads remain pinned to CPU0;
-four online CPUs is not a multicore scheduler.
+present in the artifact but have not run on a Pi. A second QEMU smoke uses two
+Cortex-A76 CPUs to prove a smaller configuration, but it does not reproduce
+BCM2712 firmware or topology. There is no per-secondary GIC/timer scheduling
+yet, and both preempted EL0 threads remain pinned to CPU0; four online CPUs is
+not a multicore scheduler.
+
+## Display and GPU boundary
+
+The generic renderer and scanout contract are no longer tied to ramfb. QEMU now
+boots without ramfb and is driven through a Swift modern VirtIO-MMIO GPU 2D
+driver, including resource backing, scanout, transfer, and flush. That device is
+part of the QEMU reference board and has no relationship to Raspberry Pi 5's
+VideoCore VII GPU, HVS, HDMI controllers, firmware interfaces, or display clocks.
+
+The Pi artifact contains the backend-independent display mode, damage, and DMA
+mapping types, but selects no Pi display backend and still reports serial-only.
+Physical Pi display work must discover the firmware-patched display graph, own
+clocks and scanout memory, establish device-specific DMA/cache rules, and prove
+an HDMI frame on the board. VideoCore 3D acceleration is a later milestone after
+basic scanout; the QEMU VirtIO-GPU test is not evidence for either Pi capability.
 
 ## Hardware validation gate
 
