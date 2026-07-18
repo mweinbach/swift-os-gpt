@@ -236,6 +236,14 @@ host-test:
 	$(BUILD_DIR)/display-contract-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayIdentification.swift \
+		Kernel/Graphics/DisplayTiming.swift \
+		Kernel/Graphics/EDIDBaseBlock.swift \
+		Tests/Host/EDIDBaseBlockTests.swift \
+		-o $(BUILD_DIR)/edid-base-block-host-tests
+	$(BUILD_DIR)/edid-base-block-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Graphics/Geometry.swift \
 		Kernel/Graphics/BitmapFont.swift \
 		Kernel/Graphics/LinearFramebuffer.swift \
