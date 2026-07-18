@@ -69,6 +69,12 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
         strideInPixels: RamFramebuffer.stride / RamFramebuffer.bytesPerPixel
     )
     DesktopRenderer.render(into: framebuffer)
+    var shell = EarlyShell(
+        framebuffer: framebuffer,
+        storageAddress: AArch64.terminalStorageAddress,
+        serial: PL011(baseAddress: UInt(serial.baseAddress))
+    )
+    shell.start()
 
     let firmware = FirmwareConfiguration(
         baseAddress: firmwareConfiguration.baseAddress
@@ -85,7 +91,7 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
     timerBeat(console: console, marker: "SWIFTOS:TIMER_2\n")
     timerBeat(console: console, marker: "SWIFTOS:TIMER_3\n")
     console.write("SWIFTOS:READY\n")
-    park()
+    shell.run()
 }
 
 private func timerBeat(console: EarlyConsole, marker: StaticString) {

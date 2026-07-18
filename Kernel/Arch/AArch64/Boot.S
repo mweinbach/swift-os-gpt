@@ -187,10 +187,22 @@ arch_framebuffer_address:
     ldr     x0, =__framebuffer_start
     ret
 
+.global arch_terminal_storage_address
+.type arch_terminal_storage_address, %function
+arch_terminal_storage_address:
+    ldr     x0, =__terminal_storage_start
+    ret
+
 .global arch_data_sync_barrier
 .type arch_data_sync_barrier, %function
 arch_data_sync_barrier:
     dsb     sy
+    ret
+
+.global arch_spin_hint
+.type arch_spin_hint, %function
+arch_spin_hint:
+    yield
     ret
 
 .global arch_wait_for_event

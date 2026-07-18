@@ -35,8 +35,18 @@ enum AArch64 {
     }
 
     @inline(__always)
+    static var terminalStorageAddress: UInt64 {
+        archTerminalStorageAddress()
+    }
+
+    @inline(__always)
     static func synchronizeData() {
         archDataSyncBarrier()
+    }
+
+    @inline(__always)
+    static func spinHint() {
+        archSpinHint()
     }
 
     static func waitForEvent() {
@@ -65,8 +75,14 @@ private func archDMAScratchAddress() -> UInt64
 @_silgen_name("arch_framebuffer_address")
 private func archFramebufferAddress() -> UInt64
 
+@_silgen_name("arch_terminal_storage_address")
+private func archTerminalStorageAddress() -> UInt64
+
 @_silgen_name("arch_data_sync_barrier")
 private func archDataSyncBarrier()
+
+@_silgen_name("arch_spin_hint")
+private func archSpinHint()
 
 @_silgen_name("arch_wait_for_event")
 private func archWaitForEvent()

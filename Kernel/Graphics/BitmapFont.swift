@@ -54,6 +54,7 @@ enum BitmapFont {
         case 91: return pack(14, 8, 8, 8, 8, 8, 14)
         case 93: return pack(14, 2, 2, 2, 2, 2, 14)
         case 95: return pack(0, 0, 0, 0, 0, 0, 31)
+        case 126: return pack(0, 0, 9, 22, 0, 0, 0)
         default: return pack(31, 17, 21, 17, 21, 17, 31)
         }
     }
@@ -76,4 +77,3 @@ enum BitmapFont {
             | row6 << 30
     }
 }
-

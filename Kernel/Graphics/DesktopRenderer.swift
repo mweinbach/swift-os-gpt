@@ -36,31 +36,6 @@ enum DesktopRenderer {
         framebuffer.fill(Rectangle(x: 79, y: 91, width: 8, height: 8), color: .yellow)
         framebuffer.fill(Rectangle(x: 95, y: 91, width: 8, height: 8), color: .green)
         framebuffer.drawText("TERMINAL", at: Point(x: 232, y: 91), color: .muted)
-
-        framebuffer.drawText(
-            "SWIFT@METAL:~> UNAME -A",
-            at: Point(x: 68, y: 132),
-            color: .cyan
-        )
-        framebuffer.drawText(
-            "SWIFTOS AARCH64 0.1",
-            at: Point(x: 68, y: 153),
-            color: .white
-        )
-        framebuffer.drawText(
-            "SWIFT@METAL:~> STATUS",
-            at: Point(x: 68, y: 184),
-            color: .cyan
-        )
-        framebuffer.drawText("[OK] KERNEL OWNS EL1", at: Point(x: 68, y: 208), color: .green)
-        framebuffer.drawText("[OK] MMU AND CACHES", at: Point(x: 68, y: 228), color: .green)
-        framebuffer.drawText("[OK] NATIVE RAMFB", at: Point(x: 68, y: 248), color: .green)
-        framebuffer.drawText("[OK] DEVICE TREE", at: Point(x: 68, y: 268), color: .green)
-        framebuffer.drawText(
-            "SWIFT@METAL:~> _",
-            at: Point(x: 68, y: 306),
-            color: .cyan
-        )
     }
 
     private static func drawSystemPanel(on framebuffer: LinearFramebuffer) {
@@ -119,4 +94,3 @@ enum DesktopRenderer {
         framebuffer.drawText(label, at: Point(x: x + 10, y: 552), color: .wallpaper, scale: 2)
     }
 }
-

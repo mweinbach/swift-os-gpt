@@ -86,14 +86,14 @@ struct LinearFramebuffer {
                     x = origin.x
                     y += 9 * scale
                 } else {
-                    drawGlyph(byte, at: Point(x: x, y: y), color: color, scale: scale)
+                    drawCharacter(byte, at: Point(x: x, y: y), color: color, scale: scale)
                     x += 6 * scale
                 }
             }
         }
     }
 
-    private func drawGlyph(
+    func drawCharacter(
         _ character: UInt8,
         at origin: Point,
         color: PixelColor,
@@ -122,4 +122,3 @@ struct LinearFramebuffer {
         }
     }
 }
-

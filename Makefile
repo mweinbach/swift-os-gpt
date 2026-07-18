@@ -17,7 +17,7 @@ QEMU ?= qemu-system-aarch64
 PYTHON ?= python3
 
 TARGET := aarch64-none-none-elf
-SWIFT_SOURCES := $(shell find Kernel -name '*.swift' -type f | sort)
+SWIFT_SOURCES := $(shell find Kernel Userland -name '*.swift' -type f | sort)
 
 SWIFT_FLAGS := \
 	-target $(TARGET) \
@@ -41,7 +41,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke gui-smoke test host-test qemu-fdt-test clean toolchain-check source-check
+.PHONY: all build run inspect smoke shell-smoke gui-smoke test host-test qemu-fdt-test clean toolchain-check source-check
 
 all: build
 
@@ -86,6 +86,12 @@ host-test:
 		Tests/Host/FlattenedDeviceTreeTests.swift \
 		-o $(BUILD_DIR)/fdt-host-tests
 	$(BUILD_DIR)/fdt-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Userland/ShellCommand.swift \
+		Tests/Host/ShellCommandTests.swift \
+		-o $(BUILD_DIR)/shell-command-host-tests
+	$(BUILD_DIR)/shell-command-host-tests
 
 qemu-fdt-test: | $(BUILD_DIR)
 	$(QEMU) -machine virt,dumpdtb=$(BUILD_DIR)/qemu-virt.dtb \
@@ -106,11 +112,14 @@ inspect: build
 smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/boot_smoke.py $(KERNEL_BIN) --boots 3
 
+shell-smoke: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/shell_smoke.py $(KERNEL_BIN)
+
 gui-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/gui_smoke.py \
 		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-gui.ppm
 
-test: toolchain-check source-check host-test qemu-fdt-test inspect smoke gui-smoke
+test: toolchain-check source-check host-test qemu-fdt-test inspect smoke shell-smoke gui-smoke
 
 clean:
 	rm -rf $(BUILD_DIR)
