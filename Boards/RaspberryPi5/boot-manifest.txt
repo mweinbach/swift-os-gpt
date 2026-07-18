@@ -1,0 +1,22 @@
+SwiftOS Raspberry Pi 5 boot-partition manifest, format 1
+HARDWARE STATUS: UNVERIFIED. This manifest does not claim board support.
+
+Firmware-consumed files:
+  config.txt                 Boards/RaspberryPi5/config.txt
+  kernel8.img                raw 4 KiB-page AArch64 Image built with ImageHeader.S and linker.ld
+  bcm2712-rpi-5-b.dtb        boot/bcm2712-rpi-5-b.dtb from a pinned raspberrypi/firmware checkout
+
+Provenance files ignored by firmware:
+  BOOT-MANIFEST.txt          this file
+  BUILD-METADATA.txt         input hashes and firmware Git revision
+  SHA256SUMS                 hashes of every other file in this manifest
+
+Raspberry Pi 5 firmware is self-contained in EEPROM. Do not add bootcode.bin,
+start*.elf, or fixup*.dat to this minimal partition. No overlay is selected and
+no cmdline.txt is required by the current SwiftOS entry contract.
+
+The packaging script refuses a non-empty destination, records the exact DTB
+source revision, validates the AArch64 Image magic and 4 KiB flag, and writes
+the files in the fixed order above. Filesystem allocation, FAT volume IDs, and
+timestamps are outside this byte-level manifest; image creation must normalize
+those separately if a reproducible whole-disk image is required.

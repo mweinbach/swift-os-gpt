@@ -84,20 +84,29 @@ _start:
     b.ne    .Lzero_table
 
     ldr     x1, =__early_l1_table
+#if defined(SWIFTOS_RPI5)
+    /* BCM2712 executes in low RAM and exposes its main MMIO windows high. */
+    ldr     x2, =0x0000000000000705 /* normal WB, inner-shareable, AF */
+    str     x2, [x1, #0]
+    ldr     x2, =0x0060000000000401 /* device, AF, privileged XN */
+    str     x2, [x1, #(65 * 8)]     /* 0x10_40000000...0x10_7fffffff */
+    str     x2, [x1, #(124 * 8)]    /* RP1 CPU aperture at 0x1f_00000000 */
+#else
     ldr     x2, =0x0060000000000401 /* device, AF, privileged XN */
     str     x2, [x1, #0]
     ldr     x2, =0x0000000040000705 /* normal WB, inner-shareable, AF */
     str     x2, [x1, #8]
+#endif
     dsb     sy
 
     mov     x2, #0xff00             /* MAIR attr0=device, attr1=normal WB */
     msr     mair_el1, x2
 
     /*
-     * T0SZ/T1SZ=32, 4 KiB granules, inner-shareable WBWA. TTBR1 walks are
+     * T0SZ=25 (39-bit), 4 KiB granules, inner-shareable WBWA. TTBR1 walks are
      * disabled explicitly so no reset-unknown upper table can be consulted.
      */
-    ldr     x2, =0x00000000b5a03520
+    ldr     x2, =0x00000000b5a03519
     mrs     x3, id_aa64mmfr0_el1
     and     x3, x3, #0xf
     lsl     x3, x3, #32

@@ -1,0 +1,18 @@
+# SwiftOS Raspberry Pi 5 research target. Hardware support is not yet verified.
+[pi5]
+arm_64bit=1
+kernel=kernel8.img
+device_tree=bcm2712-rpi-5-b.dtb
+
+# UART10 is the preferred early console on the dedicated debug connector.
+enable_uart=1
+uart_2ndstage=1
+
+# Preserve firmware's RP1 PCIe/UART setup as an optional second debug path.
+enable_rp1_uart=1
+pciex4_reset=0
+
+# Emit hashes of firmware-loaded files in the second-stage UART log.
+sha256=1
+
+[all]

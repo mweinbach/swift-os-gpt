@@ -10,6 +10,11 @@ USERLAND_INIT_RAW := $(BUILD_DIR)/userland-init.raw.o
 USERLAND_SVC_RAW := $(BUILD_DIR)/userland-svc.raw.o
 USERLAND_OBJECT := $(BUILD_DIR)/userland.o
 USERLAND_TEST_ELF := $(BUILD_DIR)/userland-test.elf
+RPI5_BUILD_DIR := $(BUILD_DIR)/raspberry-pi-5
+RPI5_BOOT_OBJECT := $(RPI5_BUILD_DIR)/boot.o
+RPI5_HEADER_OBJECT := $(RPI5_BUILD_DIR)/image-header.o
+RPI5_KERNEL_ELF := $(RPI5_BUILD_DIR)/swiftos-rpi5.elf
+RPI5_KERNEL_IMAGE := $(RPI5_BUILD_DIR)/kernel8.img
 
 SWIFTC ?= swiftc
 CLANG ?= clang
@@ -45,7 +50,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke test host-test qemu-fdt-test clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke test host-test userland-test qemu-fdt-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -97,6 +102,39 @@ $(KERNEL_ELF): $(BOOT_OBJECT) $(SWIFT_OBJECT) $(USERLAND_OBJECT) Kernel/linker.l
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(LLVM_OBJCOPY) -O binary $< $@
+
+$(RPI5_BUILD_DIR):
+	mkdir -p $@
+
+$(RPI5_BOOT_OBJECT): Kernel/Arch/AArch64/Boot.S | $(RPI5_BUILD_DIR)
+	$(CLANG) --target=$(TARGET) -DSWIFTOS_RPI5=1 \
+		-ffreestanding -fno-stack-protector -c $< -o $@
+
+$(RPI5_HEADER_OBJECT): Boards/RaspberryPi5/ImageHeader.S | $(RPI5_BUILD_DIR)
+	$(CLANG) --target=$(TARGET) -ffreestanding -fno-stack-protector -c $< -o $@
+
+$(RPI5_KERNEL_ELF): $(RPI5_HEADER_OBJECT) $(RPI5_BOOT_OBJECT) \
+		$(SWIFT_OBJECT) $(USERLAND_OBJECT) Boards/RaspberryPi5/linker.ld
+	$(LD_LLD) -flavor gnu -m aarch64elf -nostdlib -static \
+		--gc-sections --build-id=none -T Boards/RaspberryPi5/linker.ld \
+		-o $@ $(RPI5_HEADER_OBJECT) $(RPI5_BOOT_OBJECT) \
+		$(SWIFT_OBJECT) $(USERLAND_OBJECT)
+
+$(RPI5_KERNEL_IMAGE): $(RPI5_KERNEL_ELF)
+	$(LLVM_OBJCOPY) -O binary $< $@
+
+rpi5-build: $(RPI5_KERNEL_ELF) $(RPI5_KERNEL_IMAGE)
+
+rpi5-inspect: rpi5-build
+	LLVM_NM=$(LLVM_NM) LLVM_OBJDUMP=$(LLVM_OBJDUMP) \
+		$(PYTHON) tools/validate_rpi5_image.py \
+		$(RPI5_KERNEL_ELF) $(RPI5_KERNEL_IMAGE)
+
+rpi5-package: rpi5-inspect
+	@test -n "$(RPI5_FIRMWARE)" || \
+		(echo "RPI5_FIRMWARE must name a pinned raspberrypi/firmware checkout" >&2; exit 2)
+	Boards/RaspberryPi5/package-boot.sh $(RPI5_KERNEL_IMAGE) \
+		$(RPI5_FIRMWARE) $(RPI5_BUILD_DIR)/boot
 
 run: build
 	$(QEMU) $(QEMU_FLAGS) -display cocoa -kernel $(KERNEL_BIN)
