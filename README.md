@@ -68,8 +68,10 @@ make smoke
 make test
 ```
 
-Use `make run` for an interactive serial session. The generated kernel is
-`.build/swiftos.elf`; it must identify as AArch64 ELF, never Mach-O.
+Use `make run` for an interactive serial session. The linked artifact is
+`.build/swiftos.elf`; it must identify as AArch64 ELF, never Mach-O. QEMU boots
+the derived `.build/swiftos.bin` so it follows the AArch64 boot protocol and
+passes the device-tree address in `x0`.
 
 ## Honest status
 
@@ -77,4 +79,3 @@ The repository starts at the boot vertical slice. It is not yet a general-
 purpose OS and must not be described as one until memory isolation, processes,
 storage, input, and native graphics all work in the guest. Each milestone is
 expected to leave behind a repeatable boot or unit test rather than a mock UI.
-

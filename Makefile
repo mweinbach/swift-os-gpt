@@ -41,7 +41,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke test clean toolchain-check source-check
+.PHONY: all build run inspect smoke test host-test qemu-fdt-test clean toolchain-check source-check
 
 all: build
 
@@ -72,19 +72,41 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 	$(LLVM_OBJCOPY) -O binary $< $@
 
 run: build
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
+	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BIN)
 
 source-check:
 	$(PYTHON) tools/validate_source_boundary.py
+
+host-test:
+	$(SWIFTC) --version
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Platform/FlattenedDeviceTree.swift \
+		Tests/Host/FlattenedDeviceTreeTests.swift \
+		-o $(BUILD_DIR)/fdt-host-tests
+	$(BUILD_DIR)/fdt-host-tests
+
+qemu-fdt-test: | $(BUILD_DIR)
+	$(QEMU) -machine virt,dumpdtb=$(BUILD_DIR)/qemu-virt.dtb \
+		-cpu cortex-a72 -m 512M -display none -monitor none -serial none
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		-emit-library \
+		Kernel/Platform/FlattenedDeviceTree.swift \
+		Tests/Host/QEMUDeviceTreeProbe.swift \
+		-o $(BUILD_DIR)/libQEMUDeviceTreeProbe.dylib
+	$(PYTHON) Tests/Host/qemu_fdt_probe.py \
+		$(BUILD_DIR)/libQEMUDeviceTreeProbe.dylib $(BUILD_DIR)/qemu-virt.dtb
 
 inspect: build
 	LLVM_NM=$(LLVM_NM) LLVM_OBJDUMP=$(LLVM_OBJDUMP) \
 		$(PYTHON) tools/validate_elf.py $(KERNEL_ELF)
 
 smoke: build
-	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/boot_smoke.py $(KERNEL_ELF) --boots 3
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/boot_smoke.py $(KERNEL_BIN) --boots 3
 
-test: toolchain-check source-check inspect smoke
+test: toolchain-check source-check host-test qemu-fdt-test inspect smoke
 
 clean:
 	rm -rf $(BUILD_DIR)

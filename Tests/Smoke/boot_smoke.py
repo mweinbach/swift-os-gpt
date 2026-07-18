@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import selectors
 import signal
 import subprocess
 import sys
@@ -15,6 +16,7 @@ EXPECTED = [
     "SWIFTOS:EL1",
     "SWIFTOS:BSS_OK",
     "SWIFTOS:DATA_OK",
+    "SWIFTOS:FDT_OK",
     "SWIFTOS:SWIFT_OK",
     "SWIFTOS:TIMER_1",
     "SWIFTOS:TIMER_2",
@@ -41,25 +43,31 @@ def boot_once(qemu: str, kernel: Path, timeout: float) -> str:
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
+        text=False,
+        bufsize=0,
     )
     deadline = time.monotonic() + timeout
-    chunks: list[str] = []
+    chunks: list[bytes] = []
+    selector = selectors.DefaultSelector()
     try:
         assert process.stdout is not None
+        selector.register(process.stdout, selectors.EVENT_READ)
         while time.monotonic() < deadline:
-            line = process.stdout.readline()
-            if line:
-                chunks.append(line)
-                if "SWIFTOS:READY" in line:
+            remaining = max(0.0, deadline - time.monotonic())
+            if not selector.select(timeout=remaining):
+                chunks.append(b"<smoke timeout>\n")
+                break
+            chunk = os.read(process.stdout.fileno(), 4096)
+            if chunk:
+                chunks.append(chunk)
+                transcript = b"".join(chunks)
+                if b"SWIFTOS:READY" in transcript or b"SWIFTOS:PANIC" in transcript:
                     break
                 continue
             if process.poll() is not None:
                 break
-        else:
-            chunks.append("<smoke timeout>\n")
     finally:
+        selector.close()
         if process.poll() is None:
             process.send_signal(signal.SIGINT)
             try:
@@ -68,7 +76,7 @@ def boot_once(qemu: str, kernel: Path, timeout: float) -> str:
                 process.kill()
                 process.wait(timeout=1)
 
-    return "".join(chunks).replace("\r", "")
+    return b"".join(chunks).decode("utf-8", errors="replace").replace("\r", "")
 
 
 def validate(transcript: str) -> None:
@@ -105,4 +113,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

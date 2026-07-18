@@ -47,6 +47,20 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
     console.write("SWIFTOS:DTB=")
     console.writeHex(deviceTreeAddress)
     console.write("\n")
+
+    guard let deviceTree = FlattenedDeviceTree(address: deviceTreeAddress),
+          let serial = deviceTree.resource(compatibleWith: "arm,pl011"),
+          serial.baseAddress == 0x0900_0000,
+          serial.length >= 0x30,
+          let firmwareConfiguration = deviceTree.resource(
+              compatibleWith: "qemu,fw-cfg-mmio"
+          ),
+          firmwareConfiguration.length >= 0x18
+    else {
+        console.write("SWIFTOS:PANIC:FDT\n")
+        park()
+    }
+    console.write("SWIFTOS:FDT_OK\n")
     console.write("SWIFTOS:SWIFT_OK\n")
 
     timerBeat(console: console, marker: "SWIFTOS:TIMER_1\n")
@@ -74,4 +88,3 @@ private func park() -> Never {
         AArch64.waitForEvent()
     }
 }
-
