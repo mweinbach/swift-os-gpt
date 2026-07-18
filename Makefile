@@ -6,6 +6,10 @@ KERNEL_ELF := $(BUILD_DIR)/swiftos.elf
 KERNEL_BIN := $(BUILD_DIR)/swiftos.bin
 SWIFT_OBJECT := $(BUILD_DIR)/kernel.o
 BOOT_OBJECT := $(BUILD_DIR)/boot.o
+USERLAND_INIT_RAW := $(BUILD_DIR)/userland-init.raw.o
+USERLAND_SVC_RAW := $(BUILD_DIR)/userland-svc.raw.o
+USERLAND_OBJECT := $(BUILD_DIR)/userland.o
+USERLAND_TEST_ELF := $(BUILD_DIR)/userland-test.elf
 
 SWIFTC ?= swiftc
 CLANG ?= clang
@@ -70,10 +74,26 @@ $(SWIFT_OBJECT): $(SWIFT_SOURCES) | $(BUILD_DIR)
 $(BOOT_OBJECT): Kernel/Arch/AArch64/Boot.S | $(BUILD_DIR)
 	$(CLANG) --target=$(TARGET) -ffreestanding -fno-stack-protector -c $< -o $@
 
-$(KERNEL_ELF): $(BOOT_OBJECT) $(SWIFT_OBJECT) Kernel/linker.ld
+$(USERLAND_INIT_RAW): Userland/Init.swift | $(BUILD_DIR)
+	$(SWIFTC) $(filter-out -module-name SwiftOSKernel,$(SWIFT_FLAGS)) \
+		-module-name SwiftOSUserland -emit-object $< -o $@
+
+$(USERLAND_SVC_RAW): Userland/Syscall.S | $(BUILD_DIR)
+	$(CLANG) --target=$(TARGET) -ffreestanding -fno-stack-protector -c $< -o $@
+
+$(USERLAND_OBJECT): $(USERLAND_INIT_RAW) $(USERLAND_SVC_RAW)
+	$(LD_LLD) -flavor gnu -m aarch64elf -r --gc-sections \
+		-u swiftos_user_init -o $@ $^
+
+$(USERLAND_TEST_ELF): $(USERLAND_OBJECT) Tests/Toolchain/Userland.ld
+	$(LD_LLD) -flavor gnu -m aarch64elf -nostdlib -static \
+		--gc-sections --build-id=none -T Tests/Toolchain/Userland.ld \
+		-o $@ $(USERLAND_OBJECT)
+
+$(KERNEL_ELF): $(BOOT_OBJECT) $(SWIFT_OBJECT) $(USERLAND_OBJECT) Kernel/linker.ld
 	$(LD_LLD) -flavor gnu -m aarch64elf -nostdlib -static \
 		--gc-sections --build-id=none -T Kernel/linker.ld \
-		-o $@ $(BOOT_OBJECT) $(SWIFT_OBJECT)
+		-o $@ $(BOOT_OBJECT) $(SWIFT_OBJECT) $(USERLAND_OBJECT)
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(LLVM_OBJCOPY) -O binary $< $@
@@ -122,6 +142,12 @@ host-test:
 		-o $(BUILD_DIR)/memory-foundation-host-tests
 	$(BUILD_DIR)/memory-foundation-host-tests
 
+userland-test: $(USERLAND_TEST_ELF)
+	$(PYTHON) Tests/Toolchain/validate_userland_objects.py \
+		--nm $(LLVM_NM) --objdump $(LLVM_OBJDUMP) \
+		$(USERLAND_INIT_RAW) $(USERLAND_SVC_RAW) \
+		$(USERLAND_OBJECT) $(USERLAND_TEST_ELF)
+
 qemu-fdt-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(QEMU) -machine virt,gic-version=3,dumpdtb=$(BUILD_DIR)/qemu-virt.dtb \
@@ -152,7 +178,7 @@ frame-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/frame_smoke.py \
 		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-frame.ppm
 
-test: toolchain-check source-check host-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke
+test: toolchain-check source-check host-test userland-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke
 
 clean:
 	rm -rf $(BUILD_DIR)
