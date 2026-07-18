@@ -36,12 +36,12 @@ QEMU_FLAGS := \
 	-accel tcg \
 	-smp 1 \
 	-m 512M \
-	-display none \
+	-device ramfb,id=ramfb0 \
 	-monitor none \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke test host-test qemu-fdt-test clean toolchain-check source-check
+.PHONY: all build run inspect smoke gui-smoke test host-test qemu-fdt-test clean toolchain-check source-check
 
 all: build
 
@@ -72,7 +72,7 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 	$(LLVM_OBJCOPY) -O binary $< $@
 
 run: build
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BIN)
+	$(QEMU) $(QEMU_FLAGS) -display cocoa -kernel $(KERNEL_BIN)
 
 source-check:
 	$(PYTHON) tools/validate_source_boundary.py
@@ -106,7 +106,11 @@ inspect: build
 smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/boot_smoke.py $(KERNEL_BIN) --boots 3
 
-test: toolchain-check source-check host-test qemu-fdt-test inspect smoke
+gui-smoke: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/gui_smoke.py \
+		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-gui.ppm
+
+test: toolchain-check source-check host-test qemu-fdt-test inspect smoke gui-smoke
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -61,6 +61,24 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
         park()
     }
     console.write("SWIFTOS:FDT_OK\n")
+
+    let framebuffer = LinearFramebuffer(
+        baseAddress: UInt(AArch64.framebufferAddress),
+        width: RamFramebuffer.width,
+        height: RamFramebuffer.height,
+        strideInPixels: RamFramebuffer.stride / RamFramebuffer.bytesPerPixel
+    )
+    DesktopRenderer.render(into: framebuffer)
+
+    let firmware = FirmwareConfiguration(
+        baseAddress: firmwareConfiguration.baseAddress
+    )
+    guard RamFramebuffer.publish(using: firmware) else {
+        console.write("SWIFTOS:PANIC:RAMFB\n")
+        park()
+    }
+    console.write("SWIFTOS:RAMFB_OK\n")
+    console.write("SWIFTOS:GUI_READY\n")
     console.write("SWIFTOS:SWIFT_OK\n")
 
     timerBeat(console: console, marker: "SWIFTOS:TIMER_1\n")

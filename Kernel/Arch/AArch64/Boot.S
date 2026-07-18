@@ -175,9 +175,26 @@ arch_sctlr:
     mrs     x0, sctlr_el1
     ret
 
+.global arch_dma_scratch_address
+.type arch_dma_scratch_address, %function
+arch_dma_scratch_address:
+    ldr     x0, =__dma_scratch_start
+    ret
+
+.global arch_framebuffer_address
+.type arch_framebuffer_address, %function
+arch_framebuffer_address:
+    ldr     x0, =__framebuffer_start
+    ret
+
+.global arch_data_sync_barrier
+.type arch_data_sync_barrier, %function
+arch_data_sync_barrier:
+    dsb     sy
+    ret
+
 .global arch_wait_for_event
 .type arch_wait_for_event, %function
 arch_wait_for_event:
     wfe
     ret
-
