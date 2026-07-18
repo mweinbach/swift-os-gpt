@@ -5,7 +5,9 @@ struct GICv3: InterruptControllerDriver {
     private static let distributorEnableClear: UInt64 = 0x180
     private static let distributorRWP: UInt32 = 1 << 31
     private static let affinityRoutingNonSecure: UInt32 = 1 << 4
-    private static let enableGroup1NonSecure: UInt32 = 1
+    private static let disableSecurity: UInt32 = 1 << 6
+    private static let enableGroup1NonSecureView: UInt32 = 1
+    private static let enableGroup1SingleSecurityState: UInt32 = 1 << 1
 
     private static let redistributorType: UInt64 = 0x008
     private static let redistributorWaker: UInt64 = 0x014
@@ -213,16 +215,19 @@ struct GICv3: InterruptControllerDriver {
                 + Self.distributorControl
         )
         var control = MMIO.load32(at: controlAddress)
+        let group1Enable = control & Self.disableSecurity == 0
+            ? Self.enableGroup1NonSecureView
+            : Self.enableGroup1SingleSecurityState
         if control & Self.affinityRoutingNonSecure == 0 {
             // Affinity routing can only change while Group 1 delivery is off.
-            control &= ~Self.enableGroup1NonSecure
+            control &= ~group1Enable
             MMIO.store32(control, at: controlAddress)
             guard waitForDistributorWrites() else { return false }
             control |= Self.affinityRoutingNonSecure
             MMIO.store32(control, at: controlAddress)
             guard waitForDistributorWrites() else { return false }
         }
-        control |= Self.enableGroup1NonSecure
+        control |= group1Enable
         MMIO.store32(control, at: controlAddress)
         return waitForDistributorWrites()
     }

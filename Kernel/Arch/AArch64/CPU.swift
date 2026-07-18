@@ -71,6 +71,10 @@ enum AArch64 {
         archWaitForEvent()
     }
 
+    static func waitForInterrupt() {
+        archWaitForInterrupt()
+    }
+
     @inline(__always)
     static func enableIRQs() {
         archEnableIRQs()
@@ -165,6 +169,9 @@ private func archSpinHint()
 
 @_silgen_name("arch_wait_for_event")
 private func archWaitForEvent()
+
+@_silgen_name("arch_wait_for_interrupt")
+private func archWaitForInterrupt()
 
 @_silgen_name("arch_enable_irqs")
 private func archEnableIRQs()

@@ -3,7 +3,16 @@ private nonisolated(unsafe) var dataProbe: UInt64 = 0x5357_4946_544f_5301
 
 @_cdecl("swiftos_main")
 func swiftOSMain(_ deviceTreeAddress: UInt64) {
-    let console = EarlyConsole(uart: PL011(baseAddress: 0x0900_0000))
+    guard let platform = Platform.discover(
+        deviceTreeAddress: deviceTreeAddress
+    ), platform.serial.baseAddress <= UInt64(UInt.max),
+       platform.serial.length >= 0x30
+    else {
+        park()
+    }
+    let console = EarlyConsole(
+        uart: PL011(baseAddress: UInt(platform.serial.baseAddress))
+    )
 
     console.write("SWIFTOS:BOOT\n")
 
@@ -48,20 +57,52 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
     console.writeHex(deviceTreeAddress)
     console.write("\n")
 
-    guard let deviceTree = FlattenedDeviceTree(address: deviceTreeAddress),
-          let serial = deviceTree.resource(compatibleWith: "arm,pl011"),
-          serial.baseAddress == 0x0900_0000,
-          serial.length >= 0x30,
-          let firmwareConfiguration = deviceTree.resource(
-              compatibleWith: "qemu,fw-cfg-mmio"
-          ),
-          firmwareConfiguration.length >= 0x18
-    else {
-        console.write("SWIFTOS:PANIC:FDT\n")
-        park()
+    switch platform.kind {
+    case .qemuVirt:
+        guard platform.serial.baseAddress == 0x0900_0000,
+              let firmware = platform.firmwareConfiguration,
+              firmware.length >= 0x18
+        else {
+            console.write("SWIFTOS:PANIC:FDT\n")
+            park()
+        }
+    case .raspberryPi5:
+        guard platform.serial.baseAddress >= 0x1_0000_0000 else {
+            console.write("SWIFTOS:PANIC:FDT\n")
+            park()
+        }
     }
     console.write("SWIFTOS:FDT_OK\n")
 
+    guard InterruptSubsystem.exceptionVectorsInstalled else {
+        console.write("SWIFTOS:PANIC:VECTORS\n")
+        park()
+    }
+    console.write(InterruptSubsystem.exceptionsReadyMarker)
+
+    guard InterruptSubsystem.configure(platform.interruptController) else {
+        console.write("SWIFTOS:PANIC:GIC\n")
+        park()
+    }
+    console.write(InterruptSubsystem.controllerReadyMarker)
+
+    switch platform.kind {
+    case .qemuVirt:
+        runQEMUDesktop(console: console, platform: platform)
+    case .raspberryPi5:
+        console.write("SWIFTOS:SERIAL_ONLY\n")
+        proveTimerInterrupts(console: console)
+        console.write("SWIFTOS:SWIFT_OK\n")
+        console.write("SWIFTOS:READY\n")
+        park()
+    }
+}
+
+private func runQEMUDesktop(console: EarlyConsole, platform: Platform) -> Never {
+    guard let firmwareConfiguration = platform.firmwareConfiguration else {
+        console.write("SWIFTOS:PANIC:FW_CFG\n")
+        park()
+    }
     let framebuffer = LinearFramebuffer(
         baseAddress: UInt(AArch64.framebufferAddress),
         width: RamFramebuffer.width,
@@ -72,10 +113,9 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
     var monitor = KernelMonitor(
         framebuffer: framebuffer,
         storageAddress: AArch64.terminalStorageAddress,
-        serial: PL011(baseAddress: UInt(serial.baseAddress))
+        serial: PL011(baseAddress: UInt(platform.serial.baseAddress))
     )
     monitor.start()
-
     let firmware = FirmwareConfiguration(
         baseAddress: firmwareConfiguration.baseAddress
     )
@@ -87,24 +127,39 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
     console.write("SWIFTOS:FRAMEBUFFER_READY\n")
     console.write("SWIFTOS:SWIFT_OK\n")
 
-    timerBeat(console: console, marker: "SWIFTOS:TIMER_1\n")
-    timerBeat(console: console, marker: "SWIFTOS:TIMER_2\n")
-    timerBeat(console: console, marker: "SWIFTOS:TIMER_3\n")
+    proveTimerInterrupts(console: console)
     console.write("SWIFTOS:READY\n")
     monitor.run()
 }
 
-private func timerBeat(console: EarlyConsole, marker: StaticString) {
+private func proveTimerInterrupts(console: EarlyConsole) {
     let frequency = AArch64.counterFrequency
     guard frequency > 0 else {
         console.write("SWIFTOS:PANIC:TIMER_FREQUENCY\n")
         park()
     }
+    let period = frequency / 100
+    guard period > 0,
+          InterruptSubsystem.startPhysicalTimer(periodTicks: period)
+    else {
+        console.write("SWIFTOS:PANIC:TIMER_START\n")
+        park()
+    }
 
-    let start = AArch64.counterValue
-    let duration = frequency / 100
-    while AArch64.counterValue &- start < duration {}
-    console.write(marker)
+    console.write(InterruptSubsystem.timerInterruptMarker)
+    var reported: UInt64 = 0
+    while reported < 3 {
+        let delivered = InterruptSubsystem.timerInterruptCount
+        while reported < delivered, reported < 3 {
+            reported += 1
+            switch reported {
+            case 1: console.write("SWIFTOS:TIMER_1\n")
+            case 2: console.write("SWIFTOS:TIMER_2\n")
+            default: console.write("SWIFTOS:TIMER_3\n")
+            }
+        }
+        if reported < 3 { AArch64.waitForInterrupt() }
+    }
 }
 
 private func park() -> Never {

@@ -427,6 +427,12 @@ arch_wait_for_event:
     wfe
     ret
 
+.global arch_wait_for_interrupt
+.type arch_wait_for_interrupt, %function
+arch_wait_for_interrupt:
+    wfi
+    ret
+
 .global arch_mpidr
 .type arch_mpidr, %function
 arch_mpidr:
