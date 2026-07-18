@@ -179,6 +179,42 @@ host-test:
 		Tests/Host/MemoryFoundationTests.swift \
 		-o $(BUILD_DIR)/memory-foundation-host-tests
 	$(BUILD_DIR)/memory-foundation-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Platform/FlattenedDeviceTree.swift \
+		Kernel/Platform/Platform.swift \
+		Kernel/Memory/PhysicalMemory.swift \
+		Kernel/Memory/PageAllocator.swift \
+		Kernel/Memory/PageTables.swift \
+		Kernel/Memory/AddressSpace.swift \
+		Kernel/Memory/RuntimePhysicalMemory.swift \
+		Kernel/Memory/FinalTranslationTables.swift \
+		Tests/Host/RuntimeMemoryIntegrationTests.swift \
+		-o $(BUILD_DIR)/runtime-memory-integration-host-tests
+	$(BUILD_DIR)/runtime-memory-integration-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Interrupts/ExceptionFrame.swift \
+		Kernel/Scheduler/RunQueue.swift \
+		Kernel/Scheduler/PreemptiveEL0Scheduler.swift \
+		Tests/Host/PreemptiveEL0SchedulerTests.swift \
+		-o $(BUILD_DIR)/preemptive-el0-scheduler-host-tests
+	$(BUILD_DIR)/preemptive-el0-scheduler-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/SMP/ProcessorTopology.swift \
+		Kernel/SMP/PSCITypes.swift \
+		Tests/Host/SMPFoundationTests.swift \
+		-o $(BUILD_DIR)/smp-foundation-host-tests
+	$(BUILD_DIR)/smp-foundation-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/SMP/ProcessorTopology.swift \
+		Kernel/SMP/PSCITypes.swift \
+		Kernel/SMP/SMPRuntime.swift \
+		Tests/Host/SMPRuntimeTests.swift \
+		-o $(BUILD_DIR)/smp-runtime-host-tests
+	$(BUILD_DIR)/smp-runtime-host-tests
 
 userland-test: $(USERLAND_TEST_ELF)
 	$(PYTHON) Tests/Toolchain/validate_userland_objects.py \

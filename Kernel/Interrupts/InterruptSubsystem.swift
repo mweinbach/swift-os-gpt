@@ -2,6 +2,10 @@ typealias TimerInterruptHook = @convention(c) (
     UnsafeMutableRawPointer
 ) -> Void
 
+typealias SynchronousExceptionHook = @convention(c) (
+    UnsafeMutableRawPointer
+) -> UInt64
+
 private enum ActiveInterruptController {
     case none
     case gicV2(GICv2)
@@ -66,6 +70,8 @@ enum InterruptSubsystem {
         ActiveInterruptController = .none
     private nonisolated(unsafe) static var timer = GenericPhysicalTimer()
     private nonisolated(unsafe) static var timerHook: TimerInterruptHook?
+    private nonisolated(unsafe) static var synchronousHook:
+        SynchronousExceptionHook?
     private nonisolated(unsafe) static var configured = false
 
     private nonisolated(unsafe) static var handledTimerCount: UInt64 = 0
@@ -159,6 +165,14 @@ enum InterruptSubsystem {
         timerHook = hook
     }
 
+    /// Installs a bounded synchronous-exception handler. Returning nonzero
+    /// declares the frame handled; returning zero enters the fatal path.
+    static func setSynchronousExceptionHook(
+        _ hook: SynchronousExceptionHook?
+    ) {
+        synchronousHook = hook
+    }
+
     static func startPhysicalTimer(periodTicks: UInt64) -> Bool {
         guard configured,
               controller.timerInterruptID
@@ -185,7 +199,12 @@ enum InterruptSubsystem {
         switch kind {
         case .irq:
             dispatchIRQ(frame: frame)
-        case .synchronous, .fiq, .systemError:
+        case .synchronous:
+            if synchronousHook?(UnsafeMutableRawPointer(frame)) != 0 {
+                return
+            }
+            recordFatalException(frame: frame)
+        case .fiq, .systemError:
             recordFatalException(frame: frame)
         }
     }
@@ -218,6 +237,7 @@ enum InterruptSubsystem {
         controller = .none
         configured = false
         timerHook = nil
+        synchronousHook = nil
         handledTimerCount = 0
         unexpectedInterruptCount = 0
         saturatedIRQEntryCount = 0

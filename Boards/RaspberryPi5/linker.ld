@@ -131,6 +131,20 @@ SECTIONS
         __scheduler_storage_end = .;
     }
 
+    .smp_storage (NOLOAD) : ALIGN(4K)
+    {
+        __smp_topology_storage = .;
+        . += 512;
+        __smp_target_storage = .;
+        . += 256;
+        __smp_state_storage = .;
+        . += 64;
+        __smp_report_storage = .;
+        . += 512;
+        . = ALIGN(4K);
+        __smp_storage_end = .;
+    }
+
     .memory_metadata (NOLOAD) : ALIGN(4K)
     {
         __memory_map_storage = .;

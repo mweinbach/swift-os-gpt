@@ -11,9 +11,12 @@ _start:
     msr     daifset, #0xf
     mov     x19, x0                 /* QEMU device-tree pointer */
 
+    /* Accept only Aff3:Aff2:Aff1:Aff0 == 0 as the boot processor. */
     mrs     x1, mpidr_el1
-    and     x1, x1, #0xff
-    cbnz    x1, .Lpark
+    and     x2, x1, #0x00ffffff
+    cbnz    x2, .Lpark
+    ubfx    x2, x1, #32, #8
+    cbnz    x2, .Lpark
 
     mrs     x1, CurrentEL
     cmp     x1, #0x8
@@ -140,6 +143,76 @@ _start:
     wfe
     b       .Lpark
 .size _start, . - _start
+
+.align 7
+.global _secondary_start
+.type _secondary_start, %function
+_secondary_start:
+    msr     daifset, #0xf
+    mov     x19, x0                 /* dense logical CPU/context ID */
+    cmp     x19, #1
+    b.lo    .Lpark
+    cmp     x19, #3
+    b.hi    .Lpark
+
+    mrs     x1, CurrentEL
+    cmp     x1, #0x8
+    b.eq    .Lsecondary_drop_el2
+    cmp     x1, #0x4
+    b.eq    .Lsecondary_el1
+    b       .Lpark
+
+.Lsecondary_drop_el2:
+    mov     x1, #(1 << 31)
+    msr     hcr_el2, x1
+    mov     x1, #3
+    msr     cnthctl_el2, x1
+    msr     cntvoff_el2, xzr
+    mov     x1, #0x3c5
+    msr     spsr_el2, x1
+    adr     x1, .Lsecondary_el1
+    msr     elr_el2, x1
+    eret
+
+.Lsecondary_el1:
+    msr     daifset, #0xf
+    ldr     x1, =__secondary_stacks_start
+    add     x1, x1, x19, lsl #16
+    mov     sp, x1
+
+    mrs     x1, cpacr_el1
+    orr     x1, x1, #(3 << 20)
+    msr     cpacr_el1, x1
+
+    mov     x1, #0xff00
+    msr     mair_el1, x1
+    ldr     x1, =0x00000000b5a03519
+    mrs     x2, id_aa64mmfr0_el1
+    and     x2, x2, #0xf
+    lsl     x2, x2, #32
+    orr     x1, x1, x2
+    msr     tcr_el1, x1
+    ldr     x1, =__final_l1_table
+    mov     x2, #(1 << 48)
+    orr     x1, x1, x2
+    msr     ttbr0_el1, x1
+    msr     ttbr1_el1, xzr
+    isb
+    tlbi    vmalle1
+    dsb     sy
+    isb
+
+    ldr     x1, =exception_vectors
+    msr     vbar_el1, x1
+    isb
+    ldr     x1, =0x0000000030d0181d
+    msr     sctlr_el1, x1
+    isb
+
+    mov     x0, x19
+    bl      swiftos_secondary_main
+    b       .Lpark
+.size _secondary_start, . - _secondary_start
 
 /* Early vectors park safely. Typed diagnostic vectors are the next milestone. */
 .align 11
@@ -536,4 +609,185 @@ arch_gicv3_acknowledge_group1:
 arch_gicv3_end_group1:
     msr     icc_eoir1_el1, x0
     isb
+    ret
+
+.macro ADDRESS_ACCESSOR name, symbol
+.global \name
+.type \name, %function
+\name:
+    ldr     x0, =\symbol
+    ret
+.endm
+
+ADDRESS_ACCESSOR arch_kernel_start, __kernel_start
+ADDRESS_ACCESSOR arch_kernel_end, __kernel_end
+ADDRESS_ACCESSOR arch_kernel_text_start, __kernel_text_start
+ADDRESS_ACCESSOR arch_kernel_text_end, __kernel_text_end
+ADDRESS_ACCESSOR arch_kernel_rodata_start, __kernel_rodata_start
+ADDRESS_ACCESSOR arch_kernel_rodata_end, __kernel_rodata_end
+ADDRESS_ACCESSOR arch_kernel_data_start, __kernel_data_start
+ADDRESS_ACCESSOR arch_kernel_data_end, __kernel_data_end
+ADDRESS_ACCESSOR arch_user_text_start, __user_text_start
+ADDRESS_ACCESSOR arch_user_text_end, __user_text_end
+ADDRESS_ACCESSOR arch_user_rodata_start, __user_rodata_start
+ADDRESS_ACCESSOR arch_user_rodata_end, __user_rodata_end
+ADDRESS_ACCESSOR arch_boot_stack_bottom, __boot_stack_bottom
+ADDRESS_ACCESSOR arch_boot_stack_top, __boot_stack_top
+ADDRESS_ACCESSOR arch_secondary_stacks_start, __secondary_stacks_start
+ADDRESS_ACCESSOR arch_secondary_stacks_end, __secondary_stacks_end
+ADDRESS_ACCESSOR arch_user_stack0_start, __user_stack0_physical
+ADDRESS_ACCESSOR arch_user_stack0_end, __user_stack0_physical_end
+ADDRESS_ACCESSOR arch_user_stack1_start, __user_stack1_physical
+ADDRESS_ACCESSOR arch_user_stack1_end, __user_stack1_physical_end
+ADDRESS_ACCESSOR arch_final_l1_start, __final_l1_table
+ADDRESS_ACCESSOR arch_final_l1_end, __final_l1_table_end
+ADDRESS_ACCESSOR arch_final_l2_start, __final_l2_tables
+ADDRESS_ACCESSOR arch_final_l2_end, __final_l2_tables_end
+ADDRESS_ACCESSOR arch_final_l3_start, __final_l3_tables
+ADDRESS_ACCESSOR arch_final_l3_end, __final_l3_tables_end
+ADDRESS_ACCESSOR arch_thread_contexts_start, __thread_contexts_start
+ADDRESS_ACCESSOR arch_thread_contexts_end, __thread_contexts_end
+ADDRESS_ACCESSOR arch_scheduler_threads_start, __scheduler_threads_start
+ADDRESS_ACCESSOR arch_scheduler_current_indices, __scheduler_current_indices
+ADDRESS_ACCESSOR arch_memory_map_storage, __memory_map_storage
+ADDRESS_ACCESSOR arch_page_allocator_storage, __page_allocator_storage
+ADDRESS_ACCESSOR arch_smp_topology_storage, __smp_topology_storage
+ADDRESS_ACCESSOR arch_smp_target_storage, __smp_target_storage
+ADDRESS_ACCESSOR arch_smp_state_storage, __smp_state_storage
+ADDRESS_ACCESSOR arch_smp_report_storage, __smp_report_storage
+ADDRESS_ACCESSOR arch_user_entry_physical, __user_entry_physical
+ADDRESS_ACCESSOR arch_secondary_entry_address, _secondary_start
+
+.global arch_install_ttbr0
+.type arch_install_ttbr0, %function
+arch_install_ttbr0:
+    dsb     ishst
+    msr     ttbr0_el1, x0
+    isb
+    tlbi    vmalle1is
+    dsb     ish
+    isb
+    ret
+
+.global arch_current_ttbr0
+.type arch_current_ttbr0, %function
+arch_current_ttbr0:
+    mrs     x0, ttbr0_el1
+    ret
+
+.global arch_enter_el0
+.type arch_enter_el0, %function
+arch_enter_el0:
+    msr     daifset, #2
+    msr     elr_el1, x0
+    msr     sp_el0, x1
+    msr     tpidr_el0, x3
+    msr     spsr_el1, xzr          /* EL0t with DAIF unmasked */
+    mov     x0, x2
+    mov     x1, xzr
+    mov     x2, xzr
+    mov     x3, xzr
+    mov     x4, xzr
+    mov     x5, xzr
+    mov     x6, xzr
+    mov     x7, xzr
+    mov     x8, xzr
+    mov     x9, xzr
+    mov     x10, xzr
+    mov     x11, xzr
+    mov     x12, xzr
+    mov     x13, xzr
+    mov     x14, xzr
+    mov     x15, xzr
+    mov     x16, xzr
+    mov     x17, xzr
+    mov     x18, xzr
+    mov     x19, xzr
+    mov     x20, xzr
+    mov     x21, xzr
+    mov     x22, xzr
+    mov     x23, xzr
+    mov     x24, xzr
+    mov     x25, xzr
+    mov     x26, xzr
+    mov     x27, xzr
+    mov     x28, xzr
+    mov     x29, xzr
+    mov     x30, xzr
+    msr     fpcr, xzr
+    msr     fpsr, xzr
+    movi    v0.16b, #0
+    movi    v1.16b, #0
+    movi    v2.16b, #0
+    movi    v3.16b, #0
+    movi    v4.16b, #0
+    movi    v5.16b, #0
+    movi    v6.16b, #0
+    movi    v7.16b, #0
+    movi    v8.16b, #0
+    movi    v9.16b, #0
+    movi    v10.16b, #0
+    movi    v11.16b, #0
+    movi    v12.16b, #0
+    movi    v13.16b, #0
+    movi    v14.16b, #0
+    movi    v15.16b, #0
+    movi    v16.16b, #0
+    movi    v17.16b, #0
+    movi    v18.16b, #0
+    movi    v19.16b, #0
+    movi    v20.16b, #0
+    movi    v21.16b, #0
+    movi    v22.16b, #0
+    movi    v23.16b, #0
+    movi    v24.16b, #0
+    movi    v25.16b, #0
+    movi    v26.16b, #0
+    movi    v27.16b, #0
+    movi    v28.16b, #0
+    movi    v29.16b, #0
+    movi    v30.16b, #0
+    movi    v31.16b, #0
+    eret
+
+.global arch_psci_hvc
+.type arch_psci_hvc, %function
+arch_psci_hvc:
+    hvc     #0
+    ret
+
+.global arch_psci_smc
+.type arch_psci_smc, %function
+arch_psci_smc:
+    smc     #0
+    ret
+
+.global arch_smp_store_release
+.type arch_smp_store_release, %function
+arch_smp_store_release:
+    stlr    x1, [x0]
+    ret
+
+.global arch_smp_load_acquire
+.type arch_smp_load_acquire, %function
+arch_smp_load_acquire:
+    ldar    x0, [x0]
+    ret
+
+.global arch_smp_publication_barrier
+.type arch_smp_publication_barrier, %function
+arch_smp_publication_barrier:
+    dmb     ishst
+    ret
+
+.global arch_smp_relax
+.type arch_smp_relax, %function
+arch_smp_relax:
+    yield
+    ret
+
+.global arch_smp_send_event
+.type arch_smp_send_event, %function
+arch_smp_send_event:
+    sev
     ret
