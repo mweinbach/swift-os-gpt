@@ -76,6 +76,8 @@ struct VirtIOMMIOTransport {
     }
 
     private let baseAddress: UInt
+    private(set) var offeredFeatures: UInt64 = 0
+    private(set) var negotiatedFeatures: UInt64 = 0
     private(set) var queueSize: UInt16 = 0
     private(set) var requestAddress: UInt64 = 0
     private(set) var responseAddress: UInt64 = 0
@@ -110,7 +112,8 @@ struct VirtIOMMIOTransport {
     }
 
     mutating func initializeModernGPU(
-        queueMapping: DMAMapping
+        queueMapping: DMAMapping,
+        requestedDeviceFeatures: UInt64 = 0
     ) -> VirtIOMMIOInitializationResult {
         let cpuBase = queueMapping.cpuPhysicalAddress
         let deviceBase = queueMapping.deviceAddress
@@ -144,22 +147,32 @@ struct VirtIOMMIOTransport {
         status |= Status.driver
         write(status, Register.status)
 
-        // VIRTIO_F_VERSION_1 is feature bit 32, bit zero of selector page one.
-        write(1, Register.deviceFeaturesSelect)
-        guard read(Register.deviceFeatures) & 1 != 0 else {
+        let offered = readDeviceFeatures()
+        offeredFeatures = offered
+        negotiatedFeatures = 0
+        guard let selection = VirtIOFeatureSelection.select(
+            offered: offered,
+            required: VirtIOTransportFeature.version1,
+            optional: requestedDeviceFeatures
+        ) else {
             failDevice()
             return .missingRequiredFeature
         }
+        let accepted = selection.accepted
         write(0, Register.driverFeaturesSelect)
-        write(0, Register.driverFeatures)
+        write(UInt32(truncatingIfNeeded: accepted), Register.driverFeatures)
         write(1, Register.driverFeaturesSelect)
-        write(1, Register.driverFeatures)
+        write(
+            UInt32(truncatingIfNeeded: accepted >> 32),
+            Register.driverFeatures
+        )
         status |= Status.featuresOK
         write(status, Register.status)
         guard read(Register.status) & Status.featuresOK != 0 else {
             failDevice()
             return .featureNegotiationFailed
         }
+        negotiatedFeatures = accepted
 
         write(0, Register.queueSelect)
         guard read(Register.queueReady) == 0 else {
@@ -331,6 +344,14 @@ struct VirtIOMMIOTransport {
     private func writeAddress(_ address: UInt64, low: UInt, high: UInt) {
         write(UInt32(truncatingIfNeeded: address), low)
         write(UInt32(truncatingIfNeeded: address >> 32), high)
+    }
+
+    private func readDeviceFeatures() -> UInt64 {
+        write(0, Register.deviceFeaturesSelect)
+        let low = UInt64(read(Register.deviceFeatures))
+        write(1, Register.deviceFeaturesSelect)
+        let high = UInt64(read(Register.deviceFeatures))
+        return low | (high << 32)
     }
 
     private func read(_ offset: UInt) -> UInt32 {

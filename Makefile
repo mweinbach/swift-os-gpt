@@ -352,6 +352,12 @@ host-test:
 		Tests/Host/VirtIOGPUProtocolTests.swift \
 		-o $(BUILD_DIR)/virtio-gpu-protocol-host-tests
 	$(BUILD_DIR)/virtio-gpu-protocol-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Drivers/VirtIO/VirtIOFeatureNegotiation.swift \
+		Tests/Host/VirtIOFeatureNegotiationTests.swift \
+		-o $(BUILD_DIR)/virtio-feature-negotiation-host-tests
+	$(BUILD_DIR)/virtio-feature-negotiation-host-tests
 
 userland-test: $(USERLAND_TEST_ELF)
 	$(PYTHON) Tests/Toolchain/validate_userland_objects.py \
