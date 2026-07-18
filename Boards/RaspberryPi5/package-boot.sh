@@ -31,6 +31,8 @@ FIRMWARE_CHECKOUT=$2
 OUTPUT_DIRECTORY=$3
 SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 FIRMWARE_DTB="$FIRMWARE_CHECKOUT/boot/bcm2712-rpi-5-b.dtb"
+SWIFTOS_REPOSITORY=$(git -C "$SCRIPT_DIRECTORY" rev-parse --show-toplevel 2>/dev/null) || \
+    fail "board files must be inside the SwiftOS Git checkout"
 
 [ -f "$KERNEL_IMAGE" ] || fail "kernel image not found: $KERNEL_IMAGE"
 [ -s "$KERNEL_IMAGE" ] || fail "kernel image is empty: $KERNEL_IMAGE"
@@ -40,6 +42,13 @@ FIRMWARE_DTB="$FIRMWARE_CHECKOUT/boot/bcm2712-rpi-5-b.dtb"
 
 FIRMWARE_REVISION=$(git -C "$FIRMWARE_CHECKOUT" rev-parse --verify HEAD 2>/dev/null) || \
     fail "firmware input must be a pinned raspberrypi/firmware Git checkout"
+SWIFTOS_REVISION=$(git -C "$SWIFTOS_REPOSITORY" rev-parse --verify HEAD 2>/dev/null) || \
+    fail "could not determine the SwiftOS Git revision"
+if [ -n "$(git -C "$SWIFTOS_REPOSITORY" status --porcelain --untracked-files=all)" ]; then
+    SWIFTOS_DIRTY=true
+else
+    SWIFTOS_DIRTY=false
+fi
 
 case "$FIRMWARE_REVISION" in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]* ) ;;
@@ -107,8 +116,10 @@ DTB_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb")
     echo "format=swiftos-rpi5-boot-v1"
     echo "board=raspberry-pi-5-model-b"
     echo "hardware_verified=false"
+    echo "swiftos_revision=$SWIFTOS_REVISION"
+    echo "swiftos_dirty=$SWIFTOS_DIRTY"
     echo "firmware_repository=https://github.com/raspberrypi/firmware.git"
-    echo "firmware_revision=$FIRMWARE_REVISION"
+    echo "firmware_repository_revision=$FIRMWARE_REVISION"
     echo "kernel_sha256=$KERNEL_SHA256"
     echo "dtb_sha256=$DTB_SHA256"
 } > "$OUTPUT_DIRECTORY/BUILD-METADATA.txt"
