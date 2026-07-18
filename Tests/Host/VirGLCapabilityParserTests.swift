@@ -5,10 +5,11 @@ struct VirGLCapabilityParserTests {
         testSelectorRejectsMalformedObservations()
         testVirGL2CapabilityParsing()
         testLegacyVirGLCapabilityParsing()
+        testFutureVirGL2PrefixNegotiation()
         testPayloadShapeAndEndianRejections()
         testShaderPrimitiveAndLimitRejections()
-        testFormatRejectionsAndAlternateVertexFormat()
-        print("VirGL capability parser host tests: 7 groups passed")
+        testFormatRequirementsAndBaselineVertexFormats()
+        print("VirGL capability parser host tests: 8 groups passed")
     }
 
     private static func testBoundedDeterministicSelection() {
@@ -82,16 +83,22 @@ struct VirGLCapabilityParserTests {
 
         var futureVersion = requireSelector(count: 1)
         expect(
-            futureVersion.observe(info(id: 2, version: 3, size: 1_376))
-                == .rejected(.unknownLayout),
-            "future VIRGL2 version was accepted"
+            futureVersion.observe(info(id: 2, version: 3, size: 1_380))
+                == .accepted,
+            "append-only VIRGL2 version was rejected"
         )
+        guard case .selected(let future) = futureVersion.finish() else {
+            fail("future VIRGL2 selection was unavailable")
+        }
+        expect(future.advertisedMaximumVersion == 3, "advertised maximum")
+        expect(future.requestedVersion == 2, "bounded requested version")
+        expect(future.payloadByteCount == 1_380, "appended payload size")
 
         var futureSize = requireSelector(count: 1)
         expect(
-            futureSize.observe(info(id: 2, version: 2, size: 1_380))
+            futureSize.observe(info(id: 2, version: 2, size: 4_100))
                 == .rejected(.unknownLayout),
-            "future VIRGL2 layout size was accepted"
+            "unbounded VIRGL2 layout size was accepted"
         )
     }
 
@@ -115,10 +122,11 @@ struct VirGLCapabilityParserTests {
             expect(capabilities.capabilityBits == 0x4000_0001, "capability bits")
             expect(capabilities.capabilityBitsV2 == 0x0000_0200, "v2 bits")
             expect(capabilities.supportsB8G8R8X8RenderTarget, "render format")
+            expect(capabilities.supportsB8G8R8X8Scanout, "scanout format")
             expect(capabilities.supportsR32G32FloatVertex, "vec2 vertex format")
             expect(
-                !capabilities.supportsR32G32B32A32FloatVertex,
-                "unexpected vec4 vertex format"
+                capabilities.supportsR32G32B32A32FloatVertex,
+                "vec4 vertex format"
             )
             expect(capabilities.hasExplicitTexture2DLimit, "explicit texture limit")
             expect(
@@ -145,10 +153,37 @@ struct VirGLCapabilityParserTests {
             expect(capabilities.maximumTexture2DSize == nil, "invented v1 limit")
             expect(capabilities.capabilityBits == 0, "invented v1 capability bits")
             expect(capabilities.capabilityBitsV2 == 0, "invented v1 v2 bits")
+            expect(!capabilities.supportsB8G8R8X8Scanout, "invented v1 scanout")
             expect(
                 !capabilities.supportsTexture2D(width: 1, height: 1),
                 "legacy layout claimed an absent texture limit"
             )
+        }
+    }
+
+    private static func testFutureVirGL2PrefixNegotiation() {
+        guard let selection = VirGLCapsetSelection(
+                  kind: .virgl2,
+                  version: 3,
+                  payloadByteCount:
+                    VirGLCapabilityWire.virgl2PayloadByteCount + 4
+              )
+        else {
+            fail("could not negotiate an appended VIRGL2 payload")
+        }
+        expect(selection.advertisedMaximumVersion == 3, "future advertisement")
+        expect(selection.requestedVersion == 2, "known requested version")
+        withValidPayload(for: selection) { bytes in
+            writeLE32(0xfeed_beef, word: 344, bytes: bytes)
+            guard case .capabilities(let capabilities) = parse(selection, bytes)
+            else {
+                fail("known VIRGL2 prefix with bounded tail was rejected")
+            }
+            expect(
+                capabilities.capset.advertisedMaximumVersion == 3,
+                "payload maximum version"
+            )
+            expect(capabilities.capset.requestedVersion == 2, "request clamp")
         }
     }
 
@@ -239,7 +274,7 @@ struct VirGLCapabilityParserTests {
         }
     }
 
-    private static func testFormatRejectionsAndAlternateVertexFormat() {
+    private static func testFormatRequirementsAndBaselineVertexFormats() {
         let selection = requireSelection(kind: .virgl2, version: 2)
         withValidPayload(for: selection) { bytes in
             writeLE32(0, word: 17, bytes: bytes)
@@ -250,20 +285,22 @@ struct VirGLCapabilityParserTests {
             )
         }
         withValidPayload(for: selection) { bytes in
-            writeLE32(0, word: 49, bytes: bytes)
+            writeLE32(0, word: 156, bytes: bytes)
             expectRejected(
                 parse(selection, bytes),
-                .unsupportedVertexFormat,
-                "missing float vertex formats"
+                .unsupportedScanoutFormat,
+                "missing B8G8R8X8 scanout"
             )
         }
         withValidPayload(for: selection) { bytes in
-            writeLE32(UInt32(1) << 31, word: 49, bytes: bytes)
+            // Real virglrenderer hosts leave the ordinary float formats clear
+            // here; this mask advertises exceptional vertex formats only.
+            writeLE32(0, word: 49, bytes: bytes)
             guard case .capabilities(let capabilities) = parse(selection, bytes) else {
-                fail("R32G32B32A32_FLOAT-only payload was rejected")
+                fail("real-host-shaped baseline vertex payload was rejected")
             }
-            expect(!capabilities.supportsR32G32FloatVertex, "unexpected vec2 support")
-            expect(capabilities.supportsR32G32B32A32FloatVertex, "vec4 support")
+            expect(capabilities.supportsR32G32FloatVertex, "baseline vec2")
+            expect(capabilities.supportsR32G32B32A32FloatVertex, "baseline vec4")
         }
     }
 
@@ -276,14 +313,18 @@ struct VirGLCapabilityParserTests {
             capacity: Int(selection.payloadByteCount)
         ) { bytes in
             bytes.initialize(repeating: 0)
-            writeLE32(selection.version, word: 0, bytes: bytes)
+            writeLE32(
+                selection.advertisedMaximumVersion,
+                word: 0,
+                bytes: bytes
+            )
             writeLE32(UInt32(1) << 2, word: 17, bytes: bytes)
-            writeLE32(UInt32(1) << 29, word: 49, bytes: bytes)
             writeLE32(330, word: 66, bytes: bytes)
             writeLE32(4, word: 70, bytes: bytes)
             writeLE32(UInt32(1) << 4, word: 72, bytes: bytes)
             if selection.kind == .virgl2 {
                 writeLE32(16_384, word: 121, bytes: bytes)
+                writeLE32(UInt32(1) << 2, word: 156, bytes: bytes)
             }
             body(bytes)
         }

@@ -15,19 +15,38 @@ enum VirGLCapsetKind: UInt32 {
 
 struct VirGLCapsetSelection: Equatable {
     let kind: VirGLCapsetKind
-    let version: UInt32
+    /// Maximum version reported by GET_CAPSET_INFO and repeated in payload
+    /// word zero by virglrenderer. It is not an echo of the requested version.
+    let advertisedMaximumVersion: UInt32
+    /// Highest version this driver understands, clamped to the renderer's
+    /// advertisement. VIRGL2 keeps an append-only layout across versions.
+    let requestedVersion: UInt32
     let payloadByteCount: UInt32
+
+    var version: UInt32 { requestedVersion }
 
     init?(kind: VirGLCapsetKind, version: UInt32, payloadByteCount: UInt32) {
         guard VirGLCapabilityWire.layoutIsKnown(
             kind: kind,
-            version: version,
+            advertisedMaximumVersion: version,
             payloadByteCount: payloadByteCount
         ) else {
             return nil
         }
         self.kind = kind
-        self.version = version
+        advertisedMaximumVersion = version
+        switch kind {
+        case .virgl:
+            requestedVersion = min(
+                version,
+                VirGLCapabilityWire.virglMaximumKnownVersion
+            )
+        case .virgl2:
+            requestedVersion = min(
+                version,
+                VirGLCapabilityWire.virgl2MaximumKnownVersion
+            )
+        }
         self.payloadByteCount = payloadByteCount
     }
 }
@@ -138,7 +157,7 @@ enum VirGLCapabilityParseRejection: Equatable {
     case impossibleRenderTargetLimit
     case impossibleTextureLimit
     case unsupportedRenderTargetFormat
-    case unsupportedVertexFormat
+    case unsupportedScanoutFormat
 }
 
 enum VirGLCapabilityParseResult: Equatable {
@@ -162,6 +181,7 @@ struct VirGLRendererCapabilities: Equatable {
     let capabilityBits: UInt32
     let capabilityBitsV2: UInt32
     let supportsB8G8R8X8RenderTarget: Bool
+    let supportsB8G8R8X8Scanout: Bool
     let supportsR32G32FloatVertex: Bool
     let supportsR32G32B32A32FloatVertex: Bool
 
@@ -185,10 +205,13 @@ enum VirGLCapabilityWire {
     static let virglMaximumKnownVersion: UInt32 = 1
     static let virgl2MaximumKnownVersion: UInt32 = 2
 
-    // `virgl_caps_v1` is 77 32-bit words. `virgl_caps_v2` is 344
-    // 32-bit words at the pinned protocol revision.
+    // `virgl_caps_v1` is 77 32-bit words. `virgl_caps_v2` has a 344-word
+    // known prefix and is explicitly append-only. Bound the response payload
+    // plus its 24-byte VirtIO header to one page so hostile device
+    // configuration cannot drive unbounded I/O.
     static let virglPayloadByteCount: UInt32 = 77 * 4
     static let virgl2PayloadByteCount: UInt32 = 344 * 4
+    static let maximumVirGL2PayloadByteCount: UInt32 = 4096 - 24
 
     // The initial vertex/fragment TGSI profile uses only operations available
     // to the renderer's GLSL 1.20 translation path.
@@ -197,34 +220,32 @@ enum VirGLCapabilityWire {
 
     // virgl_formats wire values.
     static let formatB8G8R8X8UNorm: UInt32 = 2
-    static let formatR32G32Float: UInt32 = 29
-    static let formatR32G32B32A32Float: UInt32 = 31
-
     // PIPE_PRIM_TRIANGLES.
     static let trianglesPrimitive: UInt32 = 4
 
     fileprivate static let maximumVersionWord = 0
     fileprivate static let renderFormatMaskWord = 17
-    fileprivate static let vertexFormatMaskWord = 49
     fileprivate static let glslLevelWord = 66
     fileprivate static let maximumRenderTargetsWord = 70
     fileprivate static let primitiveMaskWord = 72
     fileprivate static let capabilityBitsWord = 98
     fileprivate static let maximumTexture2DSizeWord = 121
+    fileprivate static let scanoutFormatMaskWord = 156
     fileprivate static let capabilityBitsV2Word = 172
 
     static func layoutIsKnown(
         kind: VirGLCapsetKind,
-        version: UInt32,
+        advertisedMaximumVersion: UInt32,
         payloadByteCount: UInt32
     ) -> Bool {
         switch kind {
         case .virgl:
-            return version <= virglMaximumKnownVersion
+            return advertisedMaximumVersion <= virglMaximumKnownVersion
                 && payloadByteCount == virglPayloadByteCount
         case .virgl2:
-            return version <= virgl2MaximumKnownVersion
-                && payloadByteCount == virgl2PayloadByteCount
+            return payloadByteCount >= virgl2PayloadByteCount
+                && payloadByteCount <= maximumVirGL2PayloadByteCount
+                && payloadByteCount & 3 == 0
         }
     }
 }
@@ -236,7 +257,7 @@ enum VirGLCapabilityParser {
     ) -> VirGLCapabilityParseResult {
         guard VirGLCapabilityWire.layoutIsKnown(
             kind: capset.kind,
-            version: capset.version,
+            advertisedMaximumVersion: capset.advertisedMaximumVersion,
             payloadByteCount: capset.payloadByteCount
         ) else {
             return .rejected(.unknownLayout)
@@ -256,7 +277,7 @@ enum VirGLCapabilityParser {
         guard readLE32(
             word: VirGLCapabilityWire.maximumVersionWord,
             payload: payload
-        ) == capset.version else {
+        ) == capset.advertisedMaximumVersion else {
             return .rejected(.invalidByteOrderOrVersion)
         }
 
@@ -304,30 +325,19 @@ enum VirGLCapabilityParser {
             return .rejected(.unsupportedRenderTargetFormat)
         }
 
-        let vertexFormatMask = readLE32(
-            word: VirGLCapabilityWire.vertexFormatMaskWord,
-            payload: payload
-        )
-        let supportsR32G32 = bitIsSet(
-            bit: VirGLCapabilityWire.formatR32G32Float,
-            in: vertexFormatMask
-        )
-        let supportsR32G32B32A32 = bitIsSet(
-            bit: VirGLCapabilityWire.formatR32G32B32A32Float,
-            in: vertexFormatMask
-        )
-        guard supportsR32G32 || supportsR32G32B32A32 else {
-            return .rejected(.unsupportedVertexFormat)
-        }
-
         let maximumTexture2DSize: UInt32?
         let capabilityBits: UInt32
         let capabilityBitsV2: UInt32
+        let supportsScanout: Bool
         switch capset.kind {
         case .virgl:
             maximumTexture2DSize = nil
             capabilityBits = 0
             capabilityBitsV2 = 0
+            // The legacy layout has no scanout-format mask. A renderer that
+            // directly scans out its 3D resource must require VIRGL2 rather
+            // than infer support from the render-target mask.
+            supportsScanout = false
         case .virgl2:
             let textureLimit = readLE32(
                 word: VirGLCapabilityWire.maximumTexture2DSizeWord,
@@ -350,6 +360,16 @@ enum VirGLCapabilityParser {
                 word: VirGLCapabilityWire.capabilityBitsV2Word,
                 payload: payload
             )
+            supportsScanout = bitIsSet(
+                bit: VirGLCapabilityWire.formatB8G8R8X8UNorm,
+                in: readLE32(
+                    word: VirGLCapabilityWire.scanoutFormatMaskWord,
+                    payload: payload
+                )
+            )
+            guard supportsScanout else {
+                return .rejected(.unsupportedScanoutFormat)
+            }
         }
 
         return .capabilities(
@@ -362,8 +382,11 @@ enum VirGLCapabilityParser {
                 capabilityBits: capabilityBits,
                 capabilityBitsV2: capabilityBitsV2,
                 supportsB8G8R8X8RenderTarget: supportsRenderTarget,
-                supportsR32G32FloatVertex: supportsR32G32,
-                supportsR32G32B32A32FloatVertex: supportsR32G32B32A32
+                supportsB8G8R8X8Scanout: supportsScanout,
+                // Plain non-fixed vertex formats are VIRGL baseline. The
+                // vertexbuffer mask advertises exceptional formats only.
+                supportsR32G32FloatVertex: true,
+                supportsR32G32B32A32FloatVertex: true
             )
         )
     }
