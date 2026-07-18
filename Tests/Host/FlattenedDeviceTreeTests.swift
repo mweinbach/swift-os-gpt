@@ -3,8 +3,44 @@ struct FlattenedDeviceTreeTests {
     static func main() {
         findsNestedResourcesAndCompatibleListEntries()
         readsPlatformMemoryCPUAndRegisterIndexes()
+        readsFirmwareSimpleFramebufferProperties()
         rejectsBadMagicAndTruncatedStructure()
-        print("FDT host tests: 3 passed")
+        print("FDT host tests: 4 passed")
+    }
+
+    private static func readsFirmwareSimpleFramebufferProperties() {
+        let bytes = makeDeviceTree()
+        bytes.withUnsafeBytes { storage in
+            guard let tree = FlattenedDeviceTree(
+                      address: UInt64(UInt(bitPattern: storage.baseAddress!))
+                  )
+            else {
+                fatalError("simple framebuffer fixture was rejected")
+            }
+            let expected = SimpleFramebufferDescription(
+                resource: DeviceResource(
+                    baseAddress: 0x5e00_0000,
+                    length: 0x007e_9000
+                ),
+                widthInPixels: 1_920,
+                heightInPixels: 1_080,
+                bytesPerRow: 7_680,
+                format: .x8r8g8b8
+            )
+            expect(
+                tree.simpleFramebuffer() == expected,
+                "simple-framebuffer properties mismatch"
+            )
+            let platform = Platform.discover(
+                deviceTreeAddress: UInt64(
+                    UInt(bitPattern: storage.baseAddress!)
+                )
+            )
+            expect(
+                platform?.simpleFramebuffer == expected,
+                "platform lost simple-framebuffer handoff"
+            )
+        }
     }
 
     private static func findsNestedResourcesAndCompatibleListEntries() {
@@ -170,6 +206,11 @@ private func makeDeviceTree() -> [UInt8] {
         "ranges",
         "reg",
         "dma-coherent",
+        "width",
+        "height",
+        "stride",
+        "format",
+        "status",
     ]
     var strings: [UInt8] = []
     var offsets: [String: UInt32] = [:]
@@ -188,6 +229,57 @@ private func makeDeviceTree() -> [UInt8] {
         value: Array("qemu,virt".utf8) + [0],
         to: &structure
     )
+
+    appendBeginNode("chosen", to: &structure)
+    appendProperty(
+        nameOffset: offsets["#address-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#size-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendBeginNode("framebuffer@5e000000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("simple-framebuffer".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be32(0) + be32(0x5e00_0000)
+            + be32(0) + be32(0x007e_9000),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["width"]!,
+        value: be32(1_920),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["height"]!,
+        value: be32(1_080),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["stride"]!,
+        value: be32(7_680),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["format"]!,
+        value: Array("x8r8g8b8".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["status"]!,
+        value: Array("okay".utf8) + [0],
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+    appendBE32(2, to: &structure)
 
     appendBeginNode("fw-cfg@9020000", to: &structure)
     appendProperty(

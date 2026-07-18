@@ -21,6 +21,8 @@ struct Platform {
     let serial: DeviceResource
     let interruptController: InterruptControllerDescription
     let firmwareConfiguration: DeviceResource?
+    let firmwareMailbox: DeviceResource?
+    let simpleFramebuffer: SimpleFramebufferDescription?
     let virtioTransportWindow: DeviceResource?
     let firmwareCallConduit: FirmwareCallConduit?
     let deviceTreeAddress: UInt64
@@ -99,11 +101,23 @@ struct Platform {
             firmwareCallConduit = nil
         }
 
+        let mailboxCandidate = tree.resource(
+            compatibleWith: "brcm,bcm2835-mbox"
+        )
+        let firmwareMailbox: DeviceResource?
+        if let mailboxCandidate, mailboxCandidate.length >= 0x40 {
+            firmwareMailbox = mailboxCandidate
+        } else {
+            firmwareMailbox = nil
+        }
+
         return Platform(
             kind: kind,
             serial: serial,
             interruptController: interruptController,
             firmwareConfiguration: firmwareConfiguration,
+            firmwareMailbox: firmwareMailbox,
+            simpleFramebuffer: tree.simpleFramebuffer(),
             virtioTransportWindow: virtioTransportWindow(in: tree),
             firmwareCallConduit: firmwareCallConduit,
             deviceTreeAddress: deviceTreeAddress,
@@ -198,6 +212,27 @@ struct Platform {
 
     func processorAffinity(at index: Int) -> UInt64? {
         deviceTree.resource(deviceType: "cpu", nodeIndex: index)?.baseAddress
+    }
+
+    func containsSystemMemory(baseAddress: UInt64, length: UInt64) -> Bool {
+        guard length > 0, length <= UInt64.max - baseAddress else {
+            return false
+        }
+        let endAddress = baseAddress + length
+        var index = 0
+        while index < 4096, let resource = memoryRegion(at: index) {
+            guard resource.length > 0,
+                  resource.length <= UInt64.max - resource.baseAddress
+            else {
+                return false
+            }
+            if baseAddress >= resource.baseAddress,
+               endAddress <= resource.baseAddress + resource.length {
+                return true
+            }
+            index += 1
+        }
+        return false
     }
 
     func virtioTransport(at index: Int) -> DeviceResource? {

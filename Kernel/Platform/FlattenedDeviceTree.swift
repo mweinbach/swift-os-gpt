@@ -3,8 +3,38 @@ struct DeviceResource: Equatable {
     let length: UInt64
 }
 
+enum SimpleFramebufferFormat: UInt8, Equatable {
+    case r5g6b5
+    case a8r8g8b8
+    case x8r8g8b8
+
+    var bytesPerPixel: UInt64 {
+        switch self {
+        case .r5g6b5:
+            return 2
+        case .a8r8g8b8, .x8r8g8b8:
+            return 4
+        }
+    }
+}
+
+/// Firmware-patched scanout state described by the standard Device Tree
+/// `simple-framebuffer` binding. `reg` is the CPU-visible framebuffer span;
+/// the display engine has already been configured by platform firmware.
+struct SimpleFramebufferDescription: Equatable {
+    let resource: DeviceResource
+    let widthInPixels: UInt32
+    let heightInPixels: UInt32
+    let bytesPerRow: UInt32
+    let format: SimpleFramebufferFormat
+}
+
 private struct DeviceTreeSearchResult {
     let resource: DeviceResource?
+    let widthInPixels: UInt32?
+    let heightInPixels: UInt32?
+    let bytesPerRow: UInt32?
+    let framebufferFormat: SimpleFramebufferFormat?
 }
 
 private struct AddressTranslation {
@@ -148,6 +178,49 @@ struct FlattenedDeviceTree {
             remainingMatches: &remainingMatches,
             registerIndex: registerIndex
         )?.resource
+    }
+
+    func simpleFramebuffer(nodeIndex: Int = 0)
+        -> SimpleFramebufferDescription? {
+        guard nodeIndex >= 0 else { return nil }
+        var remainingMatches = nodeIndex
+        guard let result = search(
+                  compatibleWith: "simple-framebuffer",
+                  deviceType: nil,
+                  reservedMemory: false,
+                  remainingMatches: &remainingMatches,
+                  registerIndex: 0
+              ),
+              let resource = result.resource,
+              resource.length > 0,
+              let width = result.widthInPixels,
+              let height = result.heightInPixels,
+              let stride = result.bytesPerRow,
+              let format = result.framebufferFormat,
+              width > 0,
+              height > 0,
+              stride > 0
+        else {
+            return nil
+        }
+
+        let minimumRowBytes = UInt64(width) * format.bytesPerPixel
+        let requiredBytes = UInt64(stride).multipliedReportingOverflow(
+            by: UInt64(height)
+        )
+        guard UInt64(stride) >= minimumRowBytes,
+              !requiredBytes.overflow,
+              requiredBytes.partialValue <= resource.length
+        else {
+            return nil
+        }
+        return SimpleFramebufferDescription(
+            resource: resource,
+            widthInPixels: width,
+            heightInPixels: height,
+            bytesPerRow: stride,
+            format: format
+        )
     }
 
     func resource(
@@ -294,6 +367,10 @@ struct FlattenedDeviceTree {
         var propertyMatches = matchingPropertyName == nil
         var enabled = true
         var resource: DeviceResource?
+        var widthInPixels: UInt32?
+        var heightInPixels: UInt32?
+        var bytesPerRow: UInt32?
+        var framebufferFormat: SimpleFramebufferFormat?
         var rangesOffset: UInt?
         var rangesLength: UInt = 0
 
@@ -410,6 +487,44 @@ struct FlattenedDeviceTree {
                     // child begins, after this node's cell widths are known.
                     rangesOffset = valueOffset
                     rangesLength = valueLength
+                } else if propertyName(
+                    at: UInt(nameOffset),
+                    equals: "width"
+                ), propertyLength == 4 {
+                    widthInPixels = readStructureWord(at: valueOffset)
+                } else if propertyName(
+                    at: UInt(nameOffset),
+                    equals: "height"
+                ), propertyLength == 4 {
+                    heightInPixels = readStructureWord(at: valueOffset)
+                } else if propertyName(
+                    at: UInt(nameOffset),
+                    equals: "stride"
+                ), propertyLength == 4 {
+                    bytesPerRow = readStructureWord(at: valueOffset)
+                } else if propertyName(
+                    at: UInt(nameOffset),
+                    equals: "format"
+                ) {
+                    if cStringEquals(
+                        "r5g6b5",
+                        at: valueOffset,
+                        length: valueLength
+                    ) {
+                        framebufferFormat = .r5g6b5
+                    } else if cStringEquals(
+                        "a8r8g8b8",
+                        at: valueOffset,
+                        length: valueLength
+                    ) {
+                        framebufferFormat = .a8r8g8b8
+                    } else if cStringEquals(
+                        "x8r8g8b8",
+                        at: valueOffset,
+                        length: valueLength
+                    ) {
+                        framebufferFormat = .x8r8g8b8
+                    }
                 }
                 if let matchingPropertyName,
                    propertyName(
@@ -434,7 +549,13 @@ struct FlattenedDeviceTree {
                     && enabled
                     && reservedMemoryMatches {
                     if remainingMatches == 0 {
-                        return DeviceTreeSearchResult(resource: resource)
+                        return DeviceTreeSearchResult(
+                            resource: resource,
+                            widthInPixels: widthInPixels,
+                            heightInPixels: heightInPixels,
+                            bytesPerRow: bytesPerRow,
+                            framebufferFormat: framebufferFormat
+                        )
                     }
                     remainingMatches -= 1
                 }

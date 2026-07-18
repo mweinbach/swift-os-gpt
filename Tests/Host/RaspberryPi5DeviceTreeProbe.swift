@@ -87,6 +87,18 @@ public func validateRaspberryPi5DeviceTree(
     ) else {
         return 13
     }
+    let expectedMailbox = DeviceResource(
+        baseAddress: 0x10_7c01_3880,
+        length: 0x40
+    )
+    guard tree.resource(
+        compatibleWith: "brcm,bcm2835-mbox"
+    ) == expectedMailbox else {
+        return 14
+    }
+    guard platform.firmwareMailbox == expectedMailbox else {
+        return 15
+    }
     return 0
 }
 
