@@ -897,6 +897,8 @@ ADDRESS_ACCESSOR arch_rp1_gem_cacheable_pages_start, \
                  __rp1_gem_cacheable_pages_start
 ADDRESS_ACCESSOR arch_rp1_gem_cacheable_pages_end, \
                  __rp1_gem_cacheable_pages_end
+ADDRESS_ACCESSOR arch_storage_scratch_start, __storage_scratch_start
+ADDRESS_ACCESSOR arch_storage_scratch_end, __storage_scratch_end
 ADDRESS_ACCESSOR arch_user_entry_physical, __user_entry_physical
 ADDRESS_ACCESSOR arch_secondary_entry_address, _secondary_start
 

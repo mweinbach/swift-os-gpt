@@ -11,6 +11,7 @@ USER_STACK_SIZE = 64K;
 STACK_GUARD_SIZE = 4K;
 DMA_SCRATCH_SIZE = 4K;
 RP1_GEM_WORKSPACE_SIZE = 16K;
+STORAGE_SCRATCH_SIZE = 4K;
 TERMINAL_STORAGE_SIZE = 8K;
 FRAMEBUFFER_SIZE = 800 * 600 * 4;
 CLASSIFIED_FREE_RUN_STORAGE_SIZE = 24K;
@@ -200,6 +201,13 @@ SECTIONS
         __rp1_gem_workspace_end = .;
     }
 
+    .storage_scratch (NOLOAD) : ALIGN(4K)
+    {
+        __storage_scratch_start = .;
+        . += STORAGE_SCRATCH_SIZE;
+        __storage_scratch_end = .;
+    }
+
     .terminal_storage (NOLOAD) : ALIGN(4K)
     {
         __terminal_storage_start = .;
@@ -263,6 +271,10 @@ ASSERT(__rp1_gem_cacheable_pages_end == __rp1_gem_workspace_end,
        "RP1 GEM cacheable workspace must be contiguous")
 ASSERT(__rp1_gem_workspace_end <= 0x100000000,
        "RP1 GEM 32-bit DMA workspace must remain below 4 GiB")
+ASSERT((__storage_scratch_start & 4095) == 0,
+       "storage scratch must be 4 KiB aligned")
+ASSERT(__storage_scratch_end - __storage_scratch_start == 4K,
+       "storage scratch must own exactly one page")
 ASSERT((__terminal_storage_start & 4095) == 0,
        "terminal storage must be 4 KiB aligned")
 ASSERT((__framebuffer_start & 4095) == 0,

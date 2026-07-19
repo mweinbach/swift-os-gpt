@@ -253,6 +253,96 @@ enum PersistentLogStoreOpenResult<Device: BlockDevice> {
     case failure(PersistentLogStoreOpenFailure)
 }
 
+enum PersistentLogStoreRecoveryStartResult<Device: BlockDevice> {
+    case recovery(PersistentLogStoreRecovery<Device>)
+    case failure(PersistentLogStoreOpenFailure)
+}
+
+enum PersistentLogStoreRecoveryStep<Device: BlockDevice> {
+    case progress(scannedBlockCount: UInt64, totalBlockCount: UInt64)
+    case store(PersistentLogStore<Device>)
+    case failure(PersistentLogStoreOpenFailure)
+}
+
+/// Incremental signed-volume recovery. Superblock validation is one bounded
+/// start step; callers then choose exactly how many log blocks may be scanned
+/// per cooperative-service pass before USB, display, or network runs again.
+struct PersistentLogStoreRecovery<Device: BlockDevice> {
+    private var device: Device
+    let volumeLayout: SwiftOSDataVolumeLayout
+    private let scratch: UnsafeMutableRawBufferPointer
+    private var newestSequence: UInt64?
+    private(set) var scannedBlockCount: UInt64 = 0
+    private var completed = false
+
+    static func begin(
+        device inputDevice: Device,
+        scratch: UnsafeMutableRawBufferPointer
+    ) -> PersistentLogStoreRecoveryStartResult<Device> {
+        var device = inputDevice
+        let opened = SwiftOSDataVolume.open(&device, scratch: scratch)
+        switch opened {
+        case .volume(let layout):
+            return .recovery(
+                Self(
+                    device: device,
+                    volumeLayout: layout,
+                    scratch: scratch,
+                    newestSequence: nil
+                )
+            )
+        case .failure(let failure):
+            return .failure(.volume(failure))
+        }
+    }
+
+    mutating func advance(
+        maximumBlockCount: UInt64
+    ) -> PersistentLogStoreRecoveryStep<Device> {
+        guard !completed, maximumBlockCount > 0 else {
+            return .progress(
+                scannedBlockCount: scannedBlockCount,
+                totalBlockCount: volumeLayout.kernelLogBlockCount
+            )
+        }
+        var remaining = maximumBlockCount
+        while remaining > 0,
+              scannedBlockCount < volumeLayout.kernelLogBlockCount {
+            let slot = scannedBlockCount
+            let block = volumeLayout.kernelLogStartBlock + slot
+            let read = device.readBlock(at: block, into: scratch)
+            guard read == .success else {
+                completed = true
+                return .failure(.readFailed(block: block, result: read))
+            }
+            if let record = PersistentLogStore<Device>.decodeRecord(
+                scratch,
+                logicalBlockByteCount: volumeLayout.logicalBlockByteCount
+            ), (record.sequence - 1) % volumeLayout.kernelLogBlockCount == slot,
+               newestSequence == nil || record.sequence > newestSequence! {
+                newestSequence = record.sequence
+            }
+            scannedBlockCount += 1
+            remaining -= 1
+        }
+        guard scannedBlockCount == volumeLayout.kernelLogBlockCount else {
+            return .progress(
+                scannedBlockCount: scannedBlockCount,
+                totalBlockCount: volumeLayout.kernelLogBlockCount
+            )
+        }
+        completed = true
+        return .store(
+            PersistentLogStore(
+                device: device,
+                volumeLayout: volumeLayout,
+                scratch: scratch,
+                newestSequence: newestSequence
+            )
+        )
+    }
+}
+
 /// A power-loss-tolerant, bounded record ring. Each append is one complete
 /// logical-block write followed by a durability barrier. There is no mutable
 /// head block to tear: recovery scans the bounded arena, validates both header
@@ -272,7 +362,7 @@ struct PersistentLogStore<Device: BlockDevice> {
     private let scratch: UnsafeMutableRawBufferPointer
     private(set) var newestSequence: UInt64?
 
-    private init(
+    fileprivate init(
         device: Device,
         volumeLayout: SwiftOSDataVolumeLayout,
         scratch: UnsafeMutableRawBufferPointer,
@@ -288,41 +378,25 @@ struct PersistentLogStore<Device: BlockDevice> {
         device inputDevice: Device,
         scratch: UnsafeMutableRawBufferPointer
     ) -> PersistentLogStoreOpenResult<Device> {
-        var device = inputDevice
-        let opened = SwiftOSDataVolume.open(&device, scratch: scratch)
-        let layout: SwiftOSDataVolumeLayout
-        switch opened {
-        case .volume(let discovered):
-            layout = discovered
-        case .failure(let failure):
-            return .failure(.volume(failure))
-        }
-
-        var newest: UInt64?
-        var slot: UInt64 = 0
-        while slot < layout.kernelLogBlockCount {
-            let block = layout.kernelLogStartBlock + slot
-            let read = device.readBlock(at: block, into: scratch)
-            guard read == .success else {
-                return .failure(.readFailed(block: block, result: read))
-            }
-            if let record = decodeRecord(
-                scratch,
-                logicalBlockByteCount: layout.logicalBlockByteCount
-            ), (record.sequence - 1) % layout.kernelLogBlockCount == slot,
-               newest == nil || record.sequence > newest! {
-                newest = record.sequence
-            }
-            slot += 1
-        }
-        return .store(
-            Self(
-                device: device,
-                volumeLayout: layout,
-                scratch: scratch,
-                newestSequence: newest
-            )
+        let started = PersistentLogStoreRecovery<Device>.begin(
+            device: inputDevice,
+            scratch: scratch
         )
+        var recovery: PersistentLogStoreRecovery<Device>
+        switch started {
+        case .recovery(let value): recovery = value
+        case .failure(let failure): return .failure(failure)
+        }
+        switch recovery.advance(
+            maximumBlockCount:
+                SwiftOSDataVolumeLayout.maximumKernelLogBlockCount
+        ) {
+        case .store(let store): return .store(store)
+        case .failure(let failure): return .failure(failure)
+        case .progress:
+            // The volume contract caps the arena at the exact bound above.
+            return .failure(.volume(.missingSuperblock))
+        }
     }
 
     var maximumPayloadByteCount: Int {
@@ -433,7 +507,7 @@ struct PersistentLogStore<Device: BlockDevice> {
         SwiftOSDataVolume.writeLE32(headerChecksum, into: bytes, at: 36)
     }
 
-    private static func decodeRecord(
+    fileprivate static func decodeRecord(
         _ bytes: UnsafeMutableRawBufferPointer,
         logicalBlockByteCount: Int
     ) -> PersistentLogRecordMetadata? {

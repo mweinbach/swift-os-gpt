@@ -60,7 +60,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke smp-el0-smoke cpu-config-smoke test host-test storage-host-test persistent-log-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test rp1-gem-deferred-activation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test platform-storage-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke smp-el0-smoke cpu-config-smoke test host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test platform-storage-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -147,6 +147,8 @@ rpi5-package: rpi5-inspect
 		RPI5_DTB=$(RPI5_FIRMWARE)/boot/bcm2712-rpi-5-b.dtb
 	$(MAKE) platform-storage-pinned-fdt-test \
 		RPI5_DTB=$(RPI5_FIRMWARE)/boot/bcm2712-rpi-5-b.dtb
+	$(MAKE) platform-network-pinned-fdt-test \
+		RPI5_DTB=$(RPI5_FIRMWARE)/boot/bcm2712-rpi-5-b.dtb
 	Boards/RaspberryPi5/package-boot.sh $(RPI5_KERNEL_IMAGE) \
 		$(RPI5_FIRMWARE) $(RPI5_BUILD_DIR)/boot
 	$(PYTHON) tools/build_rpi5_media.py build \
@@ -159,6 +161,7 @@ rpi5-package: rpi5-inspect
 rpi5-package-test:
 	$(PYTHON) Tests/Host/rpi5_package_contract.py
 	$(PYTHON) Tests/Host/rpi5_media_image_contract.py
+	$(PYTHON) Tests/Host/rpi5_persistent_log_inspector_test.py
 
 run: build
 	$(QEMU) $(QEMU_FLAGS) -display cocoa -kernel $(KERNEL_BIN)
@@ -610,14 +613,14 @@ rp1-gem-board-preparation-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/rp1-gem-board-preparation-host-tests
 	$(BUILD_DIR)/rp1-gem-board-preparation-host-tests
 
-rp1-gem-deferred-activation-host-test: | $(BUILD_DIR)
+platform-deferred-activation-host-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
-		Kernel/Drivers/Network/RP1GEMDeferredActivationGate.swift \
-		Tests/Host/RP1GEMDeferredActivationGateTests.swift \
-		-o $(BUILD_DIR)/rp1-gem-deferred-activation-host-tests
-	$(BUILD_DIR)/rp1-gem-deferred-activation-host-tests
+		Kernel/Platform/PlatformDeferredActivationGate.swift \
+		Tests/Host/PlatformDeferredActivationGateTests.swift \
+		-o $(BUILD_DIR)/platform-deferred-activation-host-tests
+	$(BUILD_DIR)/platform-deferred-activation-host-tests
 
 platform-network-discovery-host-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
@@ -692,7 +695,32 @@ persistent-log-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/persistent-log-store-host-tests
 	$(BUILD_DIR)/persistent-log-store-host-tests
 
-host-test: storage-host-test persistent-log-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test rp1-gem-deferred-activation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
+deferred-persistent-log-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Storage/BlockDevice.swift \
+		Kernel/Storage/MBRPartitionTable.swift \
+		Kernel/Storage/StorageCRC32.swift \
+		Kernel/Storage/SwiftOSDataVolume.swift \
+		Kernel/Storage/DeferredPersistentLogService.swift \
+		Kernel/Debug/KernelLogRing.swift \
+		Kernel/Debug/PersistentKernelLogCodec.swift \
+		Tests/Host/StorageTestSupport.swift \
+		Tests/Host/DeferredPersistentLogServiceTests.swift \
+		-o $(BUILD_DIR)/deferred-persistent-log-service-host-tests
+	$(BUILD_DIR)/deferred-persistent-log-service-host-tests
+
+rpi5-cooperative-policy-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Drivers/Storage/RaspberryPi5CooperativePolicy.swift \
+		Tests/Host/RaspberryPi5CooperativePolicyTests.swift \
+		-o $(BUILD_DIR)/rpi5-cooperative-policy-host-tests
+	$(BUILD_DIR)/rpi5-cooperative-policy-host-tests
+
+host-test: storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \

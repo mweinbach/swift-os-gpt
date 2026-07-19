@@ -7,7 +7,8 @@ struct PersistentLogStoreTests {
         recoversFromTornRecordsAndOneBadSuperblock()
         roundTripsStructuredKernelEvents()
         matchesTheVolatileRingRecordABI()
-        print("persistent log store host tests: 6 groups passed")
+        recoversIncrementallyWithinCallerBlockBudgets()
+        print("persistent log store host tests: 7 groups passed")
     }
 
     private static func boundsTheLogArenaByBytesForLargeBlocks() {
@@ -221,6 +222,37 @@ struct PersistentLogStoreTests {
         )
     }
 
+    private static func recoversIncrementallyWithinCallerBlockBudgets() {
+        let device = formattedDevice(blockCount: 16, logBlocks: 4)
+        withScratch { scratch in
+            guard case .recovery(var recovery) =
+                    PersistentLogStoreRecovery<MemoryBlockDevice>.begin(
+                        device: device,
+                        scratch: scratch
+                    )
+            else { fail("incremental recovery did not validate superblocks") }
+            expect(
+                recovery.advance(maximumBlockCount: 0)
+                    .isProgress(scanned: 0, total: 4),
+                "zero budget consumed recovery work"
+            )
+            var expected: UInt64 = 1
+            while expected < 4 {
+                expect(
+                    recovery.advance(maximumBlockCount: 1)
+                        .isProgress(scanned: expected, total: 4),
+                    "incremental scan exceeded one block"
+                )
+                expected += 1
+            }
+            guard case .store(let opened) = recovery.advance(
+                      maximumBlockCount: 1
+                  )
+            else { fail("incremental recovery did not complete") }
+            expect(opened.newestSequence == nil, "empty arena manufactured a head")
+        }
+    }
+
     private static func formattedDevice(
         blockCount: UInt64,
         logBlocks: UInt64
@@ -286,5 +318,14 @@ struct PersistentLogStoreTests {
 
     private static func fail(_ message: StaticString) -> Never {
         fatalError("FAIL: \(message)")
+    }
+}
+
+private extension PersistentLogStoreRecoveryStep {
+    func isProgress(scanned: UInt64, total: UInt64) -> Bool {
+        guard case .progress(let actualScanned, let actualTotal) = self else {
+            return false
+        }
+        return actualScanned == scanned && actualTotal == total
     }
 }

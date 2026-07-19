@@ -141,7 +141,7 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             memory: memory
         )
     case .raspberryPi5:
-        RP1GEMNetworkRuntime.scheduleActivation(
+        RaspberryPi5CooperativeRuntime.scheduleActivation(
             console: console,
             platform: platform
         )
@@ -658,7 +658,7 @@ private func runDesktopSession(
         storageAddress: AArch64.terminalStorageAddress,
         serial: PL011(baseAddress: UInt(platform.serial.baseAddress)),
         usbDebug: usbDebug,
-        cooperativeServiceHook: RP1GEMNetworkRuntime.cooperativeServiceHook(
+        cooperativeServiceHook: RaspberryPi5CooperativeRuntime.cooperativeServiceHook(
             for: platform.kind
         )
     )
@@ -993,7 +993,7 @@ private func runScheduledOrPark(
     // A headless physical board still needs its bounded service work to make
     // progress when both display and USB discovery fail. This path deliberately
     // keeps the BSP observable instead of parking or handing it to EL0.
-    if let cooperativeService = RP1GEMNetworkRuntime.cooperativeServiceHook(
+    if let cooperativeService = RaspberryPi5CooperativeRuntime.cooperativeServiceHook(
         for: platform.kind
     ) {
         console.write("SWIFTOS:READY\n")

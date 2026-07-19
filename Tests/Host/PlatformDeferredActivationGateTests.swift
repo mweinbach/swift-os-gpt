@@ -1,4 +1,4 @@
-struct RP1GEMDeferredActivationGateTests {
+struct PlatformDeferredActivationGateTests {
     private var failures = 0
 
     mutating func run() -> Int32 {
@@ -6,19 +6,20 @@ struct RP1GEMDeferredActivationGateTests {
         testPolicyProvidesFiveSecondObservationWindow()
         testPolicyRejectsInvalidCounterFrequencies()
         testDelayBeginsOnFirstService()
+        testExplicitArmIsIdempotent()
         testFiresExactlyOnce()
         testCounterWrap()
 
         if failures == 0 {
-            print("PASS: RP1 GEM deferred activation gate")
+            print("PASS: platform deferred activation gate")
             return 0
         }
-        print("FAIL: \(failures) RP1 GEM deferred activation assertion(s)")
+        print("FAIL: \(failures) platform deferred activation assertion(s)")
         return 1
     }
 
     private mutating func testPolicyProvidesFiveSecondObservationWindow() {
-        var gate = RP1GEMDeferredActivationPolicy.makeGate(
+        var gate = PlatformLocalObservationPolicy.makeGate(
             counterFrequency: 10
         )!
         expect(!gate.poll(nowTicks: 1_000), "policy gate first arms")
@@ -34,13 +35,13 @@ struct RP1GEMDeferredActivationGateTests {
 
     private mutating func testPolicyRejectsInvalidCounterFrequencies() {
         expect(
-            RP1GEMDeferredActivationPolicy.makeGate(
+            PlatformLocalObservationPolicy.makeGate(
                 counterFrequency: 0
             ) == nil,
             "zero-frequency policy is rejected"
         )
         expect(
-            RP1GEMDeferredActivationPolicy.makeGate(
+            PlatformLocalObservationPolicy.makeGate(
                 counterFrequency: UInt64.max
             ) == nil,
             "overflowing policy is rejected"
@@ -49,20 +50,28 @@ struct RP1GEMDeferredActivationGateTests {
 
     private mutating func testRejectsZeroDelay() {
         expect(
-            RP1GEMDeferredActivationGate(delayTicks: 0) == nil,
+            PlatformDeferredActivationGate(delayTicks: 0) == nil,
             "zero-delay activation is rejected"
         )
     }
 
     private mutating func testDelayBeginsOnFirstService() {
-        var gate = RP1GEMDeferredActivationGate(delayTicks: 10)!
+        var gate = PlatformDeferredActivationGate(delayTicks: 10)!
         expect(!gate.poll(nowTicks: 1_000), "first service only arms")
         expect(!gate.poll(nowTicks: 1_009), "partial delay remains deferred")
         expect(gate.poll(nowTicks: 1_010), "exact deadline starts activation")
     }
 
+    private mutating func testExplicitArmIsIdempotent() {
+        var gate = PlatformDeferredActivationGate(delayTicks: 10)!
+        gate.arm(nowTicks: 100)
+        gate.arm(nowTicks: 105)
+        expect(!gate.poll(nowTicks: 109), "second arm moved deadline origin")
+        expect(gate.poll(nowTicks: 110), "first explicit arm was not retained")
+    }
+
     private mutating func testFiresExactlyOnce() {
-        var gate = RP1GEMDeferredActivationGate(delayTicks: 1)!
+        var gate = PlatformDeferredActivationGate(delayTicks: 1)!
         expect(!gate.poll(nowTicks: 50), "one-tick gate arms")
         expect(gate.poll(nowTicks: 51), "one-tick gate fires")
         expect(!gate.poll(nowTicks: 52), "consumed gate stays quiet")
@@ -70,7 +79,7 @@ struct RP1GEMDeferredActivationGateTests {
     }
 
     private mutating func testCounterWrap() {
-        var gate = RP1GEMDeferredActivationGate(delayTicks: 5)!
+        var gate = PlatformDeferredActivationGate(delayTicks: 5)!
         expect(
             !gate.poll(nowTicks: UInt64.max - 2),
             "wrapping gate arms near counter maximum"
@@ -89,12 +98,12 @@ struct RP1GEMDeferredActivationGateTests {
 }
 
 @main
-enum RP1GEMDeferredActivationGateTestMain {
+enum PlatformDeferredActivationGateTestMain {
     static func main() {
-        var tests = RP1GEMDeferredActivationGateTests()
+        var tests = PlatformDeferredActivationGateTests()
         let result = tests.run()
         if result != 0 {
-            fatalError("RP1 GEM deferred activation tests failed")
+            fatalError("platform deferred activation tests failed")
         }
     }
 }

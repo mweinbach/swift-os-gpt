@@ -114,6 +114,12 @@ enum KernelLinkerLayout {
             end: archRP1GEMCacheablePagesEnd()
         )
     }
+    static var storageScratch: LinkerRegion {
+        LinkerRegion(
+            start: archStorageScratchStart(),
+            end: archStorageScratchEnd()
+        )
+    }
     static var userEntryPhysicalAddress: UInt64 { archUserEntryPhysical() }
 }
 
@@ -205,6 +211,10 @@ private func archRP1GEMDescriptorPageEnd() -> UInt64
 private func archRP1GEMCacheablePagesStart() -> UInt64
 @_silgen_name("arch_rp1_gem_cacheable_pages_end")
 private func archRP1GEMCacheablePagesEnd() -> UInt64
+@_silgen_name("arch_storage_scratch_start")
+private func archStorageScratchStart() -> UInt64
+@_silgen_name("arch_storage_scratch_end")
+private func archStorageScratchEnd() -> UInt64
 @_silgen_name("arch_user_entry_physical") private func archUserEntryPhysical() -> UInt64
 @_silgen_name("arch_secondary_entry_address") private func archSecondaryEntryAddress() -> UInt64
 @_silgen_name("arch_install_ttbr0") private func archInstallTTBR0(_ value: UInt64)

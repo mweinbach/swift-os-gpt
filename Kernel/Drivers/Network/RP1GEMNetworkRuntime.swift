@@ -34,7 +34,17 @@ enum RP1GEMNetworkRuntime {
     private nonisolated(unsafe) static var reportedConfiguration = false
     private nonisolated(unsafe) static var pendingPlatform: Platform?
     private nonisolated(unsafe) static var deferredActivation:
-        RP1GEMDeferredActivationGate?
+        PlatformDeferredActivationGate?
+    private nonisolated(unsafe) static var deferredActivationReady = false
+
+    static var hasDeferredBootstrap: Bool {
+        deferredActivation != nil || deferredActivationReady
+    }
+
+    static var hasCooperativeWork: Bool {
+        activeService != nil || deferredActivation != nil
+            || deferredActivationReady
+    }
 
     /// Records physical-network work for the cooperative monitor loop. No RP1
     /// MMIO is touched here, so HDMI presentation, USB gadget initialization,
@@ -47,12 +57,13 @@ enum RP1GEMNetworkRuntime {
               activeService == nil,
               pendingPlatform == nil,
               deferredActivation == nil,
+              !deferredActivationReady,
               !faulted
         else {
             return
         }
         let frequency = AArch64.counterFrequency
-        guard let gate = RP1GEMDeferredActivationPolicy.makeGate(
+        guard let gate = PlatformLocalObservationPolicy.makeGate(
                   counterFrequency: frequency
               )
         else {
@@ -234,35 +245,19 @@ enum RP1GEMNetworkRuntime {
         }
     }
 
-    static func cooperativeServiceHook(
-        for board: BoardKind
-    ) -> KernelMonitorServiceHook? {
-        guard case .raspberryPi5 = board,
-              activeService != nil || deferredActivation != nil,
-              !faulted
-        else {
-            return nil
-        }
-        return swiftOSServiceRP1Network
-    }
-
     static func serviceOnce() {
+        if deferredActivationReady {
+            deferredActivationReady = false
+            activatePendingPlatform()
+            return
+        }
         if var gate = deferredActivation {
             guard gate.poll(nowTicks: AArch64.counterValue) else {
                 deferredActivation = gate
                 return
             }
             deferredActivation = nil
-            guard let platform = pendingPlatform,
-                  let console = self.console
-            else {
-                pendingPlatform = nil
-                faulted = true
-                return
-            }
-            pendingPlatform = nil
-            console.write("SWIFTOS:RP1_NET_STARTING\n")
-            activate(console: console, platform: platform)
+            activatePendingPlatform()
             return
         }
 
@@ -288,6 +283,43 @@ enum RP1GEMNetworkRuntime {
             console.write("SWIFTOS:DHCP_BOUND\n")
             writeAddress(network.address, console: console)
         }
+    }
+
+    /// Advances only the shared local-observation deadline. The composite Pi
+    /// scheduler uses this while storage performs its own pre-network stages;
+    /// reaching the deadline records readiness but never starts PHY polling in
+    /// the same pass.
+    static func advanceDeferredGateWithoutStarting() {
+        guard !deferredActivationReady,
+              var gate = deferredActivation
+        else { return }
+        if gate.poll(nowTicks: AArch64.counterValue) {
+            deferredActivation = nil
+            deferredActivationReady = true
+        } else {
+            deferredActivation = gate
+        }
+    }
+
+    static func armDeferredBootstrapObservation() {
+        guard !deferredActivationReady,
+              var gate = deferredActivation
+        else { return }
+        gate.arm(nowTicks: AArch64.counterValue)
+        deferredActivation = gate
+    }
+
+    private static func activatePendingPlatform() {
+        guard let platform = pendingPlatform,
+              let console = self.console
+        else {
+            pendingPlatform = nil
+            faulted = true
+            return
+        }
+        pendingPlatform = nil
+        console.write("SWIFTOS:RP1_NET_STARTING\n")
+        activate(console: console, platform: platform)
     }
 
     private static func retain(
@@ -360,9 +392,4 @@ enum RP1GEMNetworkRuntime {
             console.write("SWIFTOS:RP1_NET_TX_DEVICE_FAULT\n")
         }
     }
-}
-
-@_cdecl("swiftos_service_rp1_network")
-func swiftOSServiceRP1Network() {
-    RP1GEMNetworkRuntime.serviceOnce()
 }
