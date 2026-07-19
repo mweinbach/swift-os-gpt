@@ -93,7 +93,7 @@ struct USBGadgetProtocolTests {
             expect(output[0] == 9 && output[1] == 2, "configuration header")
             expect(read16(output, 2) == 98, "configuration total length")
             expect(output[4] == 3 && output[5] == 1, "configuration identity")
-            expect(output[7] == 0xa0 && output[8] == 250, "power attributes")
+            expect(output[7] == 0x80 && output[8] == 250, "power attributes")
 
             expectBytes(
                 output,
@@ -273,16 +273,16 @@ struct USBGadgetProtocolTests {
                 endpoint.handle(
                     setup(type: 0x00, request: 3, value: 1),
                     reply: reply
-                ) == .statusIn,
-                "addressed remote-wakeup feature"
+                ) == .stall(.unsupportedFeature),
+                "addressed remote-wakeup claim"
             )
-            expect(endpoint.remoteWakeupEnabled, "addressed remote-wakeup state")
+            expect(!endpoint.remoteWakeupEnabled, "addressed remote-wakeup state")
             expect(
                 endpoint.handle(
                     setup(type: 0x00, request: 1, value: 1),
                     reply: reply
-                ) == .statusIn,
-                "addressed remote-wakeup clear"
+                ) == .stall(.unsupportedFeature),
+                "addressed remote-wakeup clear claim"
             )
 
             expect(
@@ -340,10 +340,10 @@ struct USBGadgetProtocolTests {
                 endpoint.handle(
                     setup(type: 0x00, request: 3, value: 1),
                     reply: reply
-                ) == .statusIn,
+                ) == .stall(.unsupportedFeature),
                 "SET_FEATURE remote wakeup"
             )
-            expect(endpoint.remoteWakeupEnabled, "remote wakeup feature state")
+            expect(!endpoint.remoteWakeupEnabled, "remote wakeup feature state")
             expect(
                 endpoint.handle(
                     setup(type: 0x80, request: 0, length: 2),
@@ -351,12 +351,12 @@ struct USBGadgetProtocolTests {
                 ) == .dataIn(byteCount: 2),
                 "device GET_STATUS"
             )
-            expect(reply[0] == 2 && reply[1] == 0, "device status bits")
+            expect(reply[0] == 0 && reply[1] == 0, "device status bits")
             expect(
                 endpoint.handle(
                     setup(type: 0x00, request: 1, value: 1),
                     reply: reply
-                ) == .statusIn,
+                ) == .stall(.unsupportedFeature),
                 "CLEAR_FEATURE remote wakeup"
             )
 

@@ -301,8 +301,9 @@ struct USBControlEndpoint {
             guard setup.value == USBFeatureSelector.deviceRemoteWakeup else {
                 return .stall(.unsupportedFeature)
             }
-            remoteWakeupEnabled = enabled
-            return .statusIn
+            // The configuration descriptor intentionally does not advertise
+            // remote wakeup until a controller backend can signal resume.
+            return .stall(.unsupportedFeature)
 
         case .endpoint:
             guard state == .configured else { return .stall(.invalidState) }

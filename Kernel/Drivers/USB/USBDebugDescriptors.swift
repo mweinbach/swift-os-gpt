@@ -202,8 +202,10 @@ enum USBDebugDescriptorSet {
         writer.byte(USBDebugDeviceIdentity.interfaceCount)
         writer.byte(USBDebugDeviceIdentity.configurationValue)
         writer.byte(0)
-        // Bus powered, remote wakeup capable, 500 mA maximum at USB 2.0.
-        writer.byte(0xa0)
+        // Bus powered, no remote-wakeup claim, 500 mA maximum at USB 2.0.
+        // The DWC2 runtime must implement resume signaling before bit 5 may
+        // be advertised here.
+        writer.byte(0x80)
         writer.byte(250)
 
         // CDC function association: control interface 0 and data interface 1.
