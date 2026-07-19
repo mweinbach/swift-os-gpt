@@ -387,6 +387,7 @@ enum DWC2CoreBits {
 
     static let endpointEnable: UInt32 = 1 << 31
     static let endpointDisable: UInt32 = 1 << 30
+    static let setData0PID: UInt32 = 1 << 28
     static let setNAK: UInt32 = 1 << 27
     static let clearNAK: UInt32 = 1 << 26
     static let endpointFIFOShift: UInt32 = 22

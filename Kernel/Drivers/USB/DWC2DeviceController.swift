@@ -1,6 +1,11 @@
 protocol DWC2RegisterAccess {
     mutating func read32(at offset: UInt) -> UInt32
     mutating func write32(_ value: UInt32, at offset: UInt)
+    mutating func settleAfterModeChange() -> Bool
+}
+
+extension DWC2RegisterAccess {
+    mutating func settleAfterModeChange() -> Bool { true }
 }
 
 enum DWC2ControllerState: UInt8, Equatable {
@@ -180,6 +185,10 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
                   offset: DWC2RegisterLayout.resetControl,
                   mask: DWC2CoreBits.coreSoftReset,
                   maximumPollCount: maximumPollCount
+              ), waitForSet(
+                  offset: DWC2RegisterLayout.resetControl,
+                  mask: DWC2CoreBits.ahbIdle,
+                  maximumPollCount: maximumPollCount
               )
         else {
             state = .faulted
@@ -190,7 +199,8 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         usb &= ~DWC2CoreBits.forceHostMode
         usb |= DWC2CoreBits.forceDeviceMode
         write(usb, DWC2RegisterLayout.usbConfiguration)
-        guard waitForClear(
+        guard registers.settleAfterModeChange(),
+              waitForClear(
                   offset: DWC2RegisterLayout.interruptStatus,
                   mask: 1,
                   maximumPollCount: maximumPollCount
@@ -260,6 +270,12 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
             DWC2CoreBits.deviceModeInterrupts,
             DWC2RegisterLayout.interruptMask
         )
+        // Core reset may restore DCTL independently of the pre-reset write.
+        // Reassert disconnect only after every endpoint/FIFO mask is safe so
+        // the host can never observe a half-configured default device.
+        deviceControl = read(DWC2RegisterLayout.deviceControl)
+        deviceControl |= DWC2CoreBits.softDisconnect
+        write(deviceControl, DWC2RegisterLayout.deviceControl)
 
         self.capabilities = capabilities
         self.fifoPlan = fifoPlan
@@ -462,6 +478,30 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         write(configuration, DWC2RegisterLayout.deviceConfiguration)
     }
 
+    mutating func setEndpointHalt(
+        endpointAddress: UInt8,
+        halted: Bool
+    ) -> Bool {
+        guard state == .configured else { return false }
+        let endpoint = endpointAddress & 0x0f
+        guard endpoint > 0, endpoint < DWC2CompositeFIFOPlan.endpointCount
+        else { return false }
+        let directionIn = endpointAddress & 0x80 != 0
+        let offset = directionIn
+            ? DWC2RegisterLayout.inEndpointControl(endpoint)
+            : DWC2RegisterLayout.outEndpointControl(endpoint)
+        guard let offset else { return false }
+        var control = read(offset)
+        if halted {
+            control |= DWC2CoreBits.endpointStall
+        } else {
+            control &= ~DWC2CoreBits.endpointStall
+            control |= DWC2CoreBits.setData0PID
+        }
+        write(control, offset)
+        return true
+    }
+
     mutating func stallEndpoint0() {
         guard let input = DWC2RegisterLayout.inEndpointControl(0),
               let output = DWC2RegisterLayout.outEndpointControl(0)
@@ -643,6 +683,7 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         write(UInt32.max, interrupt)
         let value = DWC2CoreBits.endpointActive
             | DWC2CoreBits.setNAK
+            | DWC2CoreBits.setData0PID
             | type
             | UInt32(endpoint) << DWC2CoreBits.endpointFIFOShift
             | UInt32(maximumPacketSize)
@@ -666,6 +707,7 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         write(UInt32.max, interrupt)
         let value = DWC2CoreBits.endpointActive
             | DWC2CoreBits.setNAK
+            | DWC2CoreBits.setData0PID
             | type
             | UInt32(maximumPacketSize)
         write(value, control)

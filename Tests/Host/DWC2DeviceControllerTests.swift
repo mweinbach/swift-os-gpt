@@ -167,6 +167,32 @@ struct DWC2DeviceControllerTests {
                 "display endpoint uses the wrong FIFO"
             )
             expect(
+                displayControl & DWC2CoreBits.setData0PID != 0,
+                "new endpoint did not reset its data toggle"
+            )
+            expect(
+                controller.setEndpointHalt(
+                    endpointAddress: 0x83,
+                    halted: true
+                ),
+                "display endpoint halt failed"
+            )
+            expect(
+                words[Int(displayIn / 4)] & DWC2CoreBits.endpointStall != 0,
+                "display endpoint did not stall"
+            )
+            expect(
+                controller.setEndpointHalt(
+                    endpointAddress: 0x83,
+                    halted: false
+                ),
+                "display endpoint unhalt failed"
+            )
+            expect(
+                words[Int(displayIn / 4)] & DWC2CoreBits.endpointStall == 0,
+                "display endpoint stall did not clear"
+            )
+            expect(
                 controller.armEndpoint0Out(byteCount: 0),
                 "endpoint-zero OUT status was not armed"
             )

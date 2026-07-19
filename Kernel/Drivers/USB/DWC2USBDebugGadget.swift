@@ -367,7 +367,11 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             }
             endpointZeroTransaction = .idle
             guard controller.armEndpoint0ForSetup() else { return fail() }
-            return synchronizeConfiguration()
+            guard let configurationEvent = synchronizeConfiguration() else {
+                return nil
+            }
+            guard synchronizeEndpointHalts() else { return fail() }
+            return configurationEvent
 
         case .idle, .dataOut, .statusOut, .stalled:
             return USBDebugGadgetEvent.none
@@ -404,6 +408,29 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             return .deconfigured
         }
         return USBDebugGadgetEvent.none
+    }
+
+    private mutating func synchronizeEndpointHalts() -> Bool {
+        guard controlEndpoint.state == .configured else { return true }
+        let endpointAddresses: (UInt8, UInt8, UInt8, UInt8, UInt8) = (
+            USBDebugDeviceIdentity.cdcNotificationEndpoint,
+            USBDebugDeviceIdentity.cdcDataOutEndpoint,
+            USBDebugDeviceIdentity.cdcDataInEndpoint,
+            USBDebugDeviceIdentity.debugDisplayOutEndpoint,
+            USBDebugDeviceIdentity.debugDisplayInEndpoint
+        )
+        return synchronizeEndpointHalt(endpointAddresses.0)
+            && synchronizeEndpointHalt(endpointAddresses.1)
+            && synchronizeEndpointHalt(endpointAddresses.2)
+            && synchronizeEndpointHalt(endpointAddresses.3)
+            && synchronizeEndpointHalt(endpointAddresses.4)
+    }
+
+    private mutating func synchronizeEndpointHalt(_ address: UInt8) -> Bool {
+        controller.setEndpointHalt(
+            endpointAddress: address,
+            halted: controlEndpoint.isEndpointHalted(address)
+        )
     }
 
     private mutating func serviceDiscardedOutEndpoint(

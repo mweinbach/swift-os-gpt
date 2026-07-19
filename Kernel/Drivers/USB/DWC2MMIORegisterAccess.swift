@@ -21,6 +21,23 @@ struct DWC2MMIORegisterAccess: DWC2RegisterAccess {
     mutating func write32(_ value: UInt32, at offset: UInt) {
         MMIO.store32(value, at: baseAddress + offset)
     }
+
+    /// Synopsys requires mode forcing to settle before subsequent core-mode
+    /// accesses. Use the architectural counter instead of a board clock and
+    /// retain a bounded spin fallback if firmware failed to initialize it.
+    mutating func settleAfterModeChange() -> Bool {
+        let frequency = AArch64.counterFrequency
+        guard frequency >= 40 else { return false }
+        let requiredTicks = frequency / 40 // 25 milliseconds.
+        let start = AArch64.counterValue
+        var remainingSpins = 20_000_000
+        while AArch64.counterValue &- start < requiredTicks {
+            guard remainingSpins > 0 else { return false }
+            remainingSpins -= 1
+            AArch64.spinHint()
+        }
+        return true
+    }
 }
 
 typealias DWC2DeviceController = DWC2Controller<DWC2MMIORegisterAccess>
