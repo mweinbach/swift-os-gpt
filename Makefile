@@ -54,7 +54,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -255,6 +255,17 @@ usb-update-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/usb-update-host-tests
 	$(BUILD_DIR)/usb-update-host-tests
 
+usb-kernel-update-guest-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Drivers/USB/USBKernelUpdateSHA256.swift \
+		Kernel/Drivers/USB/USBKernelUpdateProtocol.swift \
+		Kernel/Drivers/USB/USBKernelUpdateReceiver.swift \
+		Tests/Host/USBKernelUpdateProtocolTests.swift \
+		-o $(BUILD_DIR)/usb-kernel-update-protocol-host-tests
+	$(BUILD_DIR)/usb-kernel-update-protocol-host-tests
+
 $(USB_UPDATE): \
 		tools/USBUpdate/USBUpdateProtocol.swift \
 		tools/USBUpdate/USBUpdateSerialTransport.swift \
@@ -267,7 +278,7 @@ $(USB_UPDATE): \
 
 usb-update: $(USB_UPDATE)
 
-host-test: firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test usb-update-host-test
+host-test: firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test usb-display-viewer-host-test usb-update-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
