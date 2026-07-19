@@ -132,6 +132,7 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             memory: memory
         )
     case .raspberryPi5:
+        RP1GEMNetworkRuntime.activate(console: console, platform: platform)
         if let display = drivers.display {
             console.write(SimpleFramebufferDisplayDriver.readyMarker)
             runPlatformDesktop(
@@ -271,27 +272,14 @@ private func activateQEMUVirtIONetwork(
         return
     }
     let startTicks = AArch64.counterValue
-    let packedMAC = packedMACAddress(device.macAddress)
-    let transactionIdentifier = UInt32(
-        truncatingIfNeeded: startTicks ^ packedMAC ^ (packedMAC >> 32)
-    )
-    let retryTicks = max(frequency / 10, 1)
-    let maximumRetryTicks = max(frequency, retryTicks)
-    guard var service = PollingNetworkService(
+    let packedMAC = NetworkBootCoordinator.packedMACAddress(device.macAddress)
+    guard var service = NetworkBootCoordinator.makeService(
               link: device,
               receiveScratchAddress: workspace.receiveScratchAddress,
               transmitScratchAddress: workspace.transmitScratchAddress,
               scratchByteCount: workspace.scratchByteCount,
-              dhcpTransactionIdentifier: transactionIdentifier,
-              timing: IPv4PollingStackTiming(
-                  arpEntryLifetimeTicks: frequency * 300,
-                  arpProbeIntervalTicks: frequency,
-                  dhcpRetryPolicy: DHCPv4RetryPolicy(
-                      initialRetryTicks: retryTicks,
-                      maximumRetryTicks: maximumRetryTicks
-                  )
-              ),
-              startAtTicks: startTicks
+              counterFrequency: frequency,
+              startTicks: startTicks
           )
     else {
         activeVirtIONetworkAllocation = allocation
@@ -308,58 +296,52 @@ private func activateQEMUVirtIONetwork(
     console.writeHex(packedMAC)
     console.write("\n")
 
-    let deadlineDelta = frequency * 3
-    var fatalFailure = false
-    while AArch64.counterValue &- startTicks < deadlineDelta {
-        let event = service.poll(nowTicks: AArch64.counterValue)
-        if service.networkConfiguration != nil {
-            break
-        }
-        switch event {
-        case .deviceFault:
-            console.write("SWIFTOS:VIRTIO_NET_DEVICE_FAULT\n")
-            fatalFailure = true
-        case .linkIdentityMismatch:
-            console.write("SWIFTOS:VIRTIO_NET_IDENTITY_FAULT\n")
-            fatalFailure = true
-        case .receiveScratchTooSmall, .transmitScratchTooSmall:
-            console.write("SWIFTOS:VIRTIO_NET_SCRATCH_FAULT\n")
-            fatalFailure = true
-        case .transmitFailed(let failure):
-            switch failure {
-            case .sent:
-                break
-            case .linkDown:
-                console.write("SWIFTOS:VIRTIO_NET_TX_LINK_DOWN\n")
-                fatalFailure = true
-            case .invalidFrame:
-                console.write("SWIFTOS:VIRTIO_NET_TX_FRAME_INVALID\n")
-                fatalFailure = true
-            case .timedOut:
-                console.write("SWIFTOS:VIRTIO_NET_TX_TIMEOUT\n")
-                fatalFailure = true
-            case .deviceFault:
-                console.write("SWIFTOS:VIRTIO_NET_TX_DEVICE_FAULT\n")
-                fatalFailure = true
-            }
-        default:
-            break
-        }
-        if fatalFailure { break }
-        AArch64.spinHint()
-    }
+    var clock = AArch64NetworkBootClock()
+    let outcome = NetworkBootCoordinator.poll(
+        service: &service,
+        startTicks: startTicks,
+        deadlineDeltaTicks: frequency * 3,
+        linkDownPolicy: .fault,
+        clock: &clock
+    )
 
     activeVirtIONetworkAllocation = allocation
     activeVirtIONetworkService = service
-    if let configuration = service.networkConfiguration {
+    switch outcome {
+    case .configured:
         console.write("SWIFTOS:DHCP_BOUND\n")
-        console.write("SWIFTOS:VIRTIO_NET_IPV4=")
-        console.writeHex(UInt64(configuration.address.rawValue))
-        console.write("\n")
-    } else if fatalFailure {
-        console.write("SWIFTOS:VIRTIO_NET_FAULT\n")
-    } else {
+        if let configuration = service.networkConfiguration {
+            console.write("SWIFTOS:VIRTIO_NET_IPV4=")
+            console.writeHex(UInt64(configuration.address.rawValue))
+            console.write("\n")
+        }
+    case .timedOut:
         console.write("SWIFTOS:DHCP_TIMEOUT\n")
+    case .fault(let fault):
+        writeVirtIONetworkFault(fault, console: console)
+        console.write("SWIFTOS:VIRTIO_NET_FAULT\n")
+    }
+}
+
+private func writeVirtIONetworkFault(
+    _ fault: NetworkPollingFault,
+    console: EarlyConsole
+) {
+    switch fault {
+    case .device:
+        console.write("SWIFTOS:VIRTIO_NET_DEVICE_FAULT\n")
+    case .identity:
+        console.write("SWIFTOS:VIRTIO_NET_IDENTITY_FAULT\n")
+    case .scratch:
+        console.write("SWIFTOS:VIRTIO_NET_SCRATCH_FAULT\n")
+    case .transmitLinkDown:
+        console.write("SWIFTOS:VIRTIO_NET_TX_LINK_DOWN\n")
+    case .invalidTransmitFrame:
+        console.write("SWIFTOS:VIRTIO_NET_TX_FRAME_INVALID\n")
+    case .transmitTimeout:
+        console.write("SWIFTOS:VIRTIO_NET_TX_TIMEOUT\n")
+    case .transmitDevice:
+        console.write("SWIFTOS:VIRTIO_NET_TX_DEVICE_FAULT\n")
     }
 }
 
@@ -386,15 +368,6 @@ private func qemuVirtIONetworkDescription(
         return description
     }
     return nil
-}
-
-private func packedMACAddress(_ address: MACAddress) -> UInt64 {
-    UInt64(address.octet0) << 40
-        | UInt64(address.octet1) << 32
-        | UInt64(address.octet2) << 24
-        | UInt64(address.octet3) << 16
-        | UInt64(address.octet4) << 8
-        | UInt64(address.octet5)
 }
 
 private func runQEMUDesktop(
@@ -672,7 +645,10 @@ private func runDesktopSession(
         kernelUpdateStaging: kernelUpdateStaging,
         storageAddress: AArch64.terminalStorageAddress,
         serial: PL011(baseAddress: UInt(platform.serial.baseAddress)),
-        usbDebug: usbDebug
+        usbDebug: usbDebug,
+        cooperativeServiceHook: RP1GEMNetworkRuntime.cooperativeServiceHook(
+            for: platform.kind
+        )
     )
     guard monitor.start() else {
         console.write("SWIFTOS:PANIC:DISPLAY_PRESENT\n")
@@ -1002,6 +978,18 @@ private func runScheduledOrPark(
     platform: Platform,
     memory: KernelMemoryActivation
 ) -> Never {
+    // A headless physical board still needs its bounded service work to make
+    // progress when both display and USB discovery fail. This path deliberately
+    // keeps the BSP observable instead of parking or handing it to EL0.
+    if let cooperativeService = RP1GEMNetworkRuntime.cooperativeServiceHook(
+        for: platform.kind
+    ) {
+        console.write("SWIFTOS:READY\n")
+        while true {
+            cooperativeService()
+            AArch64.spinHint()
+        }
+    }
     guard platform.processorCount > 1 else {
         console.write("SWIFTOS:READY\n")
         park()

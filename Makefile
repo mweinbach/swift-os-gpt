@@ -55,7 +55,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke smp-el0-smoke cpu-config-smoke test host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke smp-el0-smoke cpu-config-smoke test host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -521,6 +521,25 @@ virtio-net-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/virtio-network-bootstrap-memory-host-tests
 	$(BUILD_DIR)/virtio-network-bootstrap-memory-host-tests
 
+network-boot-coordinator-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Networking/NetworkWire.swift \
+		Kernel/Networking/EthernetII.swift \
+		Kernel/Networking/ARP.swift \
+		Kernel/Networking/IPv4.swift \
+		Kernel/Networking/UDP.swift \
+		Kernel/Networking/ICMPEcho.swift \
+		Kernel/Networking/NetworkLink.swift \
+		Kernel/Networking/DHCPv4Client.swift \
+		Kernel/Networking/IPv4PollingStack.swift \
+		Kernel/Networking/PollingNetworkService.swift \
+		Kernel/Networking/NetworkBootCoordinator.swift \
+		Tests/Host/NetworkBootCoordinatorTests.swift \
+		-o $(BUILD_DIR)/network-boot-coordinator-host-tests
+	$(BUILD_DIR)/network-boot-coordinator-host-tests
+
 cadence-gem-device-host-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
@@ -604,7 +623,7 @@ kernel-monitor-service-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/kernel-monitor-service-hook-host-tests
 	$(BUILD_DIR)/kernel-monitor-service-hook-host-tests
 
-host-test: kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
+host-test: kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
