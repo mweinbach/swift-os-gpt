@@ -18,6 +18,16 @@ private enum SyntheticRP1Malformation {
     case duplicatePHYPhandle
 }
 
+private enum SyntheticDMAFixture: Equatable {
+    case emptyIdentity
+    case multipleTuples
+    case gap
+    case ambiguous
+    case malformedTuple
+    case overflowingChild
+    case absent
+}
+
 @main
 struct PlatformNetworkDiscoveryTests {
     private static var failures = 0
@@ -29,11 +39,12 @@ struct PlatformNetworkDiscoveryTests {
         testMalformedInterruptsFailClosed()
         testMalformedRP1BoardMetadataFailsClosed()
         testDisabledNodeIsNotDiscoverable()
+        testBoundedDMATranslation()
 
         guard failures == 0 else {
             fatalError("\(failures) platform network discovery test(s) failed")
         }
-        print("platform network discovery host tests passed (6 groups)")
+        print("platform network discovery host tests passed (7 groups)")
     }
 
     private static func testQEMUTranslatedCandidate() {
@@ -86,6 +97,23 @@ struct PlatformNetworkDiscoveryTests {
             expect(
                 description.boardResources == nil,
                 "QEMU candidate inherited board-specific resources"
+            )
+            expect(
+                PlatformNetworkDeviceDiscovery.dmaMapping(
+                    in: tree,
+                    board: .qemuVirt,
+                    candidateIndex: 0,
+                    cpuPhysicalAddress: 0x4000,
+                    byteCount: 0x1000,
+                    deviceAddressWidth: .bits32
+                ) == DMAMapping(
+                    cpuPhysicalAddress: 0x4000,
+                    deviceAddress: 0x4000,
+                    byteCount: 0x1000,
+                    deviceAddressWidth: .bits32,
+                    coherency: .hardwareCoherent
+                ),
+                "QEMU direct-system-physical DMA mapping"
             )
             var bootResources = BootDriverResourceSet()
             expect(
@@ -226,6 +254,36 @@ struct PlatformNetworkDiscoveryTests {
             expect(
                 rp1.localMACAddress?.isUsableUnicast == true,
                 "RP1 valid local MAC was not marked usable"
+            )
+            let workspaceCPUAddress: UInt64 = 0x1e_4000
+            let workspaceByteCount: UInt64 = 0x4_000
+            expect(
+                PlatformNetworkDeviceDiscovery.dmaMapping(
+                    in: tree,
+                    board: .raspberryPi5,
+                    candidateIndex: 0,
+                    cpuPhysicalAddress: workspaceCPUAddress,
+                    byteCount: workspaceByteCount,
+                    deviceAddressWidth: .bits32
+                ) == DMAMapping(
+                    cpuPhysicalAddress: workspaceCPUAddress,
+                    deviceAddress: workspaceCPUAddress,
+                    byteCount: workspaceByteCount,
+                    deviceAddressWidth: .bits32,
+                    coherency: .softwareManaged
+                ),
+                "RP1 32-bit DMA alias was not derived from dma-ranges"
+            )
+            expect(
+                PlatformNetworkDeviceDiscovery.dmaMapping(
+                    in: tree,
+                    board: .raspberryPi5,
+                    candidateIndex: 0,
+                    cpuPhysicalAddress: workspaceCPUAddress,
+                    byteCount: workspaceByteCount,
+                    deviceAddressWidth: .bits64
+                ) == nil,
+                "RP1 high and low DMA aliases were not treated as ambiguous"
             )
             var bootResources = BootDriverResourceSet()
             expect(
@@ -409,6 +467,68 @@ struct PlatformNetworkDiscoveryTests {
         }
     }
 
+    private static func testBoundedDMATranslation() {
+        withTree(makeSimpleDMATree(.emptyIdentity)) { tree in
+            expect(
+                tree.deviceDMAResource(
+                    compatibleWith: "test,dma-device",
+                    cpuPhysicalAddress: 0x1234_0000,
+                    byteCount: 0x2000,
+                    maximumDeviceAddress: UInt64(UInt32.max)
+                ) == DeviceResource(
+                    baseAddress: 0x1234_0000,
+                    length: 0x2000
+                ),
+                "empty dma-ranges did not preserve an identity mapping"
+            )
+        }
+
+        withTree(makeSimpleDMATree(.multipleTuples)) { tree in
+            expect(
+                tree.deviceDMAResource(
+                    compatibleWith: "test,dma-device",
+                    cpuPhysicalAddress: 0x201_000,
+                    byteCount: 0x1000,
+                    maximumDeviceAddress: UInt64(UInt32.max)
+                ) == DeviceResource(
+                    baseAddress: 0x9_000,
+                    length: 0x1000
+                ),
+                "second dma-ranges tuple was not selected"
+            )
+            expect(
+                tree.deviceDMAResource(
+                    compatibleWith: "test,dma-device",
+                    cpuPhysicalAddress: UInt64.max,
+                    byteCount: 2,
+                    maximumDeviceAddress: UInt64.max
+                ) == nil,
+                "overflowing CPU interval was accepted"
+            )
+        }
+
+        for fixture in [
+            SyntheticDMAFixture.gap,
+            .ambiguous,
+            .malformedTuple,
+            .overflowingChild,
+            .absent,
+        ] {
+            withTree(makeSimpleDMATree(fixture)) { tree in
+                expect(
+                    tree.deviceDMAResource(
+                        compatibleWith: "test,dma-device",
+                        cpuPhysicalAddress: fixture == .gap
+                            ? 0x180_000 : 0x201_000,
+                        byteCount: 0x1000,
+                        maximumDeviceAddress: UInt64.max
+                    ) == nil,
+                    "invalid DMA fixture \(fixture) did not fail closed"
+                )
+            }
+        }
+    }
+
     private static func withTree(
         _ bytes: [UInt8],
         body: (FlattenedDeviceTree) -> Void
@@ -447,7 +567,7 @@ private func makeTree(_ board: SyntheticNetworkBoard) -> [UInt8] {
         "interrupts", "dma-coherent", "status", "clocks", "clock-names",
         "phandle", "#clock-cells", "phy-mode", "local-mac-address",
         "phy-handle", "phy-reset-gpios", "phy-reset-duration",
-        "gpio-controller", "#gpio-cells",
+        "gpio-controller", "#gpio-cells", "dma-ranges",
     ]
     let strings = makeStrings(names)
     let offsets = strings.offsets
@@ -491,6 +611,11 @@ private func makeTree(_ board: SyntheticNetworkBoard) -> [UInt8] {
                 + be64(0x4_0000_0000),
             &structure
         )
+        property(
+            offsets["dma-ranges"]!,
+            be64(0) + be64(0) + be64(0x10_0000_0000),
+            &structure
+        )
         beginNode("pcie", &structure)
         property(offsets["#address-cells"]!, words([3]), &structure)
         property(offsets["#size-cells"]!, words([2]), &structure)
@@ -500,6 +625,14 @@ private func makeTree(_ board: SyntheticNetworkBoard) -> [UInt8] {
                 + be64(0xffff_fffc),
             &structure
         )
+        property(
+            offsets["dma-ranges"]!,
+            words([0x0200_0000]) + be64(0) + be64(0x1f_0000_0000)
+                + be64(0x40_0000)
+                + words([0x4300_0000]) + be64(0x10_0000_0000)
+                + be64(0) + be64(0x10_0000_0000),
+            &structure
+        )
         beginNode("rp1", &structure)
         property(offsets["#address-cells"]!, words([2]), &structure)
         property(offsets["#size-cells"]!, words([2]), &structure)
@@ -507,6 +640,16 @@ private func makeTree(_ board: SyntheticNetworkBoard) -> [UInt8] {
             offsets["ranges"]!,
             be64(0xc0_4000_0000) + words([0x0200_0000]) + be64(0)
                 + be64(0x41_0000),
+            &structure
+        )
+        property(
+            offsets["dma-ranges"]!,
+            be64(0x10_0000_0000) + words([0x4300_0000])
+                + be64(0x10_0000_0000) + be64(0x10_0000_0000)
+                + be64(0xc0_4000_0000) + words([0x0200_0000])
+                + be64(0) + be64(0x41_0000)
+                + be64(0) + words([0x0200_0000])
+                + be64(0x10_0000_0000) + be64(0x10_0000_0000),
             &structure
         )
         beginNode("clocks@18000", &structure)
@@ -622,6 +765,57 @@ private func makeTree(_ board: SyntheticNetworkBoard) -> [UInt8] {
         endNode(&structure)
     }
 
+    endNode(&structure)
+    word(9, &structure)
+    return finishFDT(structure: structure, strings: strings.bytes)
+}
+
+private func makeSimpleDMATree(_ fixture: SyntheticDMAFixture) -> [UInt8] {
+    let names = [
+        "#address-cells", "#size-cells", "compatible", "dma-ranges",
+    ]
+    let strings = makeStrings(names)
+    let offsets = strings.offsets
+    var structure: [UInt8] = []
+    beginNode("", &structure)
+    property(offsets["#address-cells"]!, words([2]), &structure)
+    property(offsets["#size-cells"]!, words([2]), &structure)
+    beginNode("bus", &structure)
+    property(offsets["#address-cells"]!, words([2]), &structure)
+    property(offsets["#size-cells"]!, words([2]), &structure)
+
+    let ranges: [UInt8]?
+    switch fixture {
+    case .emptyIdentity:
+        ranges = []
+    case .multipleTuples, .gap:
+        ranges = be64(0x1_000) + be64(0x100_000) + be64(0x1_000)
+            + be64(0x8_000) + be64(0x200_000) + be64(0x4_000)
+    case .ambiguous:
+        ranges = be64(0) + be64(0x200_000) + be64(0x4_000)
+            + be64(0x10_000) + be64(0x200_000) + be64(0x4_000)
+    case .malformedTuple:
+        var malformed = be64(0) + be64(0x200_000) + be64(0x4_000)
+        malformed.removeLast(4)
+        ranges = malformed
+    case .overflowingChild:
+        ranges = be64(UInt64.max - 0x7ff) + be64(0x200_000)
+            + be64(0x2_000)
+    case .absent:
+        ranges = nil
+    }
+    if let ranges {
+        property(offsets["dma-ranges"]!, ranges, &structure)
+    }
+
+    beginNode("device", &structure)
+    property(
+        offsets["compatible"]!,
+        cStrings(["test,dma-device"]),
+        &structure
+    )
+    endNode(&structure)
+    endNode(&structure)
     endNode(&structure)
     word(9, &structure)
     return finishFDT(structure: structure, strings: strings.bytes)

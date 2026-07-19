@@ -3,11 +3,23 @@ import Foundation
 @main
 struct PlatformNetworkPinnedDeviceTreeTests {
     static func main() throws {
-        guard CommandLine.arguments.count == 3 else {
+        guard CommandLine.arguments.count == 5,
+              let workspaceStart = UInt64(
+                  CommandLine.arguments[3],
+                  radix: 16
+              ), let workspaceEnd = UInt64(
+                  CommandLine.arguments[4],
+                  radix: 16
+              ), workspaceStart < workspaceEnd
+        else {
             throw ProbeError.usage
         }
         try validateQEMU(path: CommandLine.arguments[1])
-        try validateRaspberryPi(path: CommandLine.arguments[2])
+        try validateRaspberryPi(
+            path: CommandLine.arguments[2],
+            workspaceStart: workspaceStart,
+            workspaceEnd: workspaceEnd
+        )
         print("pinned platform network Device Tree probes passed")
     }
 
@@ -57,8 +69,13 @@ struct PlatformNetworkPinnedDeviceTreeTests {
         }
     }
 
-    private static func validateRaspberryPi(path: String) throws {
+    private static func validateRaspberryPi(
+        path: String,
+        workspaceStart: UInt64,
+        workspaceEnd: UInt64
+    ) throws {
         try withTree(path: path) { tree, address in
+            let workspaceByteCount = workspaceEnd - workspaceStart
             guard let description = PlatformNetworkDeviceDiscovery.candidate(
                       in: tree,
                       board: .raspberryPi5,
@@ -134,8 +151,29 @@ struct PlatformNetworkPinnedDeviceTreeTests {
                       board: .raspberryPi5,
                       at: 1
                   ) == nil,
-                  Platform.discover(deviceTreeAddress: address)?
-                      .networkDeviceCandidate(at: 0) == description
+                  let platform = Platform.discover(
+                      deviceTreeAddress: address
+                  ), platform.networkDeviceCandidate(at: 0) == description,
+                  workspaceStart & 0xfff == 0,
+                  workspaceByteCount == 0x4_000,
+                  workspaceEnd <= 0x1_0000_0000,
+                  platform.networkDMAMapping(
+                      forCandidateAt: 0,
+                      cpuPhysicalAddress: workspaceStart,
+                      byteCount: workspaceByteCount,
+                      deviceAddressWidth: .bits32
+                  ) == DMAMapping(
+                      cpuPhysicalAddress: workspaceStart,
+                      deviceAddress: workspaceStart,
+                      byteCount: workspaceByteCount,
+                      deviceAddressWidth: .bits32,
+                      coherency: .softwareManaged
+                  ), platform.networkDMAMapping(
+                      forCandidateAt: 0,
+                      cpuPhysicalAddress: workspaceStart,
+                      byteCount: workspaceByteCount,
+                      deviceAddressWidth: .bits64
+                  ) == nil
             else {
                 throw ProbeError.invalidRaspberryPiDescription
             }
@@ -173,7 +211,8 @@ private enum ProbeError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .usage:
-            return "usage: probe <qemu-virt.dtb> <bcm2712-rpi-5-b.dtb>"
+            return "usage: probe <qemu-virt.dtb> <bcm2712-rpi-5-b.dtb> "
+                + "<workspace-start-hex> <workspace-end-hex>"
         case .invalidBlob(let path):
             return "invalid Device Tree blob: \(path)"
         case .invalidQEMUDescription:

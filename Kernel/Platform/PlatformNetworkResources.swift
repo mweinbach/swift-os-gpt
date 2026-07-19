@@ -187,6 +187,53 @@ struct PlatformNetworkDeviceDiscovery {
         }
     }
 
+    /// Produces the complete CPU/device mapping for one candidate and one
+    /// contiguous physical interval. The caller supplies the controller's DMA
+    /// width; aliases outside that width are discarded before ambiguity is
+    /// evaluated. This is significant on RP1, which publishes both high and
+    /// low aliases for system RAM.
+    static func dmaMapping(
+        in tree: FlattenedDeviceTree,
+        board: BoardKind,
+        candidateIndex: Int,
+        cpuPhysicalAddress: UInt64,
+        byteCount: UInt64,
+        deviceAddressWidth: DMAAddressWidth
+    ) -> DMAMapping? {
+        guard let description = candidate(
+                  in: tree,
+                  board: board,
+                  at: candidateIndex
+              )
+        else { return nil }
+
+        let deviceAddress: UInt64
+        switch description.dma.addressing {
+        case .directSystemPhysical:
+            deviceAddress = cpuPhysicalAddress
+        case .translatedByParentBus:
+            guard description.controller == .rp1GEM,
+                  candidateIndex == 0,
+                  let resource = tree.deviceDMAResource(
+                      compatibleWith: "raspberrypi,rp1-gem",
+                      nodeIndex: 0,
+                      cpuPhysicalAddress: cpuPhysicalAddress,
+                      byteCount: byteCount,
+                      maximumDeviceAddress: deviceAddressWidth.highestAddress
+                  ), resource.length == byteCount
+            else { return nil }
+            deviceAddress = resource.baseAddress
+        }
+
+        return DMAMapping(
+            cpuPhysicalAddress: cpuPhysicalAddress,
+            deviceAddress: deviceAddress,
+            byteCount: byteCount,
+            deviceAddressWidth: deviceAddressWidth,
+            coherency: description.dma.coherency
+        )
+    }
+
     private static func qemuVirtIOCandidate(
         in tree: FlattenedDeviceTree,
         at index: Int
@@ -601,6 +648,29 @@ extension Platform {
             in: tree,
             board: kind,
             at: index
+        )
+    }
+
+    /// Resolves DMA through the same boot FDT and candidate index used for
+    /// network discovery. The returned value is ready for a driver workspace
+    /// constructor; no board-specific address arithmetic remains at the call
+    /// site.
+    func networkDMAMapping(
+        forCandidateAt index: Int,
+        cpuPhysicalAddress: UInt64,
+        byteCount: UInt64,
+        deviceAddressWidth: DMAAddressWidth
+    ) -> DMAMapping? {
+        guard let tree = FlattenedDeviceTree(address: deviceTreeAddress) else {
+            return nil
+        }
+        return PlatformNetworkDeviceDiscovery.dmaMapping(
+            in: tree,
+            board: kind,
+            candidateIndex: index,
+            cpuPhysicalAddress: cpuPhysicalAddress,
+            byteCount: byteCount,
+            deviceAddressWidth: deviceAddressWidth
         )
     }
 }

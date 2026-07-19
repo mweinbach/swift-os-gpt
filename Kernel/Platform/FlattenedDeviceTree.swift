@@ -285,6 +285,148 @@ private struct AddressTranslationPath {
     }
 }
 
+/// Address-space metadata that is not part of the numeric address. PCI uses
+/// the leading cell for space and attribute flags; ordinary buses encode only
+/// an integer address. Keeping the distinction prevents a PCI selector from
+/// being mistaken for the high 32 bits of a CPU physical address.
+private enum DeviceTreeAddressDomain: UInt8 {
+    case scalar
+    case pci
+}
+
+private enum DeviceTreePCIAddressClass: UInt8 {
+    case configuration
+    case io
+    case memory
+}
+
+private struct DeviceTreeDMAAddress {
+    let domain: DeviceTreeAddressDomain
+    let selector: UInt32
+    let value: UInt64
+}
+
+/// One ancestor bus's `dma-ranges` contract. Missing properties are retained
+/// as identity levels because a descendant DMA window can cross parents that
+/// do not repeat `dma-ranges`. An explicitly empty property is also identity,
+/// but records that firmware deliberately described the DMA relationship.
+private struct DeviceTreeDMATranslationLevel {
+    let rangesOffset: UInt
+    let rangesLength: UInt
+    let hasRangesProperty: Bool
+    let childAddressCells: UInt32
+    let parentAddressCells: UInt32
+    let sizeCells: UInt32
+    let childDomain: DeviceTreeAddressDomain
+    let parentDomain: DeviceTreeAddressDomain
+}
+
+/// The supported boot trees place the network controller under at most eight
+/// independently described buses. Deeper trees fail closed rather than
+/// silently dropping an address-translation level.
+private struct DeviceTreeDMATranslationPath {
+    static let maximumLevelCount = 8
+
+    private var level0: DeviceTreeDMATranslationLevel?
+    private var level1: DeviceTreeDMATranslationLevel?
+    private var level2: DeviceTreeDMATranslationLevel?
+    private var level3: DeviceTreeDMATranslationLevel?
+    private var level4: DeviceTreeDMATranslationLevel?
+    private var level5: DeviceTreeDMATranslationLevel?
+    private var level6: DeviceTreeDMATranslationLevel?
+    private var level7: DeviceTreeDMATranslationLevel?
+
+    private(set) var levelCount = 0
+    private(set) var hasExplicitRanges = false
+    private(set) var isValid = true
+
+    mutating func append(_ level: DeviceTreeDMATranslationLevel) -> Bool {
+        guard isValid, levelCount < Self.maximumLevelCount else {
+            isValid = false
+            return false
+        }
+        switch levelCount {
+        case 0: level0 = level
+        case 1: level1 = level
+        case 2: level2 = level
+        case 3: level3 = level
+        case 4: level4 = level
+        case 5: level5 = level
+        case 6: level6 = level
+        default: level7 = level
+        }
+        levelCount += 1
+        hasExplicitRanges = hasExplicitRanges || level.hasRangesProperty
+        return true
+    }
+
+    mutating func invalidate() {
+        isValid = false
+    }
+
+    func level(at index: Int) -> DeviceTreeDMATranslationLevel? {
+        guard isValid, index >= 0, index < levelCount else { return nil }
+        switch index {
+        case 0: return level0
+        case 1: return level1
+        case 2: return level2
+        case 3: return level3
+        case 4: return level4
+        case 5: return level5
+        case 6: return level6
+        default: return level7
+        }
+    }
+}
+
+/// A bounded set is required because one CPU interval can have multiple
+/// device-visible aliases. Width filtering may make one alias usable, but two
+/// usable aliases remain ambiguous and are rejected by the public resolver.
+private struct DeviceTreeDMACandidateSet {
+    static let maximumCandidateCount = 8
+
+    private var candidate0: DeviceTreeDMAAddress?
+    private var candidate1: DeviceTreeDMAAddress?
+    private var candidate2: DeviceTreeDMAAddress?
+    private var candidate3: DeviceTreeDMAAddress?
+    private var candidate4: DeviceTreeDMAAddress?
+    private var candidate5: DeviceTreeDMAAddress?
+    private var candidate6: DeviceTreeDMAAddress?
+    private var candidate7: DeviceTreeDMAAddress?
+
+    private(set) var count = 0
+
+    mutating func append(_ candidate: DeviceTreeDMAAddress) -> Bool {
+        guard count < Self.maximumCandidateCount else { return false }
+        switch count {
+        case 0: candidate0 = candidate
+        case 1: candidate1 = candidate
+        case 2: candidate2 = candidate
+        case 3: candidate3 = candidate
+        case 4: candidate4 = candidate
+        case 5: candidate5 = candidate
+        case 6: candidate6 = candidate
+        default: candidate7 = candidate
+        }
+        count += 1
+        return true
+    }
+
+    func candidate(at index: Int) -> DeviceTreeDMAAddress? {
+        guard index >= 0, index < count else { return nil }
+        switch index {
+        case 0: return candidate0
+        case 1: return candidate1
+        case 2: return candidate2
+        case 3: return candidate3
+        case 4: return candidate4
+        case 5: return candidate5
+        case 6: return candidate6
+        default: return candidate7
+        }
+    }
+}
+
 struct FlattenedDeviceTree {
     private static let magic: UInt32 = 0xd00d_feed
     private static let headerSize: UInt = 40
@@ -591,6 +733,86 @@ struct FlattenedDeviceTree {
         return nil
     }
 
+    /// Resolves one CPU physical interval into the address consumed by a DMA
+    /// master at an enabled compatible node. Translation walks every ancestor
+    /// `dma-ranges` level from the CPU root toward the device. Multiple aliases
+    /// are retained until `maximumDeviceAddress` is applied; zero or more than
+    /// one usable result fails closed.
+    func deviceDMAResource(
+        compatibleWith compatibility: StaticString,
+        nodeIndex: Int = 0,
+        cpuPhysicalAddress: UInt64,
+        byteCount: UInt64,
+        maximumDeviceAddress: UInt64
+    ) -> DeviceResource? {
+        guard nodeIndex >= 0,
+              byteCount > 0,
+              !cpuPhysicalAddress.addingReportingOverflow(byteCount - 1)
+                  .overflow,
+              let nodeOffset = compatibleNodeOffset(
+                  compatibility,
+                  nodeIndex: nodeIndex
+              ),
+              let path = dmaTranslationPath(toNode: nodeOffset),
+              path.isValid,
+              path.hasExplicitRanges
+        else {
+            return nil
+        }
+
+        var candidates = DeviceTreeDMACandidateSet()
+        guard candidates.append(
+                  DeviceTreeDMAAddress(
+                      domain: .scalar,
+                      selector: 0,
+                      value: cpuPhysicalAddress
+                  )
+              )
+        else { return nil }
+
+        var levelIndex = 0
+        while levelIndex < path.levelCount {
+            guard let level = path.level(at: levelIndex),
+                  let translated = translateDMAFromParent(
+                      candidates,
+                      byteCount: byteCount,
+                      through: level
+                  )
+            else {
+                return nil
+            }
+            candidates = translated
+            levelIndex += 1
+        }
+
+        var selectedAddress: UInt64?
+        var candidateIndex = 0
+        while candidateIndex < candidates.count {
+            guard let candidate = candidates.candidate(at: candidateIndex)
+            else { return nil }
+            let lastAddress = candidate.value.addingReportingOverflow(
+                byteCount - 1
+            )
+            if !lastAddress.overflow,
+               lastAddress.partialValue <= maximumDeviceAddress {
+                // A PCI selector describes the address space, not bits that a
+                // device places on its DMA address pins. Only memory aliases
+                // are valid for this resolver.
+                guard candidate.domain != .pci
+                        || pciAddressClass(candidate.selector) == .memory
+                else { return nil }
+                guard selectedAddress == nil else { return nil }
+                selectedAddress = candidate.value
+            }
+            candidateIndex += 1
+        }
+        guard let selectedAddress else { return nil }
+        return DeviceResource(
+            baseAddress: selectedAddress,
+            length: byteCount
+        )
+    }
+
     private func compatibleNodeOffset(
         _ compatibility: StaticString,
         nodeIndex: Int
@@ -603,6 +825,398 @@ struct FlattenedDeviceTree {
             remainingMatches: &remainingMatches,
             registerIndex: 0
         )?.nodeOffset
+    }
+
+    private func dmaTranslationPath(
+        toNode targetNodeOffset: UInt
+    ) -> DeviceTreeDMATranslationPath? {
+        var cursor = structureStart
+        var result: DeviceTreeDMATranslationPath?
+        let path = DeviceTreeDMATranslationPath()
+        guard scanDMAPath(
+                  cursor: &cursor,
+                  targetNodeOffset: targetNodeOffset,
+                  inheritedAddressCells: 2,
+                  inheritedDomain: .scalar,
+                  path: path,
+                  isRoot: true,
+                  result: &result
+              )
+        else { return nil }
+        return result
+    }
+
+    /// Locates one node while retaining only its ancestor DMA path. DTSpec
+    /// places a node's properties before its children; a property after a
+    /// child is rejected so cell widths can never depend on token order.
+    private func scanDMAPath(
+        cursor: inout UInt,
+        targetNodeOffset: UInt,
+        inheritedAddressCells: UInt32,
+        inheritedDomain: DeviceTreeAddressDomain,
+        path: DeviceTreeDMATranslationPath,
+        isRoot: Bool,
+        result: inout DeviceTreeDMATranslationPath?
+    ) -> Bool {
+        let nodeOffset = cursor
+        guard readStructureWord(at: cursor) == Self.beginNode else {
+            return false
+        }
+        if nodeOffset == targetNodeOffset {
+            result = path
+            return true
+        }
+
+        cursor += 4
+        let nodeNameOffset = cursor
+        guard skipNodeName(cursor: &cursor) else { return false }
+
+        var childAddressCells: UInt32 = 2
+        var childSizeCells: UInt32 = 1
+        var addressCellsSeen = false
+        var sizeCellsSeen = false
+        var dmaRangesSeen = false
+        var dmaRangesOffset: UInt = 0
+        var dmaRangesLength: UInt = 0
+        var sawChild = false
+        var childDomain: DeviceTreeAddressDomain = nodeName(
+            at: nodeNameOffset,
+            equals: "pcie"
+        ) ? .pci : .scalar
+
+        while cursor < structureEnd {
+            guard let token = readStructureWord(at: cursor) else {
+                return false
+            }
+            switch token {
+            case Self.property:
+                guard !sawChild,
+                      let rawLength = readStructureWord(at: cursor + 4),
+                      let rawNameOffset = readStructureWord(at: cursor + 8)
+                else { return false }
+                let valueOffset = cursor + 12
+                let valueLength = UInt(rawLength)
+                guard Self.range(
+                          offset: valueOffset,
+                          length: valueLength,
+                          fits: structureEnd
+                      ), let next = Self.align4(valueOffset + valueLength),
+                      next <= structureEnd
+                else { return false }
+                cursor = next
+
+                if propertyName(
+                    at: UInt(rawNameOffset),
+                    equals: "#address-cells"
+                ) {
+                    guard !addressCellsSeen,
+                          rawLength == 4,
+                          let value = readStructureWord(at: valueOffset)
+                    else { return false }
+                    addressCellsSeen = true
+                    childAddressCells = value
+                } else if propertyName(
+                    at: UInt(rawNameOffset),
+                    equals: "#size-cells"
+                ) {
+                    guard !sizeCellsSeen,
+                          rawLength == 4,
+                          let value = readStructureWord(at: valueOffset)
+                    else { return false }
+                    sizeCellsSeen = true
+                    childSizeCells = value
+                } else if propertyName(
+                    at: UInt(rawNameOffset),
+                    equals: "dma-ranges"
+                ) {
+                    guard !dmaRangesSeen else { return false }
+                    dmaRangesSeen = true
+                    dmaRangesOffset = valueOffset
+                    dmaRangesLength = valueLength
+                } else if propertyName(
+                    at: UInt(rawNameOffset),
+                    equals: "device_type"
+                ) {
+                    if cStringEquals(
+                        "pci",
+                        at: valueOffset,
+                        length: valueLength
+                    ) || cStringEquals(
+                        "pciex",
+                        at: valueOffset,
+                        length: valueLength
+                    ) {
+                        childDomain = .pci
+                    }
+                }
+
+            case Self.beginNode:
+                sawChild = true
+                var childPath = path
+                if !isRoot {
+                    if let level = dmaTranslationLevel(
+                        rangesOffset: dmaRangesOffset,
+                        rangesLength: dmaRangesLength,
+                        hasRangesProperty: dmaRangesSeen,
+                        childAddressCells: childAddressCells,
+                        parentAddressCells: inheritedAddressCells,
+                        sizeCells: childSizeCells,
+                        childDomain: childDomain,
+                        parentDomain: inheritedDomain
+                    ) {
+                        _ = childPath.append(level)
+                    } else {
+                        childPath.invalidate()
+                    }
+                }
+                guard scanDMAPath(
+                          cursor: &cursor,
+                          targetNodeOffset: targetNodeOffset,
+                          inheritedAddressCells: childAddressCells,
+                          inheritedDomain: childDomain,
+                          path: childPath,
+                          isRoot: false,
+                          result: &result
+                      )
+                else { return false }
+                if result != nil { return true }
+
+            case Self.endNode:
+                cursor += 4
+                return true
+
+            case Self.noOperation:
+                cursor += 4
+
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
+    private func dmaTranslationLevel(
+        rangesOffset: UInt,
+        rangesLength: UInt,
+        hasRangesProperty: Bool,
+        childAddressCells: UInt32,
+        parentAddressCells: UInt32,
+        sizeCells: UInt32,
+        childDomain: DeviceTreeAddressDomain,
+        parentDomain: DeviceTreeAddressDomain
+    ) -> DeviceTreeDMATranslationLevel? {
+        guard childAddressCells > 0, childAddressCells <= 3,
+              parentAddressCells > 0, parentAddressCells <= 3,
+              sizeCells <= 2,
+              (childDomain != .pci || childAddressCells == 3),
+              (parentDomain != .pci || parentAddressCells == 3)
+        else { return nil }
+
+        if hasRangesProperty && rangesLength > 0 {
+            guard sizeCells > 0 else { return nil }
+            let entryCellCount = UInt(childAddressCells)
+                + UInt(parentAddressCells) + UInt(sizeCells)
+            guard entryCellCount > 0,
+                  entryCellCount <= UInt.max / 4
+            else { return nil }
+            let entryByteCount = entryCellCount * 4
+            guard rangesLength >= entryByteCount,
+                  rangesLength % entryByteCount == 0,
+                  Self.range(
+                      offset: rangesOffset,
+                      length: rangesLength,
+                      fits: structureEnd
+                  )
+            else { return nil }
+        }
+
+        return DeviceTreeDMATranslationLevel(
+            rangesOffset: rangesOffset,
+            rangesLength: rangesLength,
+            hasRangesProperty: hasRangesProperty,
+            childAddressCells: childAddressCells,
+            parentAddressCells: parentAddressCells,
+            sizeCells: sizeCells,
+            childDomain: childDomain,
+            parentDomain: parentDomain
+        )
+    }
+
+    private func translateDMAFromParent(
+        _ candidates: DeviceTreeDMACandidateSet,
+        byteCount: UInt64,
+        through level: DeviceTreeDMATranslationLevel
+    ) -> DeviceTreeDMACandidateSet? {
+        guard candidates.count > 0 else { return nil }
+        if !level.hasRangesProperty || level.rangesLength == 0 {
+            var identities = DeviceTreeDMACandidateSet()
+            var index = 0
+            while index < candidates.count {
+                guard let candidate = candidates.candidate(at: index),
+                      let identity = dmaIdentityAddress(
+                          candidate,
+                          childDomain: level.childDomain,
+                          parentDomain: level.parentDomain
+                      ), identities.append(identity)
+                else { return nil }
+                index += 1
+            }
+            return identities
+        }
+
+        let childBytes = UInt(level.childAddressCells) * 4
+        let parentBytes = UInt(level.parentAddressCells) * 4
+        let sizeBytes = UInt(level.sizeCells) * 4
+        let entryBytes = childBytes + parentBytes + sizeBytes
+        guard entryBytes > 0,
+              level.rangesLength >= entryBytes,
+              level.rangesLength % entryBytes == 0
+        else { return nil }
+
+        var translated = DeviceTreeDMACandidateSet()
+        var candidateIndex = 0
+        while candidateIndex < candidates.count {
+            guard let candidate = candidates.candidate(at: candidateIndex),
+                  candidate.domain == level.parentDomain
+            else { return nil }
+            var entryOffset: UInt = 0
+            while entryOffset < level.rangesLength {
+                guard let childBase = readDMAAddress(
+                          at: level.rangesOffset + entryOffset,
+                          count: level.childAddressCells,
+                          domain: level.childDomain
+                      ), let parentBase = readDMAAddress(
+                          at: level.rangesOffset + entryOffset + childBytes,
+                          count: level.parentAddressCells,
+                          domain: level.parentDomain
+                      ), let rangeLength = readCells(
+                          at: level.rangesOffset + entryOffset + childBytes
+                              + parentBytes,
+                          count: level.sizeCells
+                      )
+                else { return nil }
+
+                if dmaSelectorsMatch(candidate, parentBase),
+                   candidate.value >= parentBase.value {
+                    let offset = candidate.value - parentBase.value
+                    if offset <= rangeLength,
+                       byteCount <= rangeLength - offset,
+                       childBase.value <= UInt64.max - offset {
+                        guard translated.append(
+                                  DeviceTreeDMAAddress(
+                                      domain: level.childDomain,
+                                      selector: childBase.selector,
+                                      value: childBase.value + offset
+                                  )
+                              )
+                        else { return nil }
+                    }
+                }
+                entryOffset += entryBytes
+            }
+            candidateIndex += 1
+        }
+        return translated.count > 0 ? translated : nil
+    }
+
+    private func dmaIdentityAddress(
+        _ address: DeviceTreeDMAAddress,
+        childDomain: DeviceTreeAddressDomain,
+        parentDomain: DeviceTreeAddressDomain
+    ) -> DeviceTreeDMAAddress? {
+        guard address.domain == parentDomain else { return nil }
+        switch (childDomain, parentDomain) {
+        case (.scalar, .scalar):
+            return DeviceTreeDMAAddress(
+                domain: .scalar,
+                selector: 0,
+                value: address.value
+            )
+        case (.pci, .pci):
+            guard pciAddressClass(address.selector) == .memory else {
+                return nil
+            }
+            return address
+        case (.scalar, .pci):
+            guard pciAddressClass(address.selector) == .memory else {
+                return nil
+            }
+            return DeviceTreeDMAAddress(
+                domain: .scalar,
+                selector: 0,
+                value: address.value
+            )
+        case (.pci, .scalar):
+            // An empty reverse mapping cannot invent PCI space flags. A
+            // non-empty tuple is required at such a domain transition.
+            return nil
+        }
+    }
+
+    private func readDMAAddress(
+        at offset: UInt,
+        count: UInt32,
+        domain: DeviceTreeAddressDomain
+    ) -> DeviceTreeDMAAddress? {
+        switch domain {
+        case .pci:
+            guard count == 3,
+                  let selector = readStructureWord(at: offset),
+                  pciAddressClass(selector) == .memory,
+                  let value = readCells(at: offset + 4, count: 2)
+            else { return nil }
+            return DeviceTreeDMAAddress(
+                domain: .pci,
+                selector: selector,
+                value: value
+            )
+        case .scalar:
+            if count == 3 {
+                guard readStructureWord(at: offset) == 0,
+                      let value = readCells(at: offset + 4, count: 2)
+                else { return nil }
+                return DeviceTreeDMAAddress(
+                    domain: .scalar,
+                    selector: 0,
+                    value: value
+                )
+            }
+            guard let value = readCells(at: offset, count: count) else {
+                return nil
+            }
+            return DeviceTreeDMAAddress(
+                domain: .scalar,
+                selector: 0,
+                value: value
+            )
+        }
+    }
+
+    private func dmaSelectorsMatch(
+        _ address: DeviceTreeDMAAddress,
+        _ rangeBase: DeviceTreeDMAAddress
+    ) -> Bool {
+        guard address.domain == rangeBase.domain else { return false }
+        switch address.domain {
+        case .scalar:
+            return address.selector == 0 && rangeBase.selector == 0
+        case .pci:
+            // PCI `phys.hi` distinguishes 32/64-bit and prefetchability, but
+            // address translation matches the I/O-versus-memory class. This is
+            // what lets RP1 publish both its high and low system-RAM aliases.
+            return pciAddressClass(address.selector) == .memory
+                && pciAddressClass(rangeBase.selector) == .memory
+        }
+    }
+
+    private func pciAddressClass(
+        _ selector: UInt32
+    ) -> DeviceTreePCIAddressClass {
+        switch (selector >> 24) & 0x3 {
+        case 1: return .io
+        case 2, 3: return .memory
+        default: return .configuration
+        }
     }
 
     private func propertyCells(

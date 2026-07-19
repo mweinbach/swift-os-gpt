@@ -961,7 +961,7 @@ rpi5-fdt-test: | $(BUILD_DIR)
 	$(PYTHON) Tests/Host/rpi5_fdt_probe.py \
 		$(BUILD_DIR)/libRaspberryPi5DeviceTreeProbe.dylib $(RPI5_DTB)
 
-platform-network-pinned-fdt-test: | $(BUILD_DIR)
+platform-network-pinned-fdt-test: $(RPI5_KERNEL_ELF) | $(BUILD_DIR)
 	@test -n "$(RPI5_DTB)" || \
 		(echo "RPI5_DTB must name a Raspberry Pi 5 firmware DTB" >&2; exit 2)
 	$(QEMU) -machine virt,gic-version=3,dumpdtb=$(BUILD_DIR)/qemu-virt.dtb \
@@ -976,8 +976,17 @@ platform-network-pinned-fdt-test: | $(BUILD_DIR)
 		Kernel/Platform/PlatformNetworkResources.swift \
 		Tests/Host/PlatformNetworkPinnedDeviceTreeTests.swift \
 		-o $(BUILD_DIR)/platform-network-pinned-dtb-tests
+	@workspace_start=`$(LLVM_NM) --format=posix --defined-only \
+		$(RPI5_KERNEL_ELF) | awk \
+		'$$1 == "__rp1_gem_workspace_start" { print $$3 }'`; \
+	workspace_end=`$(LLVM_NM) --format=posix --defined-only \
+		$(RPI5_KERNEL_ELF) | awk \
+		'$$1 == "__rp1_gem_workspace_end" { print $$3 }'`; \
+	test -n "$$workspace_start"; \
+	test -n "$$workspace_end"; \
 	$(BUILD_DIR)/platform-network-pinned-dtb-tests \
-		$(BUILD_DIR)/qemu-virt.dtb $(RPI5_DTB)
+		$(BUILD_DIR)/qemu-virt.dtb $(RPI5_DTB) \
+		"$$workspace_start" "$$workspace_end"
 
 inspect: build
 	LLVM_NM=$(LLVM_NM) LLVM_OBJDUMP=$(LLVM_OBJDUMP) \
