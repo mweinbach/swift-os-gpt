@@ -90,6 +90,12 @@ enum KernelLinkerLayout {
             end: archPagingLayoutStorageEnd()
         )
     }
+    static var debugLogStorage: LinkerRegion {
+        LinkerRegion(
+            start: archDebugLogStorageStart(),
+            end: archDebugLogStorageEnd()
+        )
+    }
     static var userEntryPhysicalAddress: UInt64 { archUserEntryPhysical() }
 }
 
@@ -167,6 +173,8 @@ private func archClassifiedAllocationLedgerStorageEnd() -> UInt64
 @_silgen_name("arch_smp_report_storage") private func archSMPReportStorage() -> UInt64
 @_silgen_name("arch_paging_layout_storage") private func archPagingLayoutStorage() -> UInt64
 @_silgen_name("arch_paging_layout_storage_end") private func archPagingLayoutStorageEnd() -> UInt64
+@_silgen_name("arch_debug_log_storage_start") private func archDebugLogStorageStart() -> UInt64
+@_silgen_name("arch_debug_log_storage_end") private func archDebugLogStorageEnd() -> UInt64
 @_silgen_name("arch_user_entry_physical") private func archUserEntryPhysical() -> UInt64
 @_silgen_name("arch_secondary_entry_address") private func archSecondaryEntryAddress() -> UInt64
 @_silgen_name("arch_install_ttbr0") private func archInstallTTBR0(_ value: UInt64)

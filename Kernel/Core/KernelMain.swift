@@ -16,6 +16,7 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
     else {
         park()
     }
+    KernelDebugLogRuntime.initialize()
     let console = EarlyConsole(
         uart: PL011(baseAddress: UInt(platform.serial.baseAddress))
     )

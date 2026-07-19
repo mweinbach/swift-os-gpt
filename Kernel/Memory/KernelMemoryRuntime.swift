@@ -317,13 +317,16 @@ enum KernelMemoryRuntime {
 
     private static func lockAllocator() -> UInt64 {
         withUnsafeMutablePointer(to: &allocatorLockWord) { lockWord in
-            archMemoryAllocatorLock(lockWord)
+            AArch64.acquireInterruptSafeLock(lockWord)
         }
     }
 
     private static func unlockAllocator(restoring interruptState: UInt64) {
         withUnsafeMutablePointer(to: &allocatorLockWord) { lockWord in
-            archMemoryAllocatorUnlock(lockWord, interruptState)
+            AArch64.releaseInterruptSafeLock(
+                lockWord,
+                restoring: interruptState
+            )
         }
     }
 
@@ -1037,14 +1040,3 @@ enum KernelMemoryRuntime {
         return UInt64(MemoryLayout<T>.stride) * UInt64(count)
     }
 }
-
-@_silgen_name("arch_memory_allocator_lock")
-private func archMemoryAllocatorLock(
-    _ lockWord: UnsafeMutablePointer<UInt32>
-) -> UInt64
-
-@_silgen_name("arch_memory_allocator_unlock")
-private func archMemoryAllocatorUnlock(
-    _ lockWord: UnsafeMutablePointer<UInt32>,
-    _ interruptState: UInt64
-)

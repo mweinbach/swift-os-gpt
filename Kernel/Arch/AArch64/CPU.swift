@@ -149,6 +149,25 @@ enum AArch64 {
         archDisableIRQs()
     }
 
+    /// Acquires one architecture-neutral kernel lock while masking IRQs on the
+    /// local CPU. The returned DAIF value must be passed back to the matching
+    /// release operation so callers compose correctly with already-masked
+    /// interrupt contexts.
+    @inline(__always)
+    static func acquireInterruptSafeLock(
+        _ lockWord: UnsafeMutablePointer<UInt32>
+    ) -> UInt64 {
+        archAcquireInterruptSafeLock(lockWord)
+    }
+
+    @inline(__always)
+    static func releaseInterruptSafeLock(
+        _ lockWord: UnsafeMutablePointer<UInt32>,
+        restoring interruptState: UInt64
+    ) {
+        archReleaseInterruptSafeLock(lockWord, interruptState)
+    }
+
     @inline(__always)
     static func setPhysicalTimerDeadline(_ deadline: UInt64) {
         archPhysicalTimerSetDeadline(deadline)
@@ -269,6 +288,17 @@ private func archEnableIRQs()
 
 @_silgen_name("arch_disable_irqs")
 private func archDisableIRQs()
+
+@_silgen_name("arch_acquire_interrupt_safe_lock")
+private func archAcquireInterruptSafeLock(
+    _ lockWord: UnsafeMutablePointer<UInt32>
+) -> UInt64
+
+@_silgen_name("arch_release_interrupt_safe_lock")
+private func archReleaseInterruptSafeLock(
+    _ lockWord: UnsafeMutablePointer<UInt32>,
+    _ interruptState: UInt64
+)
 
 @_silgen_name("arch_physical_timer_set_deadline")
 private func archPhysicalTimerSetDeadline(_ deadline: UInt64)

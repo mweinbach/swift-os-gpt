@@ -232,9 +232,9 @@ struct KernelMonitor {
             guard lineLength > 0 else { return false }
             lineLength -= 1
             terminal.backspace()
-            serial.write(byte: 8)
-            serial.write(byte: 32)
-            serial.write(byte: 8)
+            serialWrite(byte: 8)
+            serialWrite(byte: 32)
+            serialWrite(byte: 8)
             return false
         }
 
@@ -248,7 +248,7 @@ struct KernelMonitor {
         line[lineLength] = byte
         lineLength += 1
         terminal.write(byte: byte, color: KernelTerminal.cyan)
-        serial.write(byte: byte)
+        serialWrite(byte: byte)
         return false
     }
 
@@ -344,7 +344,7 @@ struct KernelMonitor {
 
     private mutating func emitByte(_ byte: UInt8, color: UInt8) {
         terminal.write(byte: byte, color: color)
-        serial.write(byte: byte)
+        serialWrite(byte: byte)
     }
 
     private mutating func emitUnsigned(_ value: UInt64, color: UInt8) {
@@ -358,27 +358,28 @@ struct KernelMonitor {
         var shift = 60
         while shift >= 0 {
             let nibble = UInt8(truncatingIfNeeded: value >> UInt64(shift)) & 0xf
-            serial.write(byte: nibble < 10 ? 48 + nibble : 55 + nibble)
+            serialWrite(byte: nibble < 10 ? 48 + nibble : 55 + nibble)
             shift -= 4
         }
     }
 
     private func serialWrite(_ text: StaticString) {
-        text.withUTF8Buffer { bytes in
-            for byte in bytes {
-                if byte == 10 {
-                    serial.write(byte: 13)
-                }
-                serial.write(byte: byte)
-            }
-        }
+        KernelDebugLogRuntime.write(text, to: serial, source: .monitor)
     }
 
     private func serialWriteUnsigned(_ value: UInt64) {
         if value >= 10 {
             serialWriteUnsigned(value / 10)
         }
-        serial.write(byte: 48 + UInt8(value % 10))
+        serialWrite(byte: 48 + UInt8(value % 10))
+    }
+
+    private func serialWrite(byte: UInt8) {
+        KernelDebugLogRuntime.write(
+            byte: byte,
+            to: serial,
+            source: .monitor
+        )
     }
 
     private var linePointer: UnsafeMutablePointer<UInt8>? {

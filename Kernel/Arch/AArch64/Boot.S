@@ -884,12 +884,14 @@ ADDRESS_ACCESSOR arch_smp_state_storage, __smp_state_storage
 ADDRESS_ACCESSOR arch_smp_report_storage, __smp_report_storage
 ADDRESS_ACCESSOR arch_paging_layout_storage, __paging_layout_storage
 ADDRESS_ACCESSOR arch_paging_layout_storage_end, __paging_layout_storage_end
+ADDRESS_ACCESSOR arch_debug_log_storage_start, __debug_log_storage_start
+ADDRESS_ACCESSOR arch_debug_log_storage_end, __debug_log_storage_end
 ADDRESS_ACCESSOR arch_user_entry_physical, __user_entry_physical
 ADDRESS_ACCESSOR arch_secondary_entry_address, _secondary_start
 
-.global arch_memory_allocator_lock
-.type arch_memory_allocator_lock, %function
-arch_memory_allocator_lock:
+.global arch_acquire_interrupt_safe_lock
+.type arch_acquire_interrupt_safe_lock, %function
+arch_acquire_interrupt_safe_lock:
     mrs     x3, daif
     msr     daifset, #2
 1:
@@ -905,9 +907,9 @@ arch_memory_allocator_lock:
     wfe
     b       1b
 
-.global arch_memory_allocator_unlock
-.type arch_memory_allocator_unlock, %function
-arch_memory_allocator_unlock:
+.global arch_release_interrupt_safe_lock
+.type arch_release_interrupt_safe_lock, %function
+arch_release_interrupt_safe_lock:
     stlr    wzr, [x0]
     sev
     msr     daif, x1

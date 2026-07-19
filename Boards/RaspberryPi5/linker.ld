@@ -16,6 +16,7 @@ CLASSIFIED_FREE_RUN_STORAGE_SIZE = 24K;
 CLASSIFIED_ALLOCATION_LEDGER_SIZE = 24K;
 FINAL_L2_TABLE_COUNT = 32;
 FINAL_L3_TABLE_COUNT = 96;
+DEBUG_LOG_STORAGE_SIZE = 64K;
 RPI5_BCM_HIGH_MMIO_L1_DESCRIPTOR = 0x0060001040000401;
 
 SECTIONS
@@ -157,6 +158,13 @@ SECTIONS
         __paging_layout_storage_end = .;
     }
 
+    .debug_log_storage (NOLOAD) : ALIGN(4K)
+    {
+        __debug_log_storage_start = .;
+        . += DEBUG_LOG_STORAGE_SIZE;
+        __debug_log_storage_end = .;
+    }
+
     .memory_metadata (NOLOAD) : ALIGN(4K)
     {
         __memory_map_storage = .;
@@ -233,6 +241,11 @@ ASSERT((__terminal_storage_start & 4095) == 0,
        "terminal storage must be 4 KiB aligned")
 ASSERT((__framebuffer_start & 4095) == 0,
        "software framebuffer must be 4 KiB aligned")
+ASSERT((__debug_log_storage_start & 4095) == 0,
+       "debug log storage must be 4 KiB aligned")
+ASSERT(__debug_log_storage_end - __debug_log_storage_start
+           >= 1024 * 48,
+       "debug log storage must retain at least 1024 events")
 ASSERT((__classified_free_run_storage & 15) == 0,
        "classified free-run metadata must be 16-byte aligned")
 ASSERT((__classified_allocation_ledger_storage & 15) == 0,

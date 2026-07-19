@@ -15,6 +15,7 @@ CLASSIFIED_FREE_RUN_STORAGE_SIZE = 24K;
 CLASSIFIED_ALLOCATION_LEDGER_SIZE = 24K;
 FINAL_L2_TABLE_COUNT = 32;
 FINAL_L3_TABLE_COUNT = 96;
+DEBUG_LOG_STORAGE_SIZE = 64K;
 
 SECTIONS
 {
@@ -149,6 +150,13 @@ SECTIONS
         __paging_layout_storage_end = .;
     }
 
+    .debug_log_storage (NOLOAD) : ALIGN(4K)
+    {
+        __debug_log_storage_start = .;
+        . += DEBUG_LOG_STORAGE_SIZE;
+        __debug_log_storage_end = .;
+    }
+
     .memory_metadata (NOLOAD) : ALIGN(4K)
     {
         __memory_map_storage = .;
@@ -205,6 +213,11 @@ ASSERT(((__bss_end - __bss_start) & 15) == 0, "BSS clear span must be 16-byte al
 ASSERT((__dma_scratch_start & 4095) == 0, "DMA scratch must be page aligned")
 ASSERT((__terminal_storage_start & 4095) == 0, "terminal storage must be page aligned")
 ASSERT((__framebuffer_start & 4095) == 0, "framebuffer must be page aligned")
+ASSERT((__debug_log_storage_start & 4095) == 0,
+       "debug log storage must be page aligned")
+ASSERT(__debug_log_storage_end - __debug_log_storage_start
+           >= 1024 * 48,
+       "debug log storage must retain at least 1024 events")
 ASSERT((__classified_free_run_storage & 15) == 0,
        "classified free-run metadata must be 16-byte aligned")
 ASSERT((__classified_allocation_ledger_storage & 15) == 0,

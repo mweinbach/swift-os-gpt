@@ -6,14 +6,11 @@ struct EarlyConsole {
     }
 
     func write(_ text: StaticString) {
-        text.withUTF8Buffer { bytes in
-            for byte in bytes {
-                if byte == 10 {
-                    uart.write(byte: 13)
-                }
-                uart.write(byte: byte)
-            }
-        }
+        KernelDebugLogRuntime.write(
+            text,
+            to: uart,
+            source: .earlyConsole
+        )
     }
 
     func writeHex(_ value: UInt64) {
@@ -21,9 +18,13 @@ struct EarlyConsole {
         var shift = 60
         while shift >= 0 {
             let nibble = UInt8(truncatingIfNeeded: value >> UInt64(shift)) & 0xf
-            uart.write(byte: nibble < 10 ? 48 + nibble : 87 + nibble)
+            let byte = nibble < 10 ? 48 + nibble : 87 + nibble
+            KernelDebugLogRuntime.write(
+                byte: byte,
+                to: uart,
+                source: .earlyConsole
+            )
             shift -= 4
         }
     }
 }
-
