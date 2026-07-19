@@ -106,6 +106,8 @@ struct USBUpdateHostTests {
                "artifact SHA-256 changed")
         expect(artifact.imageCRC32 == USBUpdateCRC32.checksum(bytes),
                "artifact CRC32 changed")
+        expect(artifact.transferID != 0,
+               "artifact used the reserved zero transfer ID")
 
         let begin = artifact.beginFrame()
         expect(begin.kind == .begin && begin.sequence == 0,

@@ -463,7 +463,10 @@ struct USBUpdateArtifact: Equatable {
 
     /// Stable across host restarts so a reconnect can resume a staged image.
     var transferID: UInt32 {
-        sha256.readUInt32LittleEndian(at: 0) ^ UInt32(truncatingIfNeeded: bytes.count)
+        let derived = sha256.readUInt32LittleEndian(at: 0)
+            ^ UInt32(truncatingIfNeeded: bytes.count)
+        // Zero is reserved by the guest decoder as "no active transfer."
+        return derived == 0 ? 1 : derived
     }
 
     func beginFrame() -> USBUpdateFrame {

@@ -71,10 +71,11 @@ Message kinds and payloads:
   `u32`.
 
 The transfer ID is the little-endian first word of SHA-256 XOR the low 32 bits
-of image length. It is stable across host restarts. BEGIN for the same transfer
-and manifest must return the staged `nextOffset`; a conflicting BEGIN must be
-rejected. The host uses only one request at a time, so STATUS is deliberately
-out of band rather than echoing a request sequence.
+of image length, with the reserved result zero mapped to one. It is stable
+across host restarts. BEGIN for the same transfer and manifest must return the
+staged `nextOffset`; a conflicting BEGIN must be rejected. The host uses only
+one request at a time, so STATUS is deliberately out of band rather than
+echoing a request sequence.
 
 STATUS codes are `0` ready, `1` accepted, `2` progress, `3` verified, and `4`
 committed. Failure codes begin at `0x0100`: malformed frame, unsupported
