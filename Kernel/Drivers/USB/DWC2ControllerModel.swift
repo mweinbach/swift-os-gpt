@@ -15,6 +15,7 @@ enum DWC2RegisterLayout {
     static let endpoint0TransmitFIFOSize: UInt = 0x028
     static let endpoint0TransmitFIFOStatus: UInt = 0x02c
     static let coreIdentifier: UInt = 0x040
+    static let hardwareConfiguration1: UInt = 0x044
     static let hardwareConfiguration2: UInt = 0x048
     static let hardwareConfiguration3: UInt = 0x04c
     static let hardwareConfiguration4: UInt = 0x050
@@ -150,6 +151,43 @@ enum DWC2UTMIDataWidth: UInt8, Equatable {
     }
 }
 
+enum DWC2EndpointDirectionCapability: UInt8, Equatable {
+    case bidirectional = 0
+    case inputOnly = 1
+    case outputOnly = 2
+    case unavailable = 3
+
+    var supportsInput: Bool {
+        rawValue & 0x2 == 0
+    }
+
+    var supportsOutput: Bool {
+        rawValue & 0x1 == 0
+    }
+}
+
+/// GHWCFG1 assigns two direction-capability bits to each numbered endpoint.
+/// Keeping the complete register value makes discovery independent of the
+/// fixed endpoint map used by the first debug composite device.
+struct DWC2EndpointDirectionCapabilities: Equatable {
+    private let rawValue: UInt32
+
+    init(rawValue: UInt32) {
+        self.rawValue = rawValue
+    }
+
+    func capability(
+        for endpoint: UInt8
+    ) -> DWC2EndpointDirectionCapability? {
+        guard endpoint < 16 else { return nil }
+        return DWC2EndpointDirectionCapability(
+            rawValue: UInt8(
+                (rawValue >> UInt32(endpoint * 2)) & 0x3
+            )
+        )
+    }
+}
+
 /// Immutable capabilities read before the core is reset. The initial SwiftOS
 /// driver intentionally operates in slave/PIO mode on every architecture so
 /// USB bring-up does not depend on a board DMA or IOMMU contract.
@@ -158,6 +196,7 @@ struct DWC2HardwareCapabilities: Equatable {
     let busArchitecture: DWC2BusArchitecture
     let highSpeedPHYType: DWC2HighSpeedPHYType
     let utmiDataWidth: DWC2UTMIDataWidth
+    let endpointDirections: DWC2EndpointDirectionCapabilities
     let deviceEndpointCount: UInt8
     let inEndpointCount: UInt8
     let fifoDepthInWords: UInt16
@@ -165,6 +204,7 @@ struct DWC2HardwareCapabilities: Equatable {
     let supportsDedicatedTransmitFIFOs: Bool
 
     init?(
+        hardwareConfiguration1 configuration1: UInt32,
         hardwareConfiguration2 configuration2: UInt32,
         hardwareConfiguration3 configuration3: UInt32,
         hardwareConfiguration4 configuration4: UInt32
@@ -198,6 +238,9 @@ struct DWC2HardwareCapabilities: Equatable {
         self.busArchitecture = busArchitecture
         self.highSpeedPHYType = highSpeedPHYType
         self.utmiDataWidth = utmiDataWidth
+        endpointDirections = DWC2EndpointDirectionCapabilities(
+            rawValue: configuration1
+        )
         deviceEndpointCount = nonControlEndpointCount + 1
         inEndpointCount = nonControlInEndpointCount + 1
         fifoDepthInWords = fifoDepth
@@ -206,8 +249,17 @@ struct DWC2HardwareCapabilities: Equatable {
     }
 
     var supportsSwiftOSDebugCompositeDevice: Bool {
-        deviceEndpointCount >= 4
+        guard let endpoint1 = endpointDirections.capability(for: 1),
+              let endpoint2 = endpointDirections.capability(for: 2),
+              let endpoint3 = endpointDirections.capability(for: 3)
+        else {
+            return false
+        }
+        return deviceEndpointCount >= 4
             && inEndpointCount >= 4
+            && endpoint1.supportsInput
+            && endpoint2 == .bidirectional
+            && endpoint3 == .bidirectional
             && supportsDynamicFIFO
             && supportsDedicatedTransmitFIFOs
             && highSpeedPHYType.supportsUTMI

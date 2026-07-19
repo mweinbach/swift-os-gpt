@@ -126,6 +126,9 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
             return nil
         }
         return DWC2HardwareCapabilities(
+            hardwareConfiguration1: read(
+                DWC2RegisterLayout.hardwareConfiguration1
+            ),
             hardwareConfiguration2: read(
                 DWC2RegisterLayout.hardwareConfiguration2
             ),

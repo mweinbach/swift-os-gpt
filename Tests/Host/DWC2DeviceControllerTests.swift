@@ -70,12 +70,13 @@ struct DWC2DeviceControllerTests {
         initializesADeviceCapableCore()
         initializesSixteenBitUTMI()
         rejectsInvalidAndTimedOutCores()
+        rejectsIncompatibleEndpointDirections()
         handlesResetEnumerationAndConfiguration()
         queuesEndpointZeroOnlyWithGlobalCapacity()
         queuesBoundedInAndOutTransfers()
         drainsReceivePacketsAndMalformedEntries()
         reportsInterruptSnapshots()
-        print("DWC2 device controller: 8 groups passed")
+        print("DWC2 device controller: 9 groups passed")
     }
 
     private static func initializesADeviceCapableCore() {
@@ -227,6 +228,37 @@ struct DWC2DeviceControllerTests {
                 usb & DWC2CoreBits.usbPHYInterface16 != 0
                     && usb & DWC2CoreBits.usbTurnaroundTimeMask == 5 << 10,
                 "sixteen-bit UTMI timing was not programmed"
+            )
+        }
+    }
+
+    private static func rejectsIncompatibleEndpointDirections() {
+        withRegisters { words in
+            configureCapableCore(words)
+            words[Int(DWC2RegisterLayout.hardwareConfiguration1 / 4)] = 2 << 2
+            var controller = DWC2Controller(
+                registers: DWC2TestRegisters(words: words)
+            )
+            expect(
+                controller.initialize(maximumPollCount: 4)
+                    == .unsupportedConfiguration,
+                "OUT-only endpoint 1 initialized for CDC notifications"
+            )
+            expect(
+                controller.state == .faulted,
+                "direction failure did not latch"
+            )
+        }
+        withRegisters { words in
+            configureCapableCore(words)
+            words[Int(DWC2RegisterLayout.hardwareConfiguration1 / 4)] = 1 << 6
+            var controller = DWC2Controller(
+                registers: DWC2TestRegisters(words: words)
+            )
+            expect(
+                controller.initialize(maximumPollCount: 4)
+                    == .unsupportedConfiguration,
+                "one-way endpoint 3 initialized for bidirectional display I/O"
             )
         }
     }
@@ -460,6 +492,7 @@ struct DWC2DeviceControllerTests {
         _ words: UnsafeMutableBufferPointer<UInt32>
     ) {
         words[Int(DWC2RegisterLayout.coreIdentifier / 4)] = 0x4f54_280a
+        words[Int(DWC2RegisterLayout.hardwareConfiguration1 / 4)] = 1 << 2
         let configuration2: UInt32 = 2 | (2 << 3) | (1 << 6)
             | (7 << 10) | (1 << 19)
         words[Int(DWC2RegisterLayout.hardwareConfiguration2 / 4)]

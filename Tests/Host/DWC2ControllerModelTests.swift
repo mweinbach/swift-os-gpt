@@ -12,6 +12,10 @@ struct DWC2ControllerModelTests {
 
     private static func validatesRegisterGeometry() {
         expect(
+            DWC2RegisterLayout.hardwareConfiguration1 == 0x044,
+            "wrong endpoint-direction capability offset"
+        )
+        expect(
             DWC2RegisterLayout.inEndpointControl(3) == 0x960,
             "wrong IN endpoint control offset"
         )
@@ -44,6 +48,7 @@ struct DWC2ControllerModelTests {
             "foreign controller identity accepted"
         )
 
+        let configuration1: UInt32 = 1 << 2
         let configuration2: UInt32 = 2
             | (2 << 3)
             | (1 << 6)
@@ -52,6 +57,7 @@ struct DWC2ControllerModelTests {
         let configuration3: UInt32 = 4_080 << 16
         let configuration4: UInt32 = (7 << 26) | (1 << 25)
         guard let capabilities = DWC2HardwareCapabilities(
+                  hardwareConfiguration1: configuration1,
                   hardwareConfiguration2: configuration2,
                   hardwareConfiguration3: configuration3,
                   hardwareConfiguration4: configuration4
@@ -61,6 +67,16 @@ struct DWC2ControllerModelTests {
         }
         expect(capabilities.deviceEndpointCount == 8, "wrong endpoint count")
         expect(capabilities.inEndpointCount == 8, "wrong IN endpoint count")
+        let endpoint1 = capabilities.endpointDirections.capability(for: 1)
+        expect(
+            endpoint1 == .inputOnly
+                && endpoint1?.supportsInput == true
+                && endpoint1?.supportsOutput == false
+                && capabilities.endpointDirections.capability(for: 2)
+                    == .bidirectional
+                && capabilities.endpointDirections.capability(for: 16) == nil,
+            "endpoint direction capabilities were not decoded"
+        )
         expect(capabilities.fifoDepthInWords == 4_080, "wrong FIFO depth")
         expect(
             capabilities.busArchitecture == .internalDMA,
@@ -81,6 +97,7 @@ struct DWC2ControllerModelTests {
         let hostOnly: UInt32 = 6 | (1 << 6) | (7 << 10) | (1 << 19)
         expect(
             DWC2HardwareCapabilities(
+                hardwareConfiguration1: 0,
                 hardwareConfiguration2: hostOnly,
                 hardwareConfiguration3: 4_080 << 16,
                 hardwareConfiguration4: (7 << 26) | (1 << 25)
@@ -89,6 +106,7 @@ struct DWC2ControllerModelTests {
         )
 
         guard let small = DWC2HardwareCapabilities(
+                  hardwareConfiguration1: 0,
                   hardwareConfiguration2: 4 | (1 << 6)
                       | (2 << 10) | (1 << 19),
                   hardwareConfiguration3: 512 << 16,
@@ -102,6 +120,7 @@ struct DWC2ControllerModelTests {
             "undersized endpoint set accepted"
         )
         guard let ulpiOnly = DWC2HardwareCapabilities(
+                  hardwareConfiguration1: 0,
                   hardwareConfiguration2: 4 | (2 << 6)
                       | (7 << 10) | (1 << 19),
                   hardwareConfiguration3: 4_080 << 16,
@@ -111,6 +130,40 @@ struct DWC2ControllerModelTests {
         expect(
             !ulpiOnly.supportsSwiftOSDebugCompositeDevice,
             "ULPI-only core entered the UTMI initialization path"
+        )
+        let capableConfiguration2: UInt32 = 4 | (1 << 6)
+            | (7 << 10) | (1 << 19)
+        let capableConfiguration4: UInt32 = (7 << 26) | (1 << 25)
+        guard let wrongNotificationDirection = DWC2HardwareCapabilities(
+                  hardwareConfiguration1: 2 << 2,
+                  hardwareConfiguration2: capableConfiguration2,
+                  hardwareConfiguration3: 4_080 << 16,
+                  hardwareConfiguration4: capableConfiguration4
+              ), let oneWayDataEndpoint = DWC2HardwareCapabilities(
+                  hardwareConfiguration1: 1 << 4,
+                  hardwareConfiguration2: capableConfiguration2,
+                  hardwareConfiguration3: 4_080 << 16,
+                  hardwareConfiguration4: capableConfiguration4
+              ), let unavailableDisplayEndpoint = DWC2HardwareCapabilities(
+                  hardwareConfiguration1: 3 << 6,
+                  hardwareConfiguration2: capableConfiguration2,
+                  hardwareConfiguration3: 4_080 << 16,
+                  hardwareConfiguration4: capableConfiguration4
+              )
+        else {
+            fail("endpoint direction capabilities could not be described")
+        }
+        expect(
+            !wrongNotificationDirection.supportsSwiftOSDebugCompositeDevice,
+            "OUT-only endpoint 1 accepted for CDC notifications"
+        )
+        expect(
+            !oneWayDataEndpoint.supportsSwiftOSDebugCompositeDevice,
+            "one-way endpoint 2 accepted for bidirectional CDC data"
+        )
+        expect(
+            !unavailableDisplayEndpoint.supportsSwiftOSDebugCompositeDevice,
+            "unavailable endpoint 3 accepted for the debug display"
         )
         expect(
             DWC2CompositeFIFOPlan(availableDepthInWords: 591) == nil,
