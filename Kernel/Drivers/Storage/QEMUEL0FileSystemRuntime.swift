@@ -14,6 +14,7 @@ private nonisolated(unsafe) var qemuEL0FileSystemUserMemory:
 private nonisolated(unsafe) var qemuEL0FileSystemConsole: EarlyConsole?
 private nonisolated(unsafe) var qemuEL0FileSystemSawOpen = false
 private nonisolated(unsafe) var qemuEL0FileSystemSawRead = false
+private nonisolated(unsafe) var qemuEL0FileSystemSawWrite = false
 private nonisolated(unsafe) var qemuEL0FileSystemSawClose = false
 
 /// Binds the already mounted `/Users` provider to process one. Everything in
@@ -249,7 +250,11 @@ private extension QEMUEL0FileSystemRuntime {
             && !qemuEL0FileSystemSawRead:
             qemuEL0FileSystemSawRead = true
             qemuEL0FileSystemConsole?.write("SWIFTOS:EL0_SWIFTFS_READ_OK\n")
-        case .close where qemuEL0FileSystemSawRead
+        case .write where qemuEL0FileSystemSawRead
+            && !qemuEL0FileSystemSawWrite:
+            qemuEL0FileSystemSawWrite = true
+            qemuEL0FileSystemConsole?.write("SWIFTOS:EL0_SWIFTFS_WRITE_OK\n")
+        case .close where qemuEL0FileSystemSawWrite
             && !qemuEL0FileSystemSawClose:
             qemuEL0FileSystemSawClose = true
             qemuEL0FileSystemConsole?.write("SWIFTOS:EL0_SWIFTFS_CLOSE_OK\n")

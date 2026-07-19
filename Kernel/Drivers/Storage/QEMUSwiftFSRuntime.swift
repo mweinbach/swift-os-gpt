@@ -44,7 +44,6 @@ enum QEMUSwiftFSRuntime {
             console.write("SWIFTOS:VIRTIO_BLOCK_MEMORY_UNAVAILABLE\n")
             return
         }
-        retain(allocations)
 
         guard let workspace = VirtIOBlockBootstrapMemory(
                   allocation: allocations.dma,
@@ -59,6 +58,7 @@ enum QEMUSwiftFSRuntime {
                   to: QEMUUserFileSystemProvider.self
               ), let scratch = rawBuffer(for: allocations.scratch)
         else {
+            release(allocations)
             console.write("SWIFTOS:VIRTIO_BLOCK_MEMORY_INVALID\n")
             return
         }
@@ -71,14 +71,21 @@ enum QEMUSwiftFSRuntime {
         switch initialized {
         case .ready(let device):
             initializedDevice = device
-        case .failure:
-            // All pages remain owned by this runtime. Even if a future driver
-            // regression leaves a queue device-visible, allocator reuse cannot
-            // turn it into a cross-owner DMA write.
+        case .failure(let failure):
+            if failure.dmaStorageDisposition == .quarantineRequired {
+                // Only the queue/data workspace can remain visible to the
+                // device. Keep that capability; the never-published CPU-only
+                // records can be returned immediately.
+                qemuVirtIOBlockDMAAllocation = allocations.dma
+                releaseCPUOnlyAllocations(allocations)
+            } else {
+                release(allocations)
+            }
             console.write("SWIFTOS:VIRTIO_BLOCK_INIT_FAILED\n")
             return
         }
         devicePointer.initialize(to: initializedDevice)
+        retain(allocations)
         qemuVirtIOBlockDevice = devicePointer
         console.write("SWIFTOS:VIRTIO_BLOCK_READY\n")
         console.write("SWIFTOS:VIRTIO_BLOCK_CAPACITY=")
@@ -162,16 +169,18 @@ enum QEMUSwiftFSRuntime {
             console.write("SWIFTOS:SWIFTFS_REMOUNTED\n")
         }
 
-        guard verifyWelcomeFile(
+        guard let welcomeState = verifyWelcomeFile(
                   provider: providerPointer,
                   scratch: scratch
-              )
-        else {
+              ) else {
             console.write("SWIFTOS:SWIFTFS_DATA_INVALID\n")
             qemuUserFileSystemProvider = nil
             return
         }
         console.write("SWIFTOS:SWIFTFS_DATA_OK\n")
+        if welcomeState == .writtenByEL0 {
+            console.write("SWIFTOS:EL0_SWIFTFS_WRITE_PERSISTED\n")
+        }
         console.write("SWIFTOS:SWIFTFS_READY\n")
     }
 }
@@ -187,6 +196,13 @@ private extension QEMUSwiftFSRuntime {
     static let welcomeName: StaticString = "Welcome.txt"
     static let welcomeContents: StaticString =
         "Welcome to SwiftOS. This file survived a real block-device reboot.\n"
+    static let el0WelcomeContents: StaticString =
+        "Written to SwiftOS. This file survived a real block-device reboot.\n"
+
+    enum WelcomeFileState: Equatable {
+        case seeded
+        case writtenByEL0
+    }
 
     static func blockResource(platform: Platform) -> DeviceResource? {
         var index = 0
@@ -212,20 +228,33 @@ private extension QEMUSwiftFSRuntime {
         guard let dma = allocate(
                   pageCount: VirtIOBlockBootstrapMemory.pageCount,
                   capabilities: coherent
-              ), let deviceRecord = allocate(
-                  pageCount: 1,
-                  capabilities: .cpuAccessible
-              ), let scratch = allocate(
-                  pageCount: 1,
-                  capabilities: .cpuAccessible
-              ), let providerRecord = allocate(
+              )
+        else { return nil }
+        guard let deviceRecord = allocate(
                   pageCount: 1,
                   capabilities: .cpuAccessible
               )
         else {
-            // A partial allocation is intentionally retained by the kernel
-            // allocator for now; this boot path is one-shot and never obtains
-            // device authority before the complete set exists.
+            release(dma)
+            return nil
+        }
+        guard let scratch = allocate(
+                  pageCount: 1,
+                  capabilities: .cpuAccessible
+              )
+        else {
+            release(deviceRecord)
+            release(dma)
+            return nil
+        }
+        guard let providerRecord = allocate(
+                  pageCount: 1,
+                  capabilities: .cpuAccessible
+              )
+        else {
+            release(scratch)
+            release(deviceRecord)
+            release(dma)
             return nil
         }
         return Allocations(
@@ -259,6 +288,21 @@ private extension QEMUSwiftFSRuntime {
         qemuVirtIOBlockRecordAllocation = allocations.deviceRecord
         qemuSwiftFSScratchAllocation = allocations.scratch
         qemuSwiftFSProviderAllocation = allocations.providerRecord
+    }
+
+    static func release(_ allocations: Allocations) {
+        releaseCPUOnlyAllocations(allocations)
+        release(allocations.dma)
+    }
+
+    static func releaseCPUOnlyAllocations(_ allocations: Allocations) {
+        release(allocations.providerRecord)
+        release(allocations.scratch)
+        release(allocations.deviceRecord)
+    }
+
+    static func release(_ allocation: ClassifiedPageAllocationToken) {
+        _ = KernelMemoryRuntime.releaseClassifiedPages(allocation)
     }
 
     static func pointer<Value>(
@@ -328,10 +372,10 @@ private extension QEMUSwiftFSRuntime {
     static func verifyWelcomeFile(
         provider: UnsafeMutablePointer<QEMUUserFileSystemProvider>,
         scratch: UnsafeMutableRawBufferPointer
-    ) -> Bool {
+    ) -> WelcomeFileState? {
         guard scratch.count >= 2_048 + 512,
               let outputBase = scratch.baseAddress?.advanced(by: 2_048)
-        else { return false }
+        else { return nil }
         return welcomeName.withUTF8Buffer { nameBytes in
             guard case .name(let name) = VFSNameValidator.validate(
                       UnsafeRawBufferPointer(nameBytes)
@@ -339,24 +383,31 @@ private extension QEMUSwiftFSRuntime {
                       parent: provider.pointee.rootNodeIdentifier,
                       name: name
                   )
-            else { return false }
+            else { return nil }
             let output = UnsafeMutableRawBufferPointer(
                 start: outputBase,
                 count: 512
             )
-            return welcomeContents.withUTF8Buffer { expected in
-                guard case .transferred(let byteCount) = provider.pointee.read(
-                          node: metadata.identifier,
-                          at: 0,
-                          into: output
-                      ), byteCount == expected.count
-                else { return false }
+            guard case .transferred(let byteCount) = provider.pointee.read(
+                      node: metadata.identifier,
+                      at: 0,
+                      into: output
+                  )
+            else { return nil }
+            func matches(_ expected: UnsafeBufferPointer<UInt8>) -> Bool {
+                guard byteCount == expected.count else { return false }
                 var index = 0
                 while index < expected.count {
                     if output[index] != expected[index] { return false }
                     index += 1
                 }
                 return true
+            }
+            return welcomeContents.withUTF8Buffer { expected in
+                if matches(expected) { return .seeded }
+                return el0WelcomeContents.withUTF8Buffer {
+                    matches($0) ? .writtenByEL0 : nil
+                }
             }
         }
     }

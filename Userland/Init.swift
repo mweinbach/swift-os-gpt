@@ -117,14 +117,16 @@ private func submitFileSystemRequest(
 @inline(never)
 private func provePersistentFileService() -> Bool {
     let path: StaticString = "/Users/Welcome.txt"
-    let expected: StaticString =
+    let seededContents: StaticString =
         "Welcome to SwiftOS. This file survived a real block-device reboot.\n"
+    let updatedContents: StaticString =
+        "Written to SwiftOS. This file survived a real block-device reboot.\n"
     var handle: UInt64 = 0
 
     let opened = path.withUTF8Buffer { pathBytes -> Bool in
         var request = FileSystemRequestWords(
             operation: 1,
-            requestedAccess: 1,
+            requestedAccess: 3,
             argument0: UInt64(
                 UInt(bitPattern: UnsafeRawPointer(pathBytes.baseAddress!))
             ),
@@ -155,19 +157,39 @@ private func provePersistentFileService() -> Bool {
               result.payload == 2,
               result.value0 <= UInt64(bytes.count)
         else { return false }
-        return expected.withUTF8Buffer { expectedBytes in
-            guard result.value0 == UInt64(expectedBytes.count) else {
-                return false
-            }
+        func matches(_ expected: UnsafeBufferPointer<UInt8>) -> Bool {
+            guard result.value0 == UInt64(expected.count) else { return false }
             var index = 0
-            while index < expectedBytes.count {
-                if bytes[index] != expectedBytes[index] { return false }
+            while index < expected.count {
+                if bytes[index] != expected[index] { return false }
                 index += 1
             }
             return true
         }
+        return seededContents.withUTF8Buffer { seeded in
+            if matches(seeded) { return true }
+            return updatedContents.withUTF8Buffer { matches($0) }
+        }
     }
     guard read else { return false }
+
+    let wrote = updatedContents.withUTF8Buffer { contents -> Bool in
+        var request = FileSystemRequestWords(
+            operation: 3,
+            argument0: handle,
+            argument1: 0,
+            argument2: UInt64(
+                UInt(bitPattern: UnsafeRawPointer(contents.baseAddress!))
+            ),
+            argument3: UInt64(contents.count)
+        )
+        var result = FileSystemResultWords()
+        return submitFileSystemRequest(&request, result: &result) == 0
+            && result.isSuccessful
+            && result.payload == 2
+            && result.value0 == UInt64(contents.count)
+    }
+    guard wrote else { return false }
 
     var closeRequest = FileSystemRequestWords(
         operation: 6,

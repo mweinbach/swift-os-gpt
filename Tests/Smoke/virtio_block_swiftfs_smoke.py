@@ -45,11 +45,23 @@ EL0_BOOT = [
     b"SWIFTOS:SCHEDULER_READY",
     b"SWIFTOS:EL0_SWIFTFS_OPEN_OK",
     b"SWIFTOS:EL0_SWIFTFS_READ_OK",
+    b"SWIFTOS:EL0_SWIFTFS_WRITE_OK",
     b"SWIFTOS:EL0_SWIFTFS_CLOSE_OK",
     b"SWIFTOS:EL0_FILE_IO_PROVEN",
     b"SWIFTOS:EL0_OK",
     b"SWIFTOS:THREADS_OK",
     b"SWIFTOS:EL0_PREEMPTION_PROVEN",
+]
+
+PERSISTED_WRITE_BOOT = [
+    b"SWIFTOS:BOOT",
+    b"SWIFTOS:VIRTIO_BLOCK_READY",
+    b"SWIFTOS:DATA_VOLUME_MOUNTED",
+    b"SWIFTOS:SWIFTFS_REMOUNTED",
+    b"SWIFTOS:SWIFTFS_DATA_OK",
+    b"SWIFTOS:EL0_SWIFTFS_WRITE_PERSISTED",
+    b"SWIFTOS:SWIFTFS_READY",
+    b"SWIFTOS:READY",
 ]
 
 FAILURE_MARKERS = [
@@ -178,13 +190,26 @@ def main() -> int:
                 completion_marker=b"SWIFTOS:EL0_PREEMPTION_PROVEN",
             )
             validate(el0, EL0_BOOT, "EL0 boot")
+
+            persisted_write = boot(
+                qemu,
+                arguments.kernel.resolve(),
+                disk,
+                arguments.timeout,
+            )
+            validate(
+                persisted_write,
+                PERSISTED_WRITE_BOOT,
+                "post-EL0 remount",
+            )
     except (AssertionError, OSError, subprocess.SubprocessError) as error:
         print(f"VirtIO block/SwiftFS smoke failed: {error}", file=sys.stderr)
         return 1
 
     print(
         "VirtIO block/SwiftFS smoke: blank format, durable seed, and "
-        "second-boot remount, EL0 read, and preemption passed"
+        "second-boot remount, EL0 read/write, post-write remount, and "
+        "preemption passed"
     )
     return 0
 
