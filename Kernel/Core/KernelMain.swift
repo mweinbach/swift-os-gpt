@@ -387,6 +387,7 @@ private func runQEMUDesktop(
     platform: Platform,
     memory: KernelMemoryActivation
 ) -> Never {
+    QEMUSwiftFSRuntime.activate(console: console, platform: platform)
     activateQEMUVirtIONetwork(console: console, platform: platform)
     QEMUVirtIOInputRuntime.activate(console: console, platform: platform)
 
