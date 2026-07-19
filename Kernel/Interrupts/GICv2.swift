@@ -139,6 +139,34 @@ struct GICv2: InterruptControllerDriver {
         AArch64.synchronizeData()
     }
 
+    mutating func shutdown() -> Bool {
+        guard validResource(configurationValue.distributor),
+              validResource(configurationValue.cpuInterface),
+              contains(
+                  configurationValue.distributor,
+                  offset: Self.distributorControl,
+                  width: 4
+              ),
+              contains(
+                  configurationValue.cpuInterface,
+                  offset: Self.cpuControl,
+                  width: 4
+              )
+        else { return false }
+        MMIO.store32(
+            0,
+            at: UInt(configurationValue.cpuInterface.baseAddress)
+                + UInt(Self.cpuControl)
+        )
+        MMIO.store32(
+            0,
+            at: UInt(configurationValue.distributor.baseAddress)
+                + UInt(Self.distributorControl)
+        )
+        AArch64.synchronizeData()
+        return true
+    }
+
     private func validResource(_ resource: DeviceResource) -> Bool {
         resource.baseAddress != 0
             && resource.baseAddress <= UInt64(UInt.max)

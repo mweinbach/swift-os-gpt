@@ -54,6 +54,21 @@ private enum ActiveInterruptController {
             driver.disable(interruptID: interruptID)
         }
     }
+
+    mutating func shutdown() -> Bool {
+        switch self {
+        case .none:
+            return true
+        case .gicV2(var driver):
+            let result = driver.shutdown()
+            if result { self = .none }
+            return result
+        case .gicV3(var driver):
+            let result = driver.shutdown()
+            if result { self = .none }
+            return result
+        }
+    }
 }
 
 enum InterruptSubsystem {
@@ -193,6 +208,17 @@ enum InterruptSubsystem {
     static func stopPhysicalTimer() {
         AArch64.disableIRQs()
         timer.stop()
+    }
+
+    /// Final bounded interrupt shutdown for a no-return kernel handoff.
+    static func quiesceForKernelRestart() -> Bool {
+        AArch64.disableIRQs()
+        timer.stop()
+        timerHook = nil
+        synchronousHook = nil
+        guard controller.shutdown() else { return false }
+        configured = false
+        return true
     }
 
     fileprivate static func dispatch(

@@ -2,6 +2,9 @@ struct KernelMemoryActivation {
     let userMappings: KernelEL0AddressSpaceMappings
     let usablePageCount: UInt64
     let translationTablePageCount: Int
+    /// Present only when the board's complete restart destination was proven
+    /// to be ordinary RAM, conflict-free, allocator-reserved, and mapped.
+    let kernelUpdateDestination: KernelUpdateDestinationWindow?
 }
 
 /// Converts firmware discovery into owned RAM and replaces the permissive
@@ -28,7 +31,7 @@ enum KernelMemoryRuntime {
     private static let classifiedFreeRunCapacity = 512
     private static let classifiedActiveAllocationCapacity = 512
     private static let kernelReadOnlyCapacity = 2
-    private static let kernelDataCapacity = 6
+    private static let kernelDataCapacity = 7
         + BootDriverResourceSet.maximumMemoryResourceCount
     private static let userStackCapacity = 2
     private static let mmioCapacity = 5
@@ -99,7 +102,7 @@ enum KernelMemoryRuntime {
                 ),
               let tablePoolRange = translationTablePoolRange(),
               let explicitReservations = explicitReservationStorage(),
-              let kernelReservation = PhysicalByteSpan(
+              let linkedKernelReservation = PhysicalByteSpan(
                   startAddress: KernelLinkerLayout.kernelImage.start,
                   endAddress: KernelLinkerLayout.kernelImage.end
               )
@@ -107,6 +110,20 @@ enum KernelMemoryRuntime {
             return nil
         }
 
+        let kernelUpdateDestination = validatedKernelUpdateDestination(
+            platform: platform,
+            driverPlan: driverPlan
+        )
+        let kernelReservation: PhysicalByteSpan
+        if let destination = kernelUpdateDestination,
+           let destinationReservation = PhysicalByteSpan(
+               baseAddress: destination.baseAddress,
+               length: destination.byteCount
+           ) {
+            kernelReservation = destinationReservation
+        } else {
+            kernelReservation = linkedKernelReservation
+        }
         explicitReservations[0] = kernelReservation
         var explicitReservationCount = 1
         var driverMemoryIndex = 0
@@ -161,7 +178,8 @@ enum KernelMemoryRuntime {
               let layout = finalLayout(
                   platform: platform,
                   userMappings: userMappings,
-                  driverPlan: driverPlan
+                  driverPlan: driverPlan,
+                  kernelUpdateDestination: kernelUpdateDestination
               ),
               let tableStorage: UnsafeMutableBufferPointer<UInt64>
                 = fixedBuffer(
@@ -214,7 +232,8 @@ enum KernelMemoryRuntime {
         return KernelMemoryActivation(
             userMappings: userMappings,
             usablePageCount: memorySummary.usablePageCount,
-            translationTablePageCount: tables.summary.tablePageCount
+            translationTablePageCount: tables.summary.tablePageCount,
+            kernelUpdateDestination: kernelUpdateDestination
         )
     }
 
@@ -429,7 +448,8 @@ enum KernelMemoryRuntime {
     private static func finalLayout(
         platform: Platform,
         userMappings: KernelEL0AddressSpaceMappings,
-        driverPlan: BootDriverResourcePlan
+        driverPlan: BootDriverResourcePlan,
+        kernelUpdateDestination: KernelUpdateDestinationWindow?
     ) -> FinalAddressSpaceLayout? {
         guard let kernelReadOnly:
                 UnsafeMutableBufferPointer<FinalMappingRegion> = layoutBuffer(
@@ -553,6 +573,19 @@ enum KernelMemoryRuntime {
             return nil
         }
 
+        if let destination = kernelUpdateDestination {
+            guard KernelLinkerLayout.kernelImage.end < destination.endAddress,
+                  appendIdentityData(
+                      start: KernelLinkerLayout.kernelImage.end,
+                      end: destination.endAddress,
+                      to: kernelData,
+                      count: &dataCount
+                  )
+            else {
+                return nil
+            }
+        }
+
         var driverMemoryIndex = 0
         while driverMemoryIndex < driverPlan.memoryResourceCount {
             guard let mapping = driverPlan.memoryMapping(
@@ -660,6 +693,95 @@ enum KernelMemoryRuntime {
             mmioRegions: immutable(mmio, count: mmioCount),
             guardRegions: immutable(guards, count: guardCount)
         )
+    }
+
+    /// A restart window is optional capability, never a reason to reject an
+    /// otherwise bootable platform. When any proof fails the allocator keeps
+    /// reserving only the linked image and USB update activation stays off.
+    private static func validatedKernelUpdateDestination(
+        platform: Platform,
+        driverPlan: BootDriverResourcePlan
+    ) -> KernelUpdateDestinationWindow? {
+        guard platform.kind == .raspberryPi5 else { return nil }
+        let destination = RaspberryPiKernelUpdateContract.destinationWindow
+        let image = KernelLinkerLayout.kernelImage
+        guard image.start == destination.baseAddress,
+              image.end <= destination.endAddress,
+              platform.containsSystemMemory(
+                  baseAddress: destination.baseAddress,
+                  length: destination.byteCount
+              ),
+              !regionsOverlap(
+                  firstBase: destination.baseAddress,
+                  firstLength: destination.byteCount,
+                  secondBase: platform.deviceTreeAddress,
+                  secondLength: platform.deviceTreeSize
+              )
+        else {
+            return nil
+        }
+
+        var index = 0
+        while index < 4_096,
+              let reservation = platform.firmwareReservation(at: index) {
+            if regionsOverlap(
+                firstBase: destination.baseAddress,
+                firstLength: destination.byteCount,
+                secondBase: reservation.baseAddress,
+                secondLength: reservation.length
+            ) {
+                return nil
+            }
+            index += 1
+        }
+        guard index < 4_096 else { return nil }
+
+        index = 0
+        while index < 4_096,
+              let reservation = platform.reservedMemoryRegion(at: index) {
+            if regionsOverlap(
+                firstBase: destination.baseAddress,
+                firstLength: destination.byteCount,
+                secondBase: reservation.baseAddress,
+                secondLength: reservation.length
+            ) {
+                return nil
+            }
+            index += 1
+        }
+        guard index < 4_096 else { return nil }
+
+        index = 0
+        while index < driverPlan.memoryResourceCount {
+            if let reservation = driverPlan.systemMemoryReservation(at: index),
+               regionsOverlap(
+                   firstBase: destination.baseAddress,
+                   firstLength: destination.byteCount,
+                   secondBase: reservation.baseAddress,
+                   secondLength: reservation.length
+               ) {
+                return nil
+            }
+            index += 1
+        }
+        return destination
+    }
+
+    private static func regionsOverlap(
+        firstBase: UInt64,
+        firstLength: UInt64,
+        secondBase: UInt64,
+        secondLength: UInt64
+    ) -> Bool {
+        guard firstLength > 0,
+              secondLength > 0,
+              firstLength <= UInt64.max - firstBase,
+              secondLength <= UInt64.max - secondBase
+        else {
+            return true
+        }
+        return firstBase < secondBase + secondLength
+            && secondBase < firstBase + firstLength
     }
 
     private static func translationTablePoolRange() -> PhysicalPageRange? {

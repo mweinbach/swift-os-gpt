@@ -287,6 +287,152 @@ arch_invalidate_data_cache_range:
     ret
 .size arch_invalidate_data_cache_range, . - arch_invalidate_data_cache_range
 
+/*
+ * Final, non-returning transition from a validated high-memory staging area to
+ * the canonical Pi Image address. Swift has already quiesced every driver and
+ * copied the device tree. This veneer switches to the staging stack, cleans
+ * the source and copied trampoline, evicts every destination cache line, then
+ * disables translation and caches before entering position-independent code.
+ *
+ * x0 = staged image, x1 = raw image bytes, x2 = destination image address
+ * x3 = preserved DTB, x4 = copied trampoline, x5 = staging stack top
+ * x6 = destination runtime span, x7 = copied trampoline bytes
+ */
+.align 4
+.global arch_activate_staged_kernel
+.type arch_activate_staged_kernel, %function
+arch_activate_staged_kernel:
+    msr     daifset, #0xf
+    msr     cntp_ctl_el0, xzr
+    isb
+    mov     sp, x5
+
+    mov     x19, x0
+    mov     x20, x1
+    mov     x21, x2
+    mov     x22, x3
+    mov     x23, x4
+    mov     x24, x5
+    mov     x25, x6
+    mov     x26, x7
+
+    /* CTR_EL0.DminLine is log2(words); convert it to a byte count. */
+    mrs     x8, ctr_el0
+    ubfx    x8, x8, #16, #4
+    mov     x9, #4
+    lsl     x9, x9, x8
+    sub     x10, x9, #1
+
+    /* Publish the complete staged image to the point of coherency. */
+    sub     x11, x20, #1
+    add     x11, x19, x11
+    bic     x12, x19, x10
+    bic     x11, x11, x10
+.Lactivate_clean_source:
+    dc      cvac, x12
+    cmp     x12, x11
+    b.hs    .Lactivate_clean_trampoline_setup
+    add     x12, x12, x9
+    b       .Lactivate_clean_source
+
+.Lactivate_clean_trampoline_setup:
+    sub     x11, x26, #1
+    add     x11, x23, x11
+    bic     x12, x23, x10
+    bic     x11, x11, x10
+.Lactivate_clean_trampoline:
+    dc      cvac, x12
+    cmp     x12, x11
+    b.hs    .Lactivate_invalidate_destination_setup
+    add     x12, x12, x9
+    b       .Lactivate_clean_trampoline
+
+    /* No live Swift data remains in the destination after the stack switch. */
+.Lactivate_invalidate_destination_setup:
+    sub     x11, x25, #1
+    add     x11, x21, x11
+    bic     x12, x21, x10
+    bic     x11, x11, x10
+.Lactivate_invalidate_destination:
+    dc      civac, x12
+    cmp     x12, x11
+    b.hs    .Lactivate_disable_translation
+    add     x12, x12, x9
+    b       .Lactivate_invalidate_destination
+
+.Lactivate_disable_translation:
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    isb
+    mrs     x8, sctlr_el1
+    bic     x8, x8, #1              /* M: stage-1 translation */
+    bic     x8, x8, #4              /* C: data and unified caches */
+    bic     x8, x8, #0x1000         /* I: instruction cache */
+    msr     sctlr_el1, x8
+    isb
+
+    mov     x0, x19
+    mov     x1, x20
+    mov     x2, x21
+    mov     x3, x22
+    mov     x4, x25
+    br      x23
+.size arch_activate_staged_kernel, . - arch_activate_staged_kernel
+
+/*
+ * Relocatable soft-restart payload copied into high staging RAM. It executes
+ * with the MMU and caches off, copies the raw Image into its linked address,
+ * invalidates instruction state, and enters the Image header with x0 = DTB.
+ * Keep this range self-contained: only local branches and register operands.
+ */
+.align 4
+.global arch_soft_restart_trampoline_start
+.type arch_soft_restart_trampoline_start, %function
+arch_soft_restart_trampoline_start:
+    mov     x6, x2
+    mov     x7, x1
+    mov     x8, x4
+.Lsoft_restart_words:
+    cmp     x1, #16
+    b.lo    .Lsoft_restart_bytes
+    ldp     x4, x5, [x0], #16
+    stp     x4, x5, [x2], #16
+    sub     x1, x1, #16
+    b       .Lsoft_restart_words
+.Lsoft_restart_bytes:
+    cbz     x1, .Lsoft_restart_zero_setup
+    ldrb    w4, [x0], #1
+    strb    w4, [x2], #1
+    sub     x1, x1, #1
+    b       .Lsoft_restart_bytes
+.Lsoft_restart_zero_setup:
+    sub     x8, x8, x7
+.Lsoft_restart_zero_words:
+    cmp     x8, #16
+    b.lo    .Lsoft_restart_zero_bytes
+    stp     xzr, xzr, [x2], #16
+    sub     x8, x8, #16
+    b       .Lsoft_restart_zero_words
+.Lsoft_restart_zero_bytes:
+    cbz     x8, .Lsoft_restart_enter
+    strb    wzr, [x2], #1
+    sub     x8, x8, #1
+    b       .Lsoft_restart_zero_bytes
+.Lsoft_restart_enter:
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    isb
+    mov     x0, x3
+    mov     x1, xzr
+    mov     x2, xzr
+    mov     x3, xzr
+    br      x6
+.global arch_soft_restart_trampoline_end
+arch_soft_restart_trampoline_end:
+.size arch_soft_restart_trampoline_start, . - arch_soft_restart_trampoline_start
+
 /* Early vectors park safely. Typed diagnostic vectors are the next milestone. */
 .align 11
 early_vectors:
@@ -694,6 +840,10 @@ arch_gicv3_end_group1:
 
 ADDRESS_ACCESSOR arch_kernel_start, __kernel_start
 ADDRESS_ACCESSOR arch_kernel_end, __kernel_end
+ADDRESS_ACCESSOR arch_soft_restart_trampoline_source_address, \
+                 arch_soft_restart_trampoline_start
+ADDRESS_ACCESSOR arch_soft_restart_trampoline_source_end, \
+                 arch_soft_restart_trampoline_end
 ADDRESS_ACCESSOR arch_kernel_text_start, __kernel_text_start
 ADDRESS_ACCESSOR arch_kernel_text_end, __kernel_text_end
 ADDRESS_ACCESSOR arch_kernel_rodata_start, __kernel_rodata_start

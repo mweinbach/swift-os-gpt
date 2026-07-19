@@ -3,6 +3,7 @@ OUTPUT_ARCH(aarch64)
 ENTRY(rpi5_image_entry)
 
 IMAGE_LOAD_ADDRESS = 0x00080000;
+UPDATE_DESTINATION_SIZE = 32M;
 BOOT_STACK_SIZE = 64K;
 SECONDARY_STACK_SIZE = 64K;
 USER_STACK_SIZE = 64K;
@@ -237,8 +238,8 @@ ASSERT((__classified_allocation_ledger_storage & 15) == 0,
        "classified allocation ledger must be 16-byte aligned")
 ASSERT(__image_size > 64,
        "Pi 5 image cannot contain only its header")
-ASSERT(__image_end < 0x04000000,
-       "early Pi 5 image exceeds the provisional 64 MiB window")
+ASSERT(__image_end <= IMAGE_LOAD_ADDRESS + UPDATE_DESTINATION_SIZE,
+       "Pi 5 image exceeds the reserved 32 MiB restart window")
 ASSERT(__user_entry_physical >= __user_text_start,
        "user entry precedes isolated user text")
 ASSERT(__user_entry_physical < __user_text_end,

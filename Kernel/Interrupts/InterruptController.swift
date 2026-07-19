@@ -10,6 +10,7 @@ protocol InterruptControllerDriver {
     func acknowledge() -> InterruptAcknowledgeToken?
     func end(_ token: InterruptAcknowledgeToken)
     func disable(interruptID: UInt32)
+    mutating func shutdown() -> Bool
 }
 
 struct GICv2Configuration {

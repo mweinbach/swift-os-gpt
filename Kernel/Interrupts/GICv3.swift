@@ -151,6 +151,28 @@ struct GICv3: InterruptControllerDriver {
         AArch64.synchronizeData()
     }
 
+    mutating func shutdown() -> Bool {
+        guard redistributorBase != 0 else { return false }
+        AArch64.setGICv3Group1Enabled(false)
+        let sgiBase = UInt(redistributorBase + Self.redistributorSGIOffset)
+        MMIO.store32(UInt32.max, at: sgiBase + UInt(Self.enableClear))
+        MMIO.store32(UInt32.max, at: sgiBase + UInt(Self.pendingClear))
+
+        let controlAddress = UInt(
+            configurationValue.distributor.baseAddress
+                + Self.distributorControl
+        )
+        var control = MMIO.load32(at: controlAddress)
+        control &= ~(
+            Self.enableGroup1NonSecureView
+                | Self.enableGroup1SingleSecurityState
+        )
+        MMIO.store32(control, at: controlAddress)
+        guard waitForDistributorWrites() else { return false }
+        AArch64.synchronizeData()
+        return true
+    }
+
     private mutating func findRedistributor(
         affinity: UInt32
     ) -> UInt64? {

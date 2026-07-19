@@ -8,6 +8,27 @@ enum PSCIConduit: UInt8, Equatable {
 enum PSCIFunctionID {
     /// PSCI v0.2+ CPU_ON using the SMCCC 64-bit calling convention.
     static let cpuOn64: UInt64 = 0xc400_0003
+    /// PSCI v0.2+ AFFINITY_INFO for a 64-bit target affinity argument.
+    static let affinityInfo64: UInt64 = 0xc400_0004
+}
+
+enum PSCIAffinityInfoResult: Equatable {
+    case on
+    case off
+    case onPending
+    case failure(PSCIReturnValue)
+
+    init(rawRegisterValue: UInt64) {
+        switch rawRegisterValue {
+        case 0: self = .on
+        case 1: self = .off
+        case 2: self = .onPending
+        default:
+            self = .failure(
+                PSCIReturnValue(rawRegisterValue: rawRegisterValue)
+            )
+        }
+    }
 }
 
 /// Signed PSCI return values decoded from the raw x0 register bit pattern.

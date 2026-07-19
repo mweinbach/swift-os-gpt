@@ -168,24 +168,15 @@ struct SMPRuntime {
         target: SecondaryProcessorTarget,
         entryAddress: UInt64
     ) -> PSCIReturnValue {
-        let rawValue: UInt64
-        switch conduit {
-        case .hypervisorCall:
-            rawValue = archPSCIHVC(
-                PSCIFunctionID.cpuOn64,
-                target.affinity.rawValue,
-                entryAddress,
-                target.contextID
+        PSCIReturnValue(
+            rawRegisterValue: PSCIFirmware.call(
+                conduit: conduit,
+                functionID: PSCIFunctionID.cpuOn64,
+                argument0: target.affinity.rawValue,
+                argument1: entryAddress,
+                argument2: target.contextID
             )
-        case .secureMonitorCall:
-            rawValue = archPSCISMC(
-                PSCIFunctionID.cpuOn64,
-                target.affinity.rawValue,
-                entryAddress,
-                target.contextID
-            )
-        }
-        return PSCIReturnValue(rawRegisterValue: rawValue)
+        )
     }
 
     private func waitUntilOnline(
@@ -236,24 +227,6 @@ func swiftOSSMPPublishOnline(_ contextID: UInt64) -> UInt64 {
     archSMPSendEvent()
     return contextID
 }
-
-// Root-provided AArch64 veneers. HVC/SMC receive x0=function ID,
-// x1=target affinity, x2=entry physical address, x3=context ID.
-@_silgen_name("arch_psci_hvc")
-private func archPSCIHVC(
-    _ functionID: UInt64,
-    _ argument0: UInt64,
-    _ argument1: UInt64,
-    _ argument2: UInt64
-) -> UInt64
-
-@_silgen_name("arch_psci_smc")
-private func archPSCISMC(
-    _ functionID: UInt64,
-    _ argument0: UInt64,
-    _ argument1: UInt64,
-    _ argument2: UInt64
-) -> UInt64
 
 // STLR/LDAR give the online state contract release/acquire semantics.
 @_silgen_name("arch_smp_store_release")

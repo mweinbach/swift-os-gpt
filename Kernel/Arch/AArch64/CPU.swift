@@ -57,6 +57,15 @@ enum AArch64 {
         archTerminalStorageAddress()
     }
 
+    static var softRestartTrampolineSourceAddress: UInt64 {
+        archSoftRestartTrampolineStart()
+    }
+
+    static var softRestartTrampolineByteCount: UInt64 {
+        archSoftRestartTrampolineEnd()
+            - archSoftRestartTrampolineStart()
+    }
+
     @inline(__always)
     static func synchronizeData() {
         archDataSyncBarrier()
@@ -104,6 +113,30 @@ enum AArch64 {
 
     static func waitForInterrupt() {
         archWaitForInterrupt()
+    }
+
+    /// Does not return. Every pointer must be identity-mapped and validated by
+    /// the update activation policy before crossing this architectural veneer.
+    static func activateStagedKernel(
+        sourceAddress: UInt64,
+        rawImageByteCount: UInt64,
+        destinationAddress: UInt64,
+        deviceTreeAddress: UInt64,
+        trampolineAddress: UInt64,
+        stackTopAddress: UInt64,
+        destinationRuntimeByteCount: UInt64,
+        trampolineByteCount: UInt64
+    ) -> Never {
+        archActivateStagedKernel(
+            sourceAddress,
+            rawImageByteCount,
+            destinationAddress,
+            deviceTreeAddress,
+            trampolineAddress,
+            stackTopAddress,
+            destinationRuntimeByteCount,
+            trampolineByteCount
+        )
     }
 
     @inline(__always)
@@ -192,6 +225,12 @@ private func archFramebufferAddress() -> UInt64
 @_silgen_name("arch_terminal_storage_address")
 private func archTerminalStorageAddress() -> UInt64
 
+@_silgen_name("arch_soft_restart_trampoline_source_address")
+private func archSoftRestartTrampolineStart() -> UInt64
+
+@_silgen_name("arch_soft_restart_trampoline_source_end")
+private func archSoftRestartTrampolineEnd() -> UInt64
+
 @_silgen_name("arch_data_sync_barrier")
 private func archDataSyncBarrier()
 
@@ -212,6 +251,18 @@ private func archWaitForEvent()
 
 @_silgen_name("arch_wait_for_interrupt")
 private func archWaitForInterrupt()
+
+@_silgen_name("arch_activate_staged_kernel")
+private func archActivateStagedKernel(
+    _ sourceAddress: UInt64,
+    _ rawImageByteCount: UInt64,
+    _ destinationAddress: UInt64,
+    _ deviceTreeAddress: UInt64,
+    _ trampolineAddress: UInt64,
+    _ stackTopAddress: UInt64,
+    _ destinationRuntimeByteCount: UInt64,
+    _ trampolineByteCount: UInt64
+) -> Never
 
 @_silgen_name("arch_enable_irqs")
 private func archEnableIRQs()

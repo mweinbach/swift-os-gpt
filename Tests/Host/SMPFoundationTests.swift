@@ -232,6 +232,8 @@ struct SMPFoundationTests {
 
     private static func decodesPSCIResultsAndTracksBootState() {
         expect(PSCIFunctionID.cpuOn64 == 0xc400_0003, "CPU_ON function ID")
+        expect(PSCIFunctionID.affinityInfo64 == 0xc400_0004,
+               "AFFINITY_INFO function ID")
         expect(PSCIReturnValue(rawRegisterValue: 0) == .success, "success")
         expect(PSCIReturnValue(rawRegisterValue: UInt64.max - 3) == .alreadyOn,
                "ALREADY_ON")
@@ -240,6 +242,17 @@ struct SMPFoundationTests {
         expect(PSCIReturnValue(rawRegisterValue: UInt64.max - 8)
                 == .invalidAddress, "INVALID_ADDRESS")
         expect(PSCIReturnValue(rawRegisterValue: 7) == .unknown(7), "unknown")
+        expect(PSCIAffinityInfoResult(rawRegisterValue: 0) == .on,
+               "affinity ON")
+        expect(PSCIAffinityInfoResult(rawRegisterValue: 1) == .off,
+               "affinity OFF")
+        expect(PSCIAffinityInfoResult(rawRegisterValue: 2) == .onPending,
+               "affinity ON_PENDING")
+        expect(
+            PSCIAffinityInfoResult(rawRegisterValue: UInt64.max)
+                == .failure(.notSupported),
+            "affinity PSCI failure"
+        )
 
         let states = UnsafeMutableBufferPointer<UInt64>.allocate(capacity: 4)
         defer { states.deallocate() }
