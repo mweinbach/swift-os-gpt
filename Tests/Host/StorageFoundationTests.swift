@@ -2,9 +2,65 @@
 struct StorageFoundationTests {
     static func main() {
         validatesGeometryAndPartitionBounds()
+        sharesOneStableTransportAcrossDisjointBorrowedRegions()
         discoversTheSwiftOSMBRLayout()
         rejectsCorruptAndAmbiguousMBRs()
-        print("storage foundation host tests: 3 groups passed")
+        print("storage foundation host tests: 4 groups passed")
+    }
+
+    private static func sharesOneStableTransportAcrossDisjointBorrowedRegions() {
+        var base = MemoryBlockDevice(blockCount: 32)
+        withUnsafeMutablePointer(to: &base) { basePointer in
+            let logRange = BlockDeviceRange(
+                startBlock: 2,
+                blockCount: 4,
+                within: 32
+            )!
+            let userRange = BlockDeviceRange(
+                startBlock: 6,
+                blockCount: 20,
+                within: 32
+            )!
+            guard var log = BorrowedBlockDeviceRegion(
+                      borrowing: basePointer,
+                      partitionRange: logRange
+                  ),
+                  var users = BorrowedBlockDeviceRegion(
+                      borrowing: basePointer,
+                      partitionRange: userRange
+                  )
+            else { fail("borrowed region construction") }
+
+            var logBytes = [UInt8](repeating: 0x4c, count: 512)
+            let userBytes = [UInt8](repeating: 0x55, count: 512)
+            logBytes.withUnsafeBytes {
+                expect(
+                    log.writeBlock(at: 3, from: $0) == .success,
+                    "borrowed log write"
+                )
+            }
+            userBytes.withUnsafeBytes {
+                expect(
+                    users.writeBlock(at: 0, from: $0) == .success,
+                    "borrowed user write"
+                )
+            }
+            expect(
+                basePointer.pointee.bytes[5 * 512] == 0x4c
+                    && basePointer.pointee.bytes[6 * 512] == 0x55,
+                "borrowed regions did not share translated transport"
+            )
+            expect(
+                logBytes.withUnsafeMutableBytes {
+                    users.readBlock(at: 20, into: $0)
+                } == .invalidBlock,
+                "borrowed user boundary escaped"
+            )
+            expect(
+                users.synchronize() == .success,
+                "borrowed synchronization"
+            )
+        }
     }
 
     private static func validatesGeometryAndPartitionBounds() {

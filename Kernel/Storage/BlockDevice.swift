@@ -125,3 +125,73 @@ struct PartitionBlockDevice<Base: BlockDevice>: BlockDevice {
         base.synchronize()
     }
 }
+
+/// A non-owning partition view over one stable, caller-owned transport.
+///
+/// This is the composition seam for services that need disjoint regions of a
+/// single controller at the same time—for example the persistent kernel log
+/// and `/Users` on one SD card. The pointed-to `Base` must not move or be
+/// destroyed while any view exists. Copies of views are aliases, so their
+/// owner must serialize every call; this type deliberately does not pretend to
+/// provide an SMP lock or independent queue ownership.
+struct BorrowedBlockDeviceRegion<Base: BlockDevice>: BlockDevice {
+    private let base: UnsafeMutablePointer<Base>
+    let partitionRange: BlockDeviceRange
+    let geometry: BlockDeviceGeometry
+
+    init?(
+        borrowing base: UnsafeMutablePointer<Base>?,
+        partitionRange: BlockDeviceRange
+    ) {
+        guard let base,
+              UInt(bitPattern: base)
+                & UInt(MemoryLayout<Base>.alignment - 1) == 0,
+              partitionRange.endBlock
+                <= base.pointee.geometry.logicalBlockCount,
+              let geometry = BlockDeviceGeometry(
+                  logicalBlockByteCount:
+                    base.pointee.geometry.logicalBlockByteCount,
+                  logicalBlockCount: partitionRange.blockCount
+              )
+        else { return nil }
+        self.base = base
+        self.partitionRange = partitionRange
+        self.geometry = geometry
+    }
+
+    mutating func readBlock(
+        at logicalBlock: UInt64,
+        into output: UnsafeMutableRawBufferPointer
+    ) -> BlockDeviceIOResult {
+        guard logicalBlock < geometry.logicalBlockCount else {
+            return .invalidBlock
+        }
+        guard output.count >= geometry.logicalBlockByteCount else {
+            return .invalidBuffer
+        }
+        return base.pointee.readBlock(
+            at: partitionRange.startBlock + logicalBlock,
+            into: output
+        )
+    }
+
+    mutating func writeBlock(
+        at logicalBlock: UInt64,
+        from input: UnsafeRawBufferPointer
+    ) -> BlockDeviceIOResult {
+        guard logicalBlock < geometry.logicalBlockCount else {
+            return .invalidBlock
+        }
+        guard input.count >= geometry.logicalBlockByteCount else {
+            return .invalidBuffer
+        }
+        return base.pointee.writeBlock(
+            at: partitionRange.startBlock + logicalBlock,
+            from: input
+        )
+    }
+
+    mutating func synchronize() -> BlockDeviceIOResult {
+        base.pointee.synchronize()
+    }
+}
