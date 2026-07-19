@@ -362,6 +362,20 @@ host-test:
 	$(BUILD_DIR)/gpu-mask-font-atlas-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/DisplayViewport.swift \
+		Kernel/Graphics/BitmapFont.swift \
+		Kernel/Graphics/GPU/GPUPrimitives.swift \
+		Kernel/Graphics/GPU/GPURenderCommands.swift \
+		Kernel/Graphics/GPU/GPUCommandBuffer.swift \
+		Kernel/Graphics/GPU/GPUMaskFontAtlas.swift \
+		Kernel/Graphics/GPU/GPUBootTextScene.swift \
+		Tests/Host/GPUBootTextSceneTests.swift \
+		-o $(BUILD_DIR)/gpu-boot-text-scene-host-tests
+	$(BUILD_DIR)/gpu-boot-text-scene-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Graphics/GPU/GraphicsExecutionPolicy.swift \
 		Tests/Host/GraphicsExecutionPolicyTests.swift \
 		-o $(BUILD_DIR)/graphics-execution-policy-host-tests
