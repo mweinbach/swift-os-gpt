@@ -1,3 +1,11 @@
+typealias KernelMonitorServiceHook = @convention(c) () -> Void
+
+@inline(__always)
+func serviceKernelMonitorWorkOnce(_ hook: KernelMonitorServiceHook?) {
+    hook?()
+}
+
+#if !KERNEL_MONITOR_SERVICE_HOOK_HOST_TEST
 struct KernelMonitor {
     private static let lineStorageOffset: UInt = 7168
     private static let maximumLineLength = 127
@@ -17,6 +25,7 @@ struct KernelMonitor {
     private var wroteUSBConfiguredMarker = false
     private var wroteUSBFrameMarker = false
     private var usbDebug: RaspberryPiUSBDebugGadget?
+    private let cooperativeServiceHook: KernelMonitorServiceHook?
     private let lineStorageAddress: UInt
     private var lineLength = 0
     private var lastInputWasCarriageReturn = false
@@ -29,7 +38,8 @@ struct KernelMonitor {
         kernelUpdateStaging: KernelUpdateStagingLayout?,
         storageAddress: UInt64,
         serial: PL011,
-        usbDebug: RaspberryPiUSBDebugGadget? = nil
+        usbDebug: RaspberryPiUSBDebugGadget? = nil,
+        cooperativeServiceHook: KernelMonitorServiceHook? = nil
     ) {
         terminal = KernelTerminal(
             canvas: canvas,
@@ -49,6 +59,7 @@ struct KernelMonitor {
         )
         self.serial = serial
         self.usbDebug = usbDebug
+        self.cooperativeServiceHook = cooperativeServiceHook
         lineStorageAddress = UInt(storageAddress) + Self.lineStorageOffset
     }
 
@@ -75,6 +86,7 @@ struct KernelMonitor {
 
     mutating func run() -> Never {
         while true {
+            serviceKernelMonitorWorkOnce(cooperativeServiceHook)
             serviceUSBDebug()
             guard let animationResult = statusIndicator?.renderIfDue(
                       counterTick: AArch64.counterValue,
@@ -387,3 +399,4 @@ struct KernelMonitor {
             .assumingMemoryBound(to: UInt8.self)
     }
 }
+#endif
