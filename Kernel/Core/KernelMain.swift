@@ -387,12 +387,19 @@ private func runDesktopSession(
     DesktopRenderer.render(on: canvas)
     let display = initialDisplay
     let displayKind = display.kind
+    let usbDebug = activateUSBDebugGadget(
+        console: console,
+        platform: platform,
+        scanout: scanout,
+        viewport: viewport
+    )
     var monitor = KernelMonitor(
         canvas: canvas,
         display: display,
         boardKind: platform.kind,
         storageAddress: AArch64.terminalStorageAddress,
-        serial: PL011(baseAddress: UInt(platform.serial.baseAddress))
+        serial: PL011(baseAddress: UInt(platform.serial.baseAddress)),
+        usbDebug: usbDebug
     )
     guard monitor.start() else {
         console.write("SWIFTOS:PANIC:DISPLAY_PRESENT\n")
@@ -420,6 +427,38 @@ private func runDesktopSession(
     }
     console.write("SWIFTOS:READY\n")
     monitor.run()
+}
+
+private func activateUSBDebugGadget(
+    console: EarlyConsole,
+    platform: Platform,
+    scanout: ScanoutBuffer,
+    viewport: DisplayViewport
+) -> RaspberryPiUSBDebugGadget? {
+    guard case .raspberryPi5 = platform.kind,
+          case .dwc2(let resource)? = platform.usbDeviceController,
+          viewport.scale > 0,
+          viewport.scale <= Int(UInt16.max)
+    else {
+        return nil
+    }
+    let sessionID = AArch64.counterValue | 1
+    guard let gadget = RaspberryPiUSBDebugGadget(
+              resource: resource,
+              scratchBaseAddress: AArch64.dmaScratchAddress,
+              scratchByteCount: 4_096,
+              scanout: scanout,
+              viewportScale: UInt16(viewport.scale),
+              sessionID: sessionID
+          )
+    else {
+        console.write("SWIFTOS:USB_DEBUG_UNAVAILABLE\n")
+        return nil
+    }
+    console.write(
+        DWC2USBDebugGadget<DWC2MMIORegisterAccess>.readyMarker
+    )
+    return gadget
 }
 
 private func activateQEMUDisplay(

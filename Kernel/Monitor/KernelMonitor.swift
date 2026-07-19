@@ -11,6 +11,9 @@ struct KernelMonitor {
     private var statusIndicator: AnimatedStatusIndicator?
     private var wroteAnimationFrameMarker = false
     private var wroteAnimationPeakMarker = false
+    private var wroteUSBConfiguredMarker = false
+    private var wroteUSBFrameMarker = false
+    private var usbDebug: RaspberryPiUSBDebugGadget?
     private let lineStorageAddress: UInt
     private var lineLength = 0
     private var lastInputWasCarriageReturn = false
@@ -20,7 +23,8 @@ struct KernelMonitor {
         display: ActiveDisplayBackend,
         boardKind: BoardKind,
         storageAddress: UInt64,
-        serial: PL011
+        serial: PL011,
+        usbDebug: RaspberryPiUSBDebugGadget? = nil
     ) {
         terminal = KernelTerminal(
             canvas: canvas,
@@ -36,6 +40,7 @@ struct KernelMonitor {
             startingAt: AArch64.counterValue
         )
         self.serial = serial
+        self.usbDebug = usbDebug
         lineStorageAddress = UInt(storageAddress) + Self.lineStorageOffset
     }
 
@@ -55,12 +60,14 @@ struct KernelMonitor {
         else {
             return false
         }
+        usbDebug?.requestFullFrame()
         serialWrite("SWIFTOS:COMPOSITOR_READY\n")
         return true
     }
 
     mutating func run() -> Never {
         while true {
+            serviceUSBDebug()
             guard let animationResult = statusIndicator?.renderIfDue(
                       counterTick: AArch64.counterValue,
                       on: canvas
@@ -83,8 +90,11 @@ struct KernelMonitor {
                 if let physicalDamage = canvas.damageRectangle(
                     for: logicalDamage,
                     mode: mode
-                ), !display.present(physicalDamage) {
-                    displayPanic()
+                ) {
+                    guard display.present(physicalDamage) else {
+                        displayPanic()
+                    }
+                    usbDebug?.requestDamage(physicalDamage)
                 }
                 if !wroteAnimationFrameMarker {
                     serialWrite("SWIFTOS:ANIMATION_FRAME_OK\n")
@@ -103,12 +113,36 @@ struct KernelMonitor {
                 guard display.presentFullFrame() else {
                     displayPanic()
                 }
+                usbDebug?.requestFullFrame()
                 if submittedCommand && display.kind == .virtIOGPU {
                     serialWrite("SWIFTOS:DISPLAY_UPDATE_OK\n")
                 }
             } else {
                 AArch64.spinHint()
             }
+        }
+    }
+
+    private mutating func serviceUSBDebug() {
+        guard let event = usbDebug?.service() else { return }
+        switch event {
+        case .configured:
+            if !wroteUSBConfiguredMarker {
+                serialWrite(DWC2USBDebugGadget<DWC2MMIORegisterAccess>
+                    .configuredMarker)
+                wroteUSBConfiguredMarker = true
+            }
+        case .frameCompleted:
+            if !wroteUSBFrameMarker {
+                serialWrite(DWC2USBDebugGadget<DWC2MMIORegisterAccess>
+                    .frameMarker)
+                wroteUSBFrameMarker = true
+            }
+        case .faulted:
+            serialWrite("SWIFTOS:USB_DEBUG_FAULT\n")
+            usbDebug = nil
+        case .none, .busReset, .enumerated, .deconfigured:
+            break
         }
     }
 
