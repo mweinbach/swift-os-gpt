@@ -368,6 +368,7 @@ def inspect_stream(
         raise media.MediaError("persistent log arena exceeds its bounded partition")
 
     records = media.persistent_records(image, data, layout)
+    diagnostics = media.persistent_log_diagnostics(records)
     return {
         "format": "swiftos-persistent-log-capture-v1",
         "source": {
@@ -384,6 +385,7 @@ def inspect_stream(
         "data_superblock_status": superblock_status,
         "persistent_record_count": len(records),
         "persistent_records": records,
+        **diagnostics,
     }
 
 

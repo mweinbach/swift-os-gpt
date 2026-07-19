@@ -45,7 +45,65 @@ def valid_record(sequence: int, timestamp: int, payload: bytes) -> bytes:
     return bytes(block)
 
 
-def fixture_bytes() -> bytearray:
+def kernel_log_payload(
+    sequence: int,
+    *,
+    timestamp: int,
+    level: int,
+    subsystem: int,
+    event_code: int,
+    processor_id: int = 0,
+    flags: int = 0,
+    argument0: int = 0,
+    argument1: int = 0,
+) -> bytes:
+    return struct.pack(
+        "<QQBBHIIIQQ",
+        sequence,
+        timestamp,
+        level,
+        0,
+        subsystem,
+        event_code,
+        processor_id,
+        flags,
+        argument0,
+        argument1,
+    )
+
+
+def console_payload(
+    sequence: int,
+    data: bytes,
+    *,
+    is_first: bool,
+    is_last: bool,
+    source: int = 1,
+    timestamp: int = 1_000,
+    processor_id: int = 0,
+) -> bytes:
+    require(0 < len(data) <= 16, "console fixture chunk is out of range")
+    padded = data.ljust(16, b"\0")
+    argument0, argument1 = struct.unpack("<QQ", padded)
+    flags = len(data) | source << 16
+    if is_first:
+        flags |= 1 << 8
+    if is_last:
+        flags |= 1 << 9
+    return kernel_log_payload(
+        sequence,
+        timestamp=timestamp,
+        level=2,
+        subsystem=1,
+        event_code=media.KERNEL_CONSOLE_EVENT_CODE,
+        processor_id=processor_id,
+        flags=flags,
+        argument0=argument0,
+        argument1=argument1,
+    )
+
+
+def blank_fixture_bytes(log_blocks: int) -> tuple[bytearray, int]:
     blocks = 64
     data_start = 16
     data_count = 32
@@ -54,17 +112,46 @@ def fixture_bytes() -> bytearray:
     result[462:478] = partition_entry(media.SWIFTOS_DATA_TYPE,
                                       data_start, data_count)
     result[510:512] = b"\x55\xaa"
-    superblock = media.data_superblock(data_count, 2)
+    superblock = media.data_superblock(data_count, log_blocks)
     result[data_start * 512:(data_start + 1) * 512] = superblock
     result[(data_start + 1) * 512:(data_start + 2) * 512] = superblock
-    payload = bytearray(48)
-    struct.pack_into("<Q", payload, 0, 77)
-    struct.pack_into("<Q", payload, 8, 1_234)
-    payload[16] = 5
-    struct.pack_into("<H", payload, 18, 6)
-    struct.pack_into("<I", payload, 20, 0x1122_3344)
-    result[(data_start + 2) * 512:(data_start + 3) * 512] = valid_record(
-        1, 5_678, bytes(payload)
+    return result, data_start
+
+
+def install_record(
+    fixture: bytearray,
+    data_start: int,
+    log_blocks: int,
+    sequence: int,
+    payload: bytes,
+) -> None:
+    slot = (sequence - 1) % log_blocks
+    start = (data_start + 2 + slot) * 512
+    fixture[start:start + 512] = valid_record(
+        sequence,
+        5_000 + sequence,
+        payload,
+    )
+
+
+def fixture_bytes() -> bytearray:
+    result, data_start = blank_fixture_bytes(2)
+    install_record(
+        result,
+        data_start,
+        2,
+        1,
+        kernel_log_payload(
+            77,
+            timestamp=1_234,
+            level=5,
+            subsystem=6,
+            event_code=0x1122_3344,
+            processor_id=0x300,
+            flags=0x5566_7788,
+            argument0=0x0102_0304_0506_0708,
+            argument1=0x1112_1314_1516_1718,
+        ),
     )
     return result
 
@@ -119,6 +206,26 @@ def test_valid_capture_is_partition_bounded() -> None:
     require(record["kernel_log_sequence"] == 77, "kernel sequence changed")
     require(record["kernel_log_event_code"] == 0x1122_3344,
             "kernel event code changed")
+    event = record["kernel_log_event"]
+    require(event == {
+        "sequence": 77,
+        "timestamp_ticks": 1_234,
+        "level": 5,
+        "level_name": "error",
+        "reserved": 0,
+        "subsystem": 6,
+        "subsystem_name": "drivers",
+        "event_code": 0x1122_3344,
+        "event_code_hex": "0x11223344",
+        "event_code_tag": None,
+        "processor_id": 0x300,
+        "flags": 0x5566_7788,
+        "argument0": 0x0102_0304_0506_0708,
+        "argument1": 0x1112_1314_1516_1718,
+        "codec_valid": True,
+    }, "complete kernel event decode changed")
+    require("console_chunk" not in record,
+            "non-CONS event was decoded as canonical console data")
     expected_reads = {
         (0, 512),
         (16 * 512, 512),
@@ -130,6 +237,163 @@ def test_valid_capture_is_partition_bounded() -> None:
             f"inspector read outside MBR/superblock/log extents: {source.read_extents}")
     require(not any(512 <= start < 9 * 512 for start, _ in source.read_extents),
             "inspector scanned unrelated FAT32 content")
+
+
+def test_console_chunks_reconstruct_split_crlf_marker() -> None:
+    value, data_start = blank_fixture_bytes(4)
+    chunks = [
+        (b"SWIFTOS:SD_INIT_", True, False),
+        (b"READY\r", False, False),
+        (b"\n", False, True),
+    ]
+    for index, (chunk, is_first, is_last) in enumerate(chunks, start=1):
+        install_record(
+            value,
+            data_start,
+            4,
+            index,
+            console_payload(
+                index,
+                chunk,
+                is_first=is_first,
+                is_last=is_last,
+                processor_id=0x300,
+            ),
+        )
+
+    report, source = inspect_bytes(value)
+    require(report["persistent_record_count"] == 3,
+            "split console record count changed")
+    first = report["persistent_records"][0]
+    require(first["kernel_log_event"]["event_code_tag"] == "CONS",
+            "CONS four-character tag was not decoded")
+    require(first["console_chunk"] == {
+        "source": 1,
+        "source_name": "early-console",
+        "is_first": True,
+        "is_last": False,
+        "byte_count": 16,
+        "bytes_hex": b"SWIFTOS:SD_INIT_".hex(),
+        "text": "SWIFTOS:SD_INIT_",
+        "utf8_valid": True,
+    }, "first console chunk fields changed")
+    stream = report["canonical_console_stream"]
+    expected = b"SWIFTOS:SD_INIT_READY\r\n"
+    require(stream["ordering"] == "persistent-sequence",
+            "console ordering contract changed")
+    require(stream["bytes_hex"] == expected.hex(),
+            "canonical console bytes were not reconstructed")
+    require(stream["text"] == "SWIFTOS:SD_INIT_READY\r\n",
+            "split CRLF marker text was not reconstructed")
+    require(stream["chunk_count"] == 3 and stream["byte_count"] == len(expected),
+            "canonical console extent changed")
+    require(stream["complete_message_count"] == 1,
+            "split console message was not completed")
+    require(stream["message_boundary_issue_count"] == 0,
+            "valid console boundaries were rejected")
+    require(stream["is_complete"], "gap-free console stream marked incomplete")
+    persistent = report["sequence_metadata"]["persistent_record"]
+    kernel = report["sequence_metadata"]["kernel_log"]
+    require(persistent["epoch_count"] == 1 and not persistent["has_gaps"],
+            "contiguous persistent records reported a gap")
+    require(kernel["epoch_count"] == 1 and not kernel["has_gaps"],
+            "contiguous kernel records reported a gap")
+    expected_log_reads = {
+        ((data_start + 2 + slot) * 512, 512) for slot in range(4)
+    }
+    require(expected_log_reads.issubset(set(source.read_extents)),
+            "console reconstruction read outside the pre-scanned arena")
+
+
+def test_sequence_gaps_and_kernel_epochs_are_explicit() -> None:
+    value, data_start = blank_fixture_bytes(6)
+    records = [
+        (2, 5, b"A"),
+        (4, 7, b"B"),
+        (5, 1, b"C"),
+    ]
+    for persistent_sequence, kernel_sequence, chunk in records:
+        install_record(
+            value,
+            data_start,
+            6,
+            persistent_sequence,
+            console_payload(
+                kernel_sequence,
+                chunk,
+                is_first=True,
+                is_last=True,
+            ),
+        )
+
+    report, _ = inspect_bytes(value)
+    persistent = report["sequence_metadata"]["persistent_record"]
+    require(persistent["record_count"] == 3,
+            "persistent sequence record count changed")
+    require(persistent["missing_prefix_count"] == 1,
+            "persistent overwritten prefix was not reported")
+    require(persistent["missing_between_count"] == 1,
+            "persistent interior gap was not reported")
+    require(persistent["gaps"] == [{
+        "epoch_index": 0,
+        "previous_persistent_sequence": 2,
+        "next_persistent_sequence": 4,
+        "previous_sequence": 2,
+        "next_sequence": 4,
+        "missing_count": 1,
+    }], "persistent gap coordinates changed")
+
+    kernel = report["sequence_metadata"]["kernel_log"]
+    require(kernel["epoch_count"] == 2 and kernel["reset_count"] == 1,
+            "kernel sequence reboot epoch was not retained")
+    require(kernel["missing_prefix_count"] == 4,
+            "kernel epoch prefix loss was not reported")
+    require(kernel["missing_between_count"] == 1,
+            "kernel epoch interior loss was not reported")
+    require(kernel["resets"] == [{
+        "previous_persistent_sequence": 4,
+        "next_persistent_sequence": 5,
+        "previous_sequence": 7,
+        "next_sequence": 1,
+    }], "kernel reset coordinates changed")
+    stream = report["canonical_console_stream"]
+    require(stream["text"] == "ABC", "ordered retained console bytes changed")
+    require(stream["complete_message_count"] == 3,
+            "single-chunk messages were not counted")
+    require(stream["has_sequence_gaps"] and stream["crosses_kernel_epochs"],
+            "console loss/epoch status was not surfaced")
+    require(not stream["is_complete"],
+            "lossy retained console stream was called complete")
+
+
+def test_kernel_epoch_boundary_is_not_one_complete_stream() -> None:
+    value, data_start = blank_fixture_bytes(2)
+    for persistent_sequence, chunk in ((1, b"A"), (2, b"B")):
+        install_record(
+            value,
+            data_start,
+            2,
+            persistent_sequence,
+            console_payload(
+                1,
+                chunk,
+                is_first=True,
+                is_last=True,
+            ),
+        )
+
+    report, _ = inspect_bytes(value)
+    persistent = report["sequence_metadata"]["persistent_record"]
+    kernel = report["sequence_metadata"]["kernel_log"]
+    stream = report["canonical_console_stream"]
+    require(not persistent["has_gaps"] and not kernel["has_gaps"],
+            "epoch-only fixture unexpectedly contains sequence loss")
+    require(kernel["epoch_count"] == 2,
+            "kernel sequence reset did not create two epochs")
+    require(stream["text"] == "AB" and stream["crosses_kernel_epochs"],
+            "epoch-spanning retained bytes were not exposed")
+    require(not stream["is_complete"],
+            "multiple kernel epochs were called one complete console stream")
 
 
 def test_mbr_and_partition_refusals() -> None:
@@ -282,6 +546,9 @@ def test_cli_outputs_json_for_explicit_regular_image() -> None:
 def main() -> int:
     tests = [
         test_valid_capture_is_partition_bounded,
+        test_console_chunks_reconstruct_split_crlf_marker,
+        test_sequence_gaps_and_kernel_epochs_are_explicit,
+        test_kernel_epoch_boundary_is_not_one_complete_stream,
         test_mbr_and_partition_refusals,
         test_single_valid_superblock_recovers_both_sides,
         test_valid_superblock_disagreement_is_rejected,

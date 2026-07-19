@@ -33,6 +33,12 @@ DATA_HEADER_BYTES = 64
 LOG_MAGIC = b"SWLOG001"
 LOG_VERSION = 1
 LOG_HEADER_BYTES = 40
+KERNEL_LOG_PAYLOAD_BYTES = 48
+KERNEL_CONSOLE_EVENT_CODE = 0x434F_4E53  # "CONS"
+KERNEL_CONSOLE_BYTE_COUNT_MASK = 0x1F
+KERNEL_CONSOLE_FIRST_FLAG = 1 << 8
+KERNEL_CONSOLE_LAST_FLAG = 1 << 9
+KERNEL_CONSOLE_SOURCE_SHIFT = 16
 MAX_LOG_BLOCKS = 65_536
 MAX_LOG_BYTES = 32 * 1_024 * 1_024
 DEFAULT_LOG_BLOCKS = 4_096
@@ -47,6 +53,31 @@ MAXIMUM_DIRECTORY_SCAN_BYTES = 64 * 1_024 * 1_024
 MAXIMUM_BOOT_FILE_COUNT = 4_096
 MAXIMUM_BOOT_FILE_BYTES = 512 * 1_024 * 1_024
 MAXIMUM_TOTAL_BOOT_FILE_BYTES = 512 * 1_024 * 1_024
+
+KERNEL_LOG_LEVEL_NAMES = {
+    0: "trace",
+    1: "debug",
+    2: "info",
+    3: "notice",
+    4: "warning",
+    5: "error",
+    6: "critical",
+}
+KERNEL_LOG_SUBSYSTEM_NAMES = {
+    1: "kernel",
+    2: "boot",
+    3: "memory",
+    4: "scheduler",
+    5: "interrupts",
+    6: "drivers",
+    7: "graphics",
+    8: "update",
+    9: "userland",
+}
+KERNEL_CONSOLE_SOURCE_NAMES = {
+    1: "early-console",
+    2: "monitor",
+}
 
 
 class MediaError(Exception):
@@ -898,6 +929,299 @@ def decode_data_layout(block: bytes, expected_blocks: int) -> dict[str, int]:
     }
 
 
+def decode_kernel_log_payload(payload: bytes) -> dict[str, object] | None:
+    """Decode the stable 48-byte PersistentKernelLogCodec payload."""
+
+    if len(payload) != KERNEL_LOG_PAYLOAD_BYTES:
+        return None
+    sequence, timestamp = struct.unpack_from("<QQ", payload, 0)
+    level = payload[16]
+    reserved = payload[17]
+    subsystem = struct.unpack_from("<H", payload, 18)[0]
+    event_code, processor_id, flags = struct.unpack_from("<III", payload, 20)
+    argument0, argument1 = struct.unpack_from("<QQ", payload, 32)
+    tag_bytes = event_code.to_bytes(4, byteorder="big")
+    event_code_tag = (
+        tag_bytes.decode("ascii")
+        if all(0x20 <= byte <= 0x7E for byte in tag_bytes)
+        else None
+    )
+    return {
+        "sequence": sequence,
+        "timestamp_ticks": timestamp,
+        "level": level,
+        "level_name": KERNEL_LOG_LEVEL_NAMES.get(level),
+        "reserved": reserved,
+        "subsystem": subsystem,
+        "subsystem_name": KERNEL_LOG_SUBSYSTEM_NAMES.get(subsystem),
+        "event_code": event_code,
+        "event_code_hex": f"0x{event_code:08x}",
+        "event_code_tag": event_code_tag,
+        "processor_id": processor_id,
+        "flags": flags,
+        "argument0": argument0,
+        "argument1": argument1,
+        "codec_valid": reserved == 0 and level in KERNEL_LOG_LEVEL_NAMES,
+    }
+
+
+def decode_console_chunk(
+    event: dict[str, object],
+) -> dict[str, object] | None:
+    """Mirror KernelConsoleLogChunk's stable flag and byte encoding."""
+
+    flags = int(event["flags"])
+    source = (flags >> KERNEL_CONSOLE_SOURCE_SHIFT) & 0xFF
+    byte_count = flags & KERNEL_CONSOLE_BYTE_COUNT_MASK
+    if (
+        not event["codec_valid"]
+        or int(event["event_code"]) != KERNEL_CONSOLE_EVENT_CODE
+        or int(event["subsystem"]) != 1
+        or source not in KERNEL_CONSOLE_SOURCE_NAMES
+        or not 0 < byte_count <= 16
+    ):
+        return None
+    encoded = (
+        int(event["argument0"]).to_bytes(8, byteorder="little")
+        + int(event["argument1"]).to_bytes(8, byteorder="little")
+    )[:byte_count]
+    try:
+        text = encoded.decode("utf-8")
+        utf8_valid = True
+    except UnicodeDecodeError:
+        text = encoded.decode("utf-8", errors="replace")
+        utf8_valid = False
+    return {
+        "source": source,
+        "source_name": KERNEL_CONSOLE_SOURCE_NAMES[source],
+        "is_first": flags & KERNEL_CONSOLE_FIRST_FLAG != 0,
+        "is_last": flags & KERNEL_CONSOLE_LAST_FLAG != 0,
+        "byte_count": byte_count,
+        "bytes_hex": encoded.hex(),
+        "text": text,
+        "utf8_valid": utf8_valid,
+    }
+
+
+def sequence_metadata(
+    points: list[tuple[int, int]],
+) -> dict[str, object]:
+    """Describe missing prefixes, interior gaps, and sequence resets.
+
+    Each point is `(persistent_record_sequence, inspected_sequence)`. The
+    inspected kernel sequence may restart at one on a later boot, so a
+    non-increasing transition starts a new epoch rather than manufacturing an
+    enormous unsigned gap.
+    """
+
+    if not points:
+        return {
+            "record_count": 0,
+            "first_sequence": None,
+            "last_sequence": None,
+            "epoch_count": 0,
+            "missing_prefix_count": 0,
+            "missing_between_count": 0,
+            "gap_count": 0,
+            "reset_count": 0,
+            "has_gaps": False,
+            "gaps": [],
+            "resets": [],
+            "epochs": [],
+        }
+
+    gaps: list[dict[str, int]] = []
+    resets: list[dict[str, int]] = []
+    epochs: list[dict[str, int]] = []
+    epoch_index = 0
+    epoch_first_record, epoch_first = points[0]
+    epoch_last_record = epoch_first_record
+    epoch_last = epoch_first
+    epoch_record_count = 1
+    epoch_missing_between = 0
+    epoch_gap_count = 0
+
+    def finish_epoch() -> None:
+        epochs.append({
+            "index": epoch_index,
+            "record_count": epoch_record_count,
+            "first_persistent_sequence": epoch_first_record,
+            "last_persistent_sequence": epoch_last_record,
+            "first_sequence": epoch_first,
+            "last_sequence": epoch_last,
+            "missing_prefix_count": max(0, epoch_first - 1),
+            "missing_between_count": epoch_missing_between,
+            "gap_count": epoch_gap_count,
+        })
+
+    for persistent_sequence, sequence in points[1:]:
+        if sequence <= epoch_last:
+            resets.append({
+                "previous_persistent_sequence": epoch_last_record,
+                "next_persistent_sequence": persistent_sequence,
+                "previous_sequence": epoch_last,
+                "next_sequence": sequence,
+            })
+            finish_epoch()
+            epoch_index += 1
+            epoch_first_record = persistent_sequence
+            epoch_first = sequence
+            epoch_last_record = persistent_sequence
+            epoch_last = sequence
+            epoch_record_count = 1
+            epoch_missing_between = 0
+            epoch_gap_count = 0
+            continue
+
+        if sequence > epoch_last + 1:
+            missing = sequence - epoch_last - 1
+            gaps.append({
+                "epoch_index": epoch_index,
+                "previous_persistent_sequence": epoch_last_record,
+                "next_persistent_sequence": persistent_sequence,
+                "previous_sequence": epoch_last,
+                "next_sequence": sequence,
+                "missing_count": missing,
+            })
+            epoch_missing_between += missing
+            epoch_gap_count += 1
+        epoch_last_record = persistent_sequence
+        epoch_last = sequence
+        epoch_record_count += 1
+
+    finish_epoch()
+    missing_prefix = sum(epoch["missing_prefix_count"] for epoch in epochs)
+    missing_between = sum(epoch["missing_between_count"] for epoch in epochs)
+    return {
+        "record_count": len(points),
+        "first_sequence": points[0][1],
+        "last_sequence": points[-1][1],
+        "epoch_count": len(epochs),
+        "missing_prefix_count": missing_prefix,
+        "missing_between_count": missing_between,
+        "gap_count": len(gaps),
+        "reset_count": len(resets),
+        "has_gaps": missing_prefix != 0 or missing_between != 0,
+        "gaps": gaps,
+        "resets": resets,
+        "epochs": epochs,
+    }
+
+
+def persistent_log_diagnostics(
+    records: list[dict[str, object]],
+) -> dict[str, object]:
+    persistent_points = [
+        (int(record["sequence"]), int(record["sequence"]))
+        for record in records
+    ]
+    kernel_points = [
+        (
+            int(record["sequence"]),
+            int(record["kernel_log_event"]["sequence"]),
+        )
+        for record in records
+        if "kernel_log_event" in record
+    ]
+    persistent = sequence_metadata(persistent_points)
+    kernel = sequence_metadata(kernel_points)
+
+    chunks = [
+        (record, record["console_chunk"])
+        for record in records
+        if "console_chunk" in record
+    ]
+    encoded = b"".join(
+        bytes.fromhex(str(chunk["bytes_hex"])) for _, chunk in chunks
+    )
+    try:
+        console_text = encoded.decode("utf-8")
+        console_utf8_valid = True
+    except UnicodeDecodeError:
+        console_text = encoded.decode("utf-8", errors="replace")
+        console_utf8_valid = False
+
+    boundary_issues: list[dict[str, object]] = []
+    message_open = False
+    active_source: int | None = None
+    complete_message_count = 0
+    source_chunk_counts = {
+        name: 0 for name in KERNEL_CONSOLE_SOURCE_NAMES.values()
+    }
+    for record, chunk in chunks:
+        source_chunk_counts[str(chunk["source_name"])] += 1
+        is_first = bool(chunk["is_first"])
+        is_last = bool(chunk["is_last"])
+        source = int(chunk["source"])
+        if is_first:
+            if message_open:
+                boundary_issues.append({
+                    "persistent_sequence": int(record["sequence"]),
+                    "kind": "first-before-previous-last",
+                })
+            message_open = True
+            active_source = source
+        elif not message_open:
+            boundary_issues.append({
+                "persistent_sequence": int(record["sequence"]),
+                "kind": "continuation-without-first",
+            })
+            message_open = True
+            active_source = source
+        elif source != active_source:
+            boundary_issues.append({
+                "persistent_sequence": int(record["sequence"]),
+                "kind": "source-changed-within-message",
+                "previous_source": active_source,
+                "next_source": source,
+            })
+            active_source = source
+        if is_last:
+            complete_message_count += 1
+            message_open = False
+            active_source = None
+    if message_open and chunks:
+        boundary_issues.append({
+            "persistent_sequence": int(chunks[-1][0]["sequence"]),
+            "kind": "message-has-no-retained-last-chunk",
+        })
+
+    has_sequence_gaps = bool(persistent["has_gaps"] or kernel["has_gaps"])
+    crosses_kernel_epochs = int(kernel["epoch_count"]) > 1
+    return {
+        "sequence_metadata": {
+            "persistent_record": persistent,
+            "kernel_log": kernel,
+        },
+        "canonical_console_stream": {
+            "ordering": "persistent-sequence",
+            "chunk_count": len(chunks),
+            "byte_count": len(encoded),
+            "bytes_hex": encoded.hex(),
+            "text": console_text,
+            "utf8_valid": console_utf8_valid,
+            "first_persistent_sequence": (
+                int(chunks[0][0]["sequence"]) if chunks else None
+            ),
+            "last_persistent_sequence": (
+                int(chunks[-1][0]["sequence"]) if chunks else None
+            ),
+            "source_chunk_counts": source_chunk_counts,
+            "complete_message_count": complete_message_count,
+            "message_boundary_issue_count": len(boundary_issues),
+            "message_boundary_issues": boundary_issues,
+            "has_sequence_gaps": has_sequence_gaps,
+            "crosses_kernel_epochs": crosses_kernel_epochs,
+            "is_complete": (
+                not has_sequence_gaps
+                and not crosses_kernel_epochs
+                and not boundary_issues
+                and console_utf8_valid
+            ),
+        },
+    }
+
+
 def persistent_records(image, data_partition, layout) -> list[dict[str, object]]:
     records = []
     data_start = int(data_partition["start_block"])
@@ -931,9 +1255,16 @@ def persistent_records(image, data_partition, layout) -> list[dict[str, object]]
             "timestamp_ticks": timestamp,
             "payload_hex": payload.hex(),
         }
-        if len(payload) == 48:
-            record["kernel_log_sequence"] = struct.unpack_from("<Q", payload, 0)[0]
-            record["kernel_log_event_code"] = struct.unpack_from("<I", payload, 20)[0]
+        event = decode_kernel_log_payload(payload)
+        if event is not None:
+            # Preserve the original flat compatibility fields while exposing
+            # the complete stable event ABI in one structured object.
+            record["kernel_log_sequence"] = event["sequence"]
+            record["kernel_log_event_code"] = event["event_code"]
+            record["kernel_log_event"] = event
+            console_chunk = decode_console_chunk(event)
+            if console_chunk is not None:
+                record["console_chunk"] = console_chunk
         records.append(record)
     records.sort(key=lambda item: int(item["sequence"]))
     return records
@@ -999,6 +1330,7 @@ def inspect_image(path: Path) -> dict[str, object]:
             else f"degraded-{decoded[0][0]}-only"
         )
         records = persistent_records(image, data, layout)
+        diagnostics = persistent_log_diagnostics(records)
         return {
             "format": "swiftos-rpi5-media-v1",
             "logical_block_bytes": SECTOR_SIZE,
@@ -1011,6 +1343,7 @@ def inspect_image(path: Path) -> dict[str, object]:
             "data_volume": layout,
             "data_superblock_status": superblock_status,
             "persistent_records": records,
+            **diagnostics,
         }
 
 
