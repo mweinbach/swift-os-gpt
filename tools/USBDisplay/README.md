@@ -62,8 +62,12 @@ changing the viewer.
 
 1. Boot a SwiftOS Pi image packaged with the DWC2 peripheral overlay and USB
    debug gadget enabled.
-2. Use a data-capable USB-C cable. Make sure the Pi has adequate, safe power;
-   a Mac port is not guaranteed to supply the Pi 5's peak requirement.
+2. Leave the Pi 5 USB-C connector dedicated to OTG data. Raspberry Pi's Pi 5
+   OTG procedure powers the board separately through its 5 V and GND header;
+   PoE is another way to free the USB-C connector. Follow the power source's
+   safety instructions and never connect competing supplies. A cable from a
+   Mac or hub that is also powering the board is not the supported Pi 5 OTG
+   arrangement, and the USB-A ports are host-only rather than gadget ports.
 3. Confirm macOS enumeration with `--list`. The viewer can be launched before
    the Pi and will wait through re-enumeration.
 4. Keep UART10 available during first hardware bring-up. USB cannot report

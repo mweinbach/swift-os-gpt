@@ -184,6 +184,12 @@ display stream. It can mirror a firmware framebuffer or use a kernel-owned
 `make usb-display-viewer` and `.build/swiftos-usb-display`; see the
 [USB display viewer](tools/USBDisplay/README.md).
 
+On Pi 5, the USB-C OTG connector must be reserved for the data connection and
+the board powered separately through a supported path. The USB-A connectors
+belong to the RP1 host controller and cannot be used as gadget ports. This
+physical requirement is checked before treating a missing macOS CDC device as
+a driver or kernel failure.
+
 The same CDC stream accepts bounded `SUPD` kernel updates. Build the uploader
 with `make usb-update`, validate with `--dry-run`, close the display viewer so
 only one process owns the tty, then pass the explicit `/dev/cu.usbmodem*` path.
