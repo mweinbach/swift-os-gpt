@@ -4,7 +4,11 @@
 
 enum USBUpdateLimits {
     static let headerByteCount = 24
-    static let maximumArtifactByteCount = 512 * 1_024 * 1_024
+    // The first activation contract stages a raw Raspberry Pi Image in a
+    // dedicated 16 MiB RAM region. Keep host validation at that same boundary
+    // so an image cannot pass locally and then fail only after transmission.
+    static let maximumArtifactByteCount = 16 * 1_024 * 1_024
+    static let maximumRuntimeImageByteCount = 32 * 1_024 * 1_024
     static let minimumChunkByteCount = 64
     static let maximumChunkByteCount = 4_096
     // 24-byte SUPD header + 16-byte DATA prefix + 456 bytes = 496 bytes,
@@ -374,9 +378,14 @@ enum USBUpdateArtifactValidationError: Error, Equatable,
     case tooLarge(Int)
     case headerTooShort(Int)
     case missingARM64ImageMagic
+    case invalidEntryInstruction(UInt32)
+    case invalidEntryOffset(Int64)
     case wrongTextOffset(UInt64)
     case declaredImageTooSmall(UInt64)
+    case declaredImageTooLarge(UInt64)
+    case unalignedDeclaredImageSize(UInt64)
     case unsupportedImageFlags(UInt64)
+    case nonzeroReservedField(offset: Int, value: UInt64)
     case invalidChunkByteCount(Int)
 
     var description: String {
@@ -389,12 +398,22 @@ enum USBUpdateArtifactValidationError: Error, Equatable,
             return "image is \(count) bytes; the AArch64 Image header needs 64"
         case .missingARM64ImageMagic:
             return "image does not contain ARM64 Image magic at byte 56"
+        case .invalidEntryInstruction(let instruction):
+            return "image entry instruction \(hex(UInt64(instruction))) is not an AArch64 branch"
+        case .invalidEntryOffset(let offset):
+            return "image entry branch offset \(offset) is outside the raw image"
         case .wrongTextOffset(let offset):
             return "image text offset is \(hex(offset)); expected 0x80000"
         case .declaredImageTooSmall(let size):
             return "declared memory image size \(size) is smaller than the file"
+        case .declaredImageTooLarge(let size):
+            return "declared memory image size \(size) exceeds \(USBUpdateLimits.maximumRuntimeImageByteCount)"
+        case .unalignedDeclaredImageSize(let size):
+            return "declared memory image size \(size) is not 4 KiB aligned"
         case .unsupportedImageFlags(let flags):
             return "image flags \(hex(flags)) do not select little-endian 4 KiB pages"
+        case .nonzeroReservedField(let offset, let value):
+            return "reserved Image header field at byte \(offset) is \(hex(value))"
         case .invalidChunkByteCount(let count):
             return "chunk size \(count) is outside \(USBUpdateLimits.minimumChunkByteCount)...\(USBUpdateLimits.maximumChunkByteCount)"
         }
@@ -423,6 +442,23 @@ struct USBUpdateArtifact: Equatable {
         guard Array(bytes[56..<60]) == [0x41, 0x52, 0x4d, 0x64] else {
             throw USBUpdateArtifactValidationError.missingARM64ImageMagic
         }
+        let instruction = bytes.readUInt32LittleEndian(at: 0)
+        guard instruction & 0xfc00_0000 == 0x1400_0000 else {
+            throw USBUpdateArtifactValidationError.invalidEntryInstruction(
+                instruction
+            )
+        }
+        let rawImmediate = Int64(instruction & 0x03ff_ffff)
+        let signedImmediate = rawImmediate & (1 << 25) == 0
+            ? rawImmediate : rawImmediate - (1 << 26)
+        let entryOffset = signedImmediate * 4
+        guard entryOffset >= 64,
+              UInt64(entryOffset) < UInt64(bytes.count)
+        else {
+            throw USBUpdateArtifactValidationError.invalidEntryOffset(
+                entryOffset
+            )
+        }
         let textOffset = bytes.readUInt64LittleEndian(at: 8)
         guard textOffset == 0x80000 else {
             throw USBUpdateArtifactValidationError.wrongTextOffset(textOffset)
@@ -433,9 +469,30 @@ struct USBUpdateArtifact: Equatable {
                 declaredSize
             )
         }
+        guard declaredSize <= UInt64(
+                  USBUpdateLimits.maximumRuntimeImageByteCount
+              )
+        else {
+            throw USBUpdateArtifactValidationError.declaredImageTooLarge(
+                declaredSize
+            )
+        }
+        guard declaredSize & 0xfff == 0 else {
+            throw USBUpdateArtifactValidationError
+                .unalignedDeclaredImageSize(declaredSize)
+        }
         let flags = bytes.readUInt64LittleEndian(at: 24)
-        guard flags & 0x0f == 0x02 else {
+        guard flags == 0x02 else {
             throw USBUpdateArtifactValidationError.unsupportedImageFlags(flags)
+        }
+        for offset in stride(from: 32, through: 48, by: 8) {
+            let reserved = bytes.readUInt64LittleEndian(at: offset)
+            guard reserved == 0 else {
+                throw USBUpdateArtifactValidationError.nonzeroReservedField(
+                    offset: offset,
+                    value: reserved
+                )
+            }
         }
         guard chunkByteCount >= USBUpdateLimits.minimumChunkByteCount,
               chunkByteCount <= USBUpdateLimits.maximumChunkByteCount

@@ -229,15 +229,52 @@ struct USBUpdateHostTests {
                 validatingRaspberryPi5Image: badMagic
             )
         }
+        var badEntry = validImage(byteCount: 128, declaredSize: 4_096)
+        write32(0xd503_201f, into: &badEntry, at: 0)
+        expectThrows("non-branch Image entry accepted") {
+            _ = try USBUpdateArtifact(
+                validatingRaspberryPi5Image: badEntry
+            )
+        }
+        write32(0x1400_0040, into: &badEntry, at: 0)
+        expectThrows("out-of-image entry branch accepted") {
+            _ = try USBUpdateArtifact(
+                validatingRaspberryPi5Image: badEntry
+            )
+        }
         var badSize = validImage(byteCount: 128, declaredSize: 127)
         expectThrows("undersized declaration accepted") {
             _ = try USBUpdateArtifact(
                 validatingRaspberryPi5Image: badSize
             )
         }
-        badSize = validImage(byteCount: 128, declaredSize: 256)
+        badSize = validImage(byteCount: 128, declaredSize: 4_097)
+        expectThrows("unaligned runtime declaration accepted") {
+            _ = try USBUpdateArtifact(
+                validatingRaspberryPi5Image: badSize
+            )
+        }
+        badSize = validImage(
+            byteCount: 128,
+            declaredSize: UInt64(
+                USBUpdateLimits.maximumRuntimeImageByteCount + 4_096
+            )
+        )
+        expectThrows("oversized runtime declaration accepted") {
+            _ = try USBUpdateArtifact(
+                validatingRaspberryPi5Image: badSize
+            )
+        }
+        badSize = validImage(byteCount: 128, declaredSize: 4_096)
         write64(1, into: &badSize, at: 24)
         expectThrows("unsupported image flags accepted") {
+            _ = try USBUpdateArtifact(
+                validatingRaspberryPi5Image: badSize
+            )
+        }
+        badSize = validImage(byteCount: 128, declaredSize: 4_096)
+        write64(1, into: &badSize, at: 40)
+        expectThrows("nonzero reserved Image header field accepted") {
             _ = try USBUpdateArtifact(
                 validatingRaspberryPi5Image: badSize
             )
@@ -300,14 +337,32 @@ struct USBUpdateHostTests {
         declaredSize: UInt64
     ) -> [UInt8] {
         var bytes = (0..<byteCount).map { UInt8(truncatingIfNeeded: $0) }
+        write32(0x1400_0010, into: &bytes, at: 0)
         write64(0x80000, into: &bytes, at: 8)
         write64(declaredSize, into: &bytes, at: 16)
         write64(0x02, into: &bytes, at: 24)
+        write64(0, into: &bytes, at: 32)
+        write64(0, into: &bytes, at: 40)
+        write64(0, into: &bytes, at: 48)
         bytes[56] = 0x41
         bytes[57] = 0x52
         bytes[58] = 0x4d
         bytes[59] = 0x64
         return bytes
+    }
+
+    private static func write32(
+        _ value: UInt32,
+        into bytes: inout [UInt8],
+        at offset: Int
+    ) {
+        var index = 0
+        while index < 4 {
+            bytes[offset + index] = UInt8(
+                truncatingIfNeeded: value >> UInt32(index * 8)
+            )
+            index += 1
+        }
     }
 
     private static func requireArtifact(_ bytes: [UInt8])
