@@ -121,6 +121,8 @@ struct VirGLCapabilityParserTests {
             expect(capabilities.maximumTexture2DSize == 16_384, "texture limit")
             expect(capabilities.capabilityBits == 0x4000_0001, "capability bits")
             expect(capabilities.capabilityBitsV2 == 0x0000_0200, "v2 bits")
+            expect(capabilities.supportsR8UNormSampler, "R8 sampler format")
+            expect(VirGLCapabilityWire.formatR8UNorm == 64, "R8 wire format")
             expect(capabilities.supportsB8G8R8X8RenderTarget, "render format")
             expect(capabilities.supportsB8G8R8X8Scanout, "scanout format")
             expect(
@@ -317,6 +319,16 @@ struct VirGLCapabilityParserTests {
     private static func testFormatRequirementsAndBaselineVertexFormats() {
         let selection = requireSelection(kind: .virgl2, version: 2)
         withValidPayload(for: selection) { bytes in
+            // The sampler mask starts at word one. Format 64 occupies bit zero
+            // in its third word.
+            writeLE32(0, word: 3, bytes: bytes)
+            expectRejected(
+                parse(selection, bytes),
+                .unsupportedSamplerFormat,
+                "missing R8_UNORM sampler"
+            )
+        }
+        withValidPayload(for: selection) { bytes in
             writeLE32(0, word: 17, bytes: bytes)
             expectRejected(
                 parse(selection, bytes),
@@ -404,6 +416,7 @@ struct VirGLCapabilityParserTests {
                 word: 0,
                 bytes: bytes
             )
+            writeLE32(UInt32(1), word: 3, bytes: bytes)
             writeLE32(UInt32(1) << 2, word: 17, bytes: bytes)
             writeLE32(
                 (UInt32(1) << 4) | (UInt32(1) << 5),

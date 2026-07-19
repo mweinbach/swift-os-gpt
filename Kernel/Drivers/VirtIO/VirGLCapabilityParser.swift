@@ -156,6 +156,7 @@ enum VirGLCapabilityParseRejection: Equatable {
     case unsupportedPrimitive
     case impossibleRenderTargetLimit
     case impossibleTextureLimit
+    case unsupportedSamplerFormat
     case unsupportedRenderTargetFormat
     case unsupportedScanoutFormat
 }
@@ -169,7 +170,7 @@ enum VirGLShaderWireLanguage: Equatable {
     case tgsiText
 }
 
-/// The validated subset needed by SwiftOS's first solid-quad renderer.
+/// The validated subset needed by SwiftOS's GPU compositor.
 /// A missing texture limit is meaningful: the legacy VIRGL layout never put
 /// `max_texture_2d_size` on the wire, while VIRGL2 does.
 struct VirGLRendererCapabilities: Equatable {
@@ -180,6 +181,8 @@ struct VirGLRendererCapabilities: Equatable {
     let maximumTexture2DSize: UInt32?
     let capabilityBits: UInt32
     let capabilityBitsV2: UInt32
+    /// One-channel normalized coverage sampled by the mask-font pipeline.
+    let supportsR8UNormSampler: Bool
     /// Legacy format 2 (`B8G8R8X8_UNORM`) support retained for the existing
     /// scanout contract.
     let supportsB8G8R8X8RenderTarget: Bool
@@ -231,12 +234,14 @@ enum VirGLCapabilityWire {
 
     // virgl_formats wire values.
     static let formatB8G8R8X8UNorm: UInt32 = 2
+    static let formatR8UNorm: UInt32 = 64
     static let formatB8G8R8A8SRGB: UInt32 = 100
     static let formatB8G8R8X8SRGB: UInt32 = 101
     // PIPE_PRIM_TRIANGLES.
     static let trianglesPrimitive: UInt32 = 4
 
     fileprivate static let maximumVersionWord = 0
+    fileprivate static let samplerFormatMaskWord = 1
     fileprivate static let renderFormatMaskWord = 17
     fileprivate static let glslLevelWord = 66
     fileprivate static let maximumRenderTargetsWord = 70
@@ -324,6 +329,15 @@ enum VirGLCapabilityParser {
                 <= VirGLCapabilityWire.maximumGalliumRenderTargets
         else {
             return .rejected(.impossibleRenderTargetLimit)
+        }
+
+        let supportsR8UNormSampler = formatIsSet(
+            VirGLCapabilityWire.formatR8UNorm,
+            inMaskAtWord: VirGLCapabilityWire.samplerFormatMaskWord,
+            payload: payload
+        )
+        guard supportsR8UNormSampler else {
+            return .rejected(.unsupportedSamplerFormat)
         }
 
         let supportsRenderTarget = formatIsSet(
@@ -419,6 +433,7 @@ enum VirGLCapabilityParser {
                 maximumTexture2DSize: maximumTexture2DSize,
                 capabilityBits: capabilityBits,
                 capabilityBitsV2: capabilityBitsV2,
+                supportsR8UNormSampler: supportsR8UNormSampler,
                 supportsB8G8R8X8RenderTarget: supportsRenderTarget,
                 supportsB8G8R8X8Scanout: supportsScanout,
                 supportsB8G8R8A8SRGBRenderTarget:
