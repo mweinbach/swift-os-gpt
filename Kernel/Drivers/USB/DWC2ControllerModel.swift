@@ -18,6 +18,7 @@ enum DWC2RegisterLayout {
     static let hardwareConfiguration2: UInt = 0x048
     static let hardwareConfiguration3: UInt = 0x04c
     static let hardwareConfiguration4: UInt = 0x050
+    static let globalDFIFOConfiguration: UInt = 0x05c
 
     static let deviceConfiguration: UInt = 0x800
     static let deviceControl: UInt = 0x804
@@ -123,12 +124,40 @@ enum DWC2BusArchitecture: UInt8, Equatable {
     case reserved = 3
 }
 
+enum DWC2HighSpeedPHYType: UInt8, Equatable {
+    case unsupported = 0
+    case utmi = 1
+    case ulpi = 2
+    case utmiAndULPI = 3
+
+    var supportsUTMI: Bool {
+        self == .utmi || self == .utmiAndULPI
+    }
+}
+
+enum DWC2UTMIDataWidth: UInt8, Equatable {
+    case bits8 = 0
+    case bits16 = 1
+    case bits8Or16 = 2
+    case reserved = 3
+
+    var selectedBitCount: UInt8? {
+        switch self {
+        case .bits8: return 8
+        case .bits16, .bits8Or16: return 16
+        case .reserved: return nil
+        }
+    }
+}
+
 /// Immutable capabilities read before the core is reset. The initial SwiftOS
 /// driver intentionally operates in slave/PIO mode on every architecture so
 /// USB bring-up does not depend on a board DMA or IOMMU contract.
 struct DWC2HardwareCapabilities: Equatable {
     let operationMode: DWC2OperationMode
     let busArchitecture: DWC2BusArchitecture
+    let highSpeedPHYType: DWC2HighSpeedPHYType
+    let utmiDataWidth: DWC2UTMIDataWidth
     let deviceEndpointCount: UInt8
     let inEndpointCount: UInt8
     let fifoDepthInWords: UInt16
@@ -145,7 +174,12 @@ struct DWC2HardwareCapabilities: Equatable {
               ), operationMode.supportsDeviceMode,
               let busArchitecture = DWC2BusArchitecture(
                   rawValue: UInt8((configuration2 >> 3) & 0x3)
-              ), busArchitecture != .reserved
+              ), busArchitecture != .reserved,
+              let highSpeedPHYType = DWC2HighSpeedPHYType(
+                  rawValue: UInt8((configuration2 >> 6) & 0x3)
+              ), let utmiDataWidth = DWC2UTMIDataWidth(
+                  rawValue: UInt8((configuration4 >> 14) & 0x3)
+              )
         else {
             return nil
         }
@@ -162,6 +196,8 @@ struct DWC2HardwareCapabilities: Equatable {
 
         self.operationMode = operationMode
         self.busArchitecture = busArchitecture
+        self.highSpeedPHYType = highSpeedPHYType
+        self.utmiDataWidth = utmiDataWidth
         deviceEndpointCount = nonControlEndpointCount + 1
         inEndpointCount = nonControlInEndpointCount + 1
         fifoDepthInWords = fifoDepth
@@ -174,9 +210,29 @@ struct DWC2HardwareCapabilities: Equatable {
             && inEndpointCount >= 4
             && supportsDynamicFIFO
             && supportsDedicatedTransmitFIFOs
+            && highSpeedPHYType.supportsUTMI
+            && utmiDataWidth.selectedBitCount != nil
             && DWC2CompositeFIFOPlan(
                 availableDepthInWords: fifoDepthInWords
             ) != nil
+    }
+}
+
+struct DWC2NonPeriodicTransmitStatus: Equatable {
+    let fifoAvailableWords: UInt16
+    let requestQueueAvailableEntries: UInt8
+
+    init(rawValue: UInt32) {
+        fifoAvailableWords = UInt16(truncatingIfNeeded: rawValue)
+        requestQueueAvailableEntries = UInt8(
+            truncatingIfNeeded: rawValue >> 16
+        )
+    }
+
+    func canQueue(wordCount: Int) -> Bool {
+        wordCount >= 0
+            && wordCount <= Int(fifoAvailableWords)
+            && requestQueueAvailableEntries > 0
     }
 }
 
@@ -365,6 +421,14 @@ enum DWC2CoreBits {
 
     static let forceHostMode: UInt32 = 1 << 29
     static let forceDeviceMode: UInt32 = 1 << 30
+    static let usbTimeoutCalibrationMask: UInt32 = 0x7
+    static let usbPHYInterface16: UInt32 = 1 << 3
+    static let usbULPIUTMISelect: UInt32 = 1 << 4
+    static let usbFullSpeedPHYSelect: UInt32 = 1 << 6
+    static let usbDDRSelect: UInt32 = 1 << 7
+    static let usbSRPCapable: UInt32 = 1 << 8
+    static let usbHNPCapable: UInt32 = 1 << 9
+    static let usbTurnaroundTimeMask: UInt32 = 0xf << 10
 
     static let coreSoftReset: UInt32 = 1 << 0
     static let receiveFIFOFlush: UInt32 = 1 << 4
@@ -402,4 +466,13 @@ enum DWC2CoreBits {
 
     static let deviceAddressMask: UInt32 = 0x7f << 4
     static let softDisconnect: UInt32 = 1 << 1
+    static let setGlobalNonPeriodicInNAK: UInt32 = 1 << 7
+    static let clearGlobalNonPeriodicInNAK: UInt32 = 1 << 8
+    static let setGlobalOutNAK: UInt32 = 1 << 9
+    static let clearGlobalOutNAK: UInt32 = 1 << 10
+    static let powerOnProgrammingDone: UInt32 = 1 << 11
+    static let deviceControlCommandMask = setGlobalNonPeriodicInNAK
+        | clearGlobalNonPeriodicInNAK
+        | setGlobalOutNAK
+        | clearGlobalOutNAK
 }

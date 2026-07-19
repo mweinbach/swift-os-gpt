@@ -6,14 +6,15 @@ private final class USBDebugGadgetRegisterBank {
     init() {
         words[Int(DWC2RegisterLayout.coreIdentifier / 4)] = 0x4f54_280a
         words[Int(DWC2RegisterLayout.hardwareConfiguration2 / 4)]
-            = 2 | (2 << 3) | (7 << 10) | (1 << 19)
+            = 2 | (2 << 3) | (1 << 6) | (7 << 10) | (1 << 19)
         words[Int(DWC2RegisterLayout.hardwareConfiguration3 / 4)] = 4_080 << 16
         words[Int(DWC2RegisterLayout.hardwareConfiguration4 / 4)]
             = (7 << 26) | (1 << 25)
         words[Int(DWC2RegisterLayout.resetControl / 4)] = DWC2CoreBits.ahbIdle
         words[Int(DWC2RegisterLayout.deviceControl / 4)]
             = DWC2CoreBits.softDisconnect
-        words[Int(DWC2RegisterLayout.inEndpointFIFOStatus(0)! / 4)] = 64
+        words[Int(DWC2RegisterLayout.endpoint0TransmitFIFOStatus / 4)]
+            = 1 << 16 | 64
         words[Int(DWC2RegisterLayout.inEndpointFIFOStatus(2)! / 4)] = 128
     }
 
@@ -88,6 +89,15 @@ private struct USBDebugGadgetTestRegisters: DWC2RegisterAccess {
                    | DWC2CoreBits.receiveFIFOFlush
            ) != 0 {
             bank.words[index] = DWC2CoreBits.ahbIdle
+            if value & DWC2CoreBits.receiveFIFOFlush != 0 {
+                bank.words[Int(DWC2RegisterLayout.interruptStatus / 4)]
+                    &= ~DWC2CoreBits.receiveFIFOLevelInterrupt
+                bank.loadReceiveData([])
+            }
+            return
+        }
+        if offset == DWC2RegisterLayout.deviceControl {
+            bank.words[index] = value & ~DWC2CoreBits.deviceControlCommandMask
             return
         }
         if offset == DWC2RegisterLayout.interruptStatus {
@@ -157,8 +167,24 @@ struct DWC2USBDebugGadgetTests {
                     fail("gadget fixture failed to activate")
                 }
 
-                bank.injectGlobal(DWC2CoreBits.usbResetInterrupt)
+                bank.loadReceiveData(
+                    [0x80, USBStandardRequest.getDescriptor, 0,
+                     USBDescriptorType.device, 0, 0, 18, 0]
+                )
+                bank.injectReceiveStatus(
+                    endpoint: 0,
+                    packetStatus: .setupDataReceived,
+                    byteCount: UInt16(USBSetupPacket.byteCount)
+                )
+                bank.injectGlobal(
+                    DWC2CoreBits.usbResetInterrupt
+                        | DWC2CoreBits.enumerationDoneInterrupt
+                )
                 expect(gadget.service() == .busReset, "bus reset not handled")
+                expect(
+                    gadget.service() == .none,
+                    "stale coalesced reset state survived into the next pass"
+                )
 
                 bank.words[Int(DWC2RegisterLayout.deviceStatus / 4)] = 0
                 bank.injectGlobal(DWC2CoreBits.enumerationDoneInterrupt)
@@ -216,6 +242,16 @@ struct DWC2USBDebugGadgetTests {
                     gadget: &gadget
                 )
                 expect(
+                    gadget.isDisplaySessionOpen,
+                    "DTR status stage did not open the display session"
+                )
+                expect(
+                    bank.words[Int(
+                        DWC2RegisterLayout.inEndpointFIFOStatus(2)! / 4
+                    )] == 128,
+                    "CDC data IN FIFO capacity disappeared"
+                )
+                expect(
                     bank.words[endpointTwoTransferSize] != 0,
                     "DTR did not start the display handshake"
                 )
@@ -255,6 +291,29 @@ struct DWC2USBDebugGadgetTests {
                     "DTR reopen did not restart a full display session"
                 )
                 expect(gadget.isOperational, "successful stream faulted")
+
+                bank.loadReceiveData(
+                    [0x80, USBStandardRequest.getDescriptor, 0,
+                     USBDescriptorType.device, 0, 0, 18, 0]
+                )
+                bank.injectReceiveStatus(
+                    endpoint: 0,
+                    packetStatus: .setupDataReceived,
+                    byteCount: UInt16(USBSetupPacket.byteCount)
+                )
+                bank.injectInCompletion(2)
+                bank.injectGlobal(
+                    DWC2CoreBits.usbResetInterrupt
+                        | DWC2CoreBits.enumerationDoneInterrupt
+                )
+                expect(
+                    gadget.service() == .busReset,
+                    "configured coalesced reset was not terminal"
+                )
+                expect(
+                    gadget.state == .attached && gadget.service() == .none,
+                    "stale display completion escaped configured reset cleanup"
+                )
             }
         }
     }

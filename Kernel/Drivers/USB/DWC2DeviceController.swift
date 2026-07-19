@@ -2,10 +2,12 @@ protocol DWC2RegisterAccess {
     mutating func read32(at offset: UInt) -> UInt32
     mutating func write32(_ value: UInt32, at offset: UInt)
     mutating func settleAfterModeChange() -> Bool
+    mutating func settleAfterPowerOnProgramming() -> Bool
 }
 
 extension DWC2RegisterAccess {
     mutating func settleAfterModeChange() -> Bool { true }
+    mutating func settleAfterPowerOnProgramming() -> Bool { true }
 }
 
 enum DWC2ControllerState: UInt8, Equatable {
@@ -24,6 +26,7 @@ enum DWC2InitializationResult: Equatable {
     case ahbNotIdle
     case coreResetTimedOut
     case deviceModeTimedOut
+    case powerOnProgrammingTimedOut
     case transmitFIFOFlushTimedOut
     case receiveFIFOFlushTimedOut
     case invalidState
@@ -158,6 +161,7 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         }
 
         var deviceControl = read(DWC2RegisterLayout.deviceControl)
+        deviceControl &= ~DWC2CoreBits.deviceControlCommandMask
         deviceControl |= DWC2CoreBits.softDisconnect
         write(deviceControl, DWC2RegisterLayout.deviceControl)
 
@@ -195,9 +199,30 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
             return .coreResetTimedOut
         }
 
+        guard let utmiBitCount = capabilities.utmiDataWidth.selectedBitCount
+        else {
+            state = .faulted
+            return .unsupportedConfiguration
+        }
         var usb = read(DWC2RegisterLayout.usbConfiguration)
-        usb &= ~DWC2CoreBits.forceHostMode
-        usb |= DWC2CoreBits.forceDeviceMode
+        usb &= ~(
+            DWC2CoreBits.forceHostMode
+                | DWC2CoreBits.forceDeviceMode
+                | DWC2CoreBits.usbTimeoutCalibrationMask
+                | DWC2CoreBits.usbPHYInterface16
+                | DWC2CoreBits.usbULPIUTMISelect
+                | DWC2CoreBits.usbFullSpeedPHYSelect
+                | DWC2CoreBits.usbDDRSelect
+                | DWC2CoreBits.usbSRPCapable
+                | DWC2CoreBits.usbHNPCapable
+                | DWC2CoreBits.usbTurnaroundTimeMask
+        )
+        usb |= 7 | DWC2CoreBits.forceDeviceMode
+        if utmiBitCount == 16 {
+            usb |= DWC2CoreBits.usbPHYInterface16 | 5 << 10
+        } else {
+            usb |= 9 << 10
+        }
         write(usb, DWC2RegisterLayout.usbConfiguration)
         guard registers.settleAfterModeChange(),
               waitForClear(
@@ -209,6 +234,33 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
             state = .faulted
             return .deviceModeTimedOut
         }
+
+        write(
+            UInt32(fifoPlan.receiveDepthInWords),
+            DWC2RegisterLayout.receiveFIFOSize
+        )
+        var endpoint: UInt8 = 0
+        while endpoint < DWC2CompositeFIFOPlan.endpointCount {
+            guard let registerOffset = DWC2RegisterLayout.transmitFIFOSize(
+                      for: endpoint
+                  ), let region = fifoPlan.transmitRegion(for: endpoint)
+            else {
+                state = .faulted
+                return .unsupportedConfiguration
+            }
+            write(region.registerValue, registerOffset)
+            endpoint += 1
+        }
+        guard fifoPlan.consumedDepthInWords <= capabilities.fifoDepthInWords
+        else {
+            state = .faulted
+            return .unsupportedConfiguration
+        }
+        write(
+            UInt32(fifoPlan.consumedDepthInWords) << 16
+                | UInt32(capabilities.fifoDepthInWords),
+            DWC2RegisterLayout.globalDFIFOConfiguration
+        )
 
         write(
             DWC2CoreBits.transmitFIFOFlush
@@ -238,23 +290,6 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
             return .receiveFIFOFlushTimedOut
         }
 
-        write(
-            UInt32(fifoPlan.receiveDepthInWords),
-            DWC2RegisterLayout.receiveFIFOSize
-        )
-        var endpoint: UInt8 = 0
-        while endpoint < DWC2CompositeFIFOPlan.endpointCount {
-            guard let registerOffset = DWC2RegisterLayout.transmitFIFOSize(
-                      for: endpoint
-                  ), let region = fifoPlan.transmitRegion(for: endpoint)
-            else {
-                state = .faulted
-                return .unsupportedConfiguration
-            }
-            write(region.registerValue, registerOffset)
-            endpoint += 1
-        }
-
         var deviceConfiguration = read(
             DWC2RegisterLayout.deviceConfiguration
         )
@@ -274,8 +309,26 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         // Reassert disconnect only after every endpoint/FIFO mask is safe so
         // the host can never observe a half-configured default device.
         deviceControl = read(DWC2RegisterLayout.deviceControl)
+        deviceControl &= ~(
+            DWC2CoreBits.deviceControlCommandMask
+                | DWC2CoreBits.powerOnProgrammingDone
+        )
         deviceControl |= DWC2CoreBits.softDisconnect
+        write(
+            deviceControl | DWC2CoreBits.powerOnProgrammingDone,
+            DWC2RegisterLayout.deviceControl
+        )
+        guard registers.settleAfterPowerOnProgramming() else {
+            state = .faulted
+            return .powerOnProgrammingTimedOut
+        }
         write(deviceControl, DWC2RegisterLayout.deviceControl)
+        write(
+            deviceControl
+                | DWC2CoreBits.clearGlobalOutNAK
+                | DWC2CoreBits.clearGlobalNonPeriodicInNAK,
+            DWC2RegisterLayout.deviceControl
+        )
 
         self.capabilities = capabilities
         self.fifoPlan = fifoPlan
@@ -286,6 +339,7 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
     mutating func connect() -> Bool {
         guard state == .disconnected else { return false }
         var control = read(DWC2RegisterLayout.deviceControl)
+        control &= ~DWC2CoreBits.deviceControlCommandMask
         control &= ~DWC2CoreBits.softDisconnect
         write(control, DWC2RegisterLayout.deviceControl)
         state = .connected
@@ -295,6 +349,7 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
     mutating func disconnect() {
         guard state == .connected || state == .configured else { return }
         var control = read(DWC2RegisterLayout.deviceControl)
+        control &= ~DWC2CoreBits.deviceControlCommandMask
         control |= DWC2CoreBits.softDisconnect
         write(control, DWC2RegisterLayout.deviceControl)
         write(0, DWC2RegisterLayout.allEndpointInterruptMask)
@@ -324,13 +379,40 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         )
     }
 
-    mutating func handleBusReset() -> Bool {
-        guard state == .connected || state == .configured else { return false }
+    mutating func handleBusReset(
+        maximumPollCount: Int = 100_000
+    ) -> Bool {
+        guard state == .connected || state == .configured,
+              maximumPollCount > 0
+        else { return false }
+        quiesceNonControlEndpoints()
+        write(
+            DWC2CoreBits.transmitFIFOFlush
+                | DWC2CoreBits.allTransmitFIFOs,
+            DWC2RegisterLayout.resetControl
+        )
+        guard waitForClear(
+                  offset: DWC2RegisterLayout.resetControl,
+                  mask: DWC2CoreBits.transmitFIFOFlush,
+                  maximumPollCount: maximumPollCount
+              )
+        else { return false }
+        write(DWC2CoreBits.receiveFIFOFlush, DWC2RegisterLayout.resetControl)
+        guard waitForClear(
+                  offset: DWC2RegisterLayout.resetControl,
+                  mask: DWC2CoreBits.receiveFIFOFlush,
+                  maximumPollCount: maximumPollCount
+              )
+        else { return false }
         setDeviceAddress(0)
         write(0, DWC2RegisterLayout.inEndpointInterruptMask)
         write(0, DWC2RegisterLayout.outEndpointInterruptMask)
         write(0x0001_0001, DWC2RegisterLayout.allEndpointInterruptMask)
-        clearEndpointInterrupts(endpoint: 0)
+        var endpoint: UInt8 = 0
+        while endpoint < DWC2CompositeFIFOPlan.endpointCount {
+            clearEndpointInterrupts(endpoint: endpoint)
+            endpoint += 1
+        }
 
         guard let inControl = DWC2RegisterLayout.inEndpointControl(0),
               let outControl = DWC2RegisterLayout.outEndpointControl(0)
@@ -453,21 +535,37 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         return true
     }
 
-    mutating func deconfigureCompositeEndpoints() {
-        guard state == .configured else { return }
+    mutating func deconfigureCompositeEndpoints(
+        maximumPollCount: Int = 100_000
+    ) -> Bool {
+        guard state == .configured, maximumPollCount > 0 else { return false }
+        quiesceNonControlEndpoints()
+        write(0x0001_0001, DWC2RegisterLayout.allEndpointInterruptMask)
+        write(
+            DWC2CoreBits.transmitFIFOFlush
+                | DWC2CoreBits.allTransmitFIFOs,
+            DWC2RegisterLayout.resetControl
+        )
+        guard waitForClear(
+                  offset: DWC2RegisterLayout.resetControl,
+                  mask: DWC2CoreBits.transmitFIFOFlush,
+                  maximumPollCount: maximumPollCount
+              )
+        else { return false }
+        write(DWC2CoreBits.receiveFIFOFlush, DWC2RegisterLayout.resetControl)
+        guard waitForClear(
+                  offset: DWC2RegisterLayout.resetControl,
+                  mask: DWC2CoreBits.receiveFIFOFlush,
+                  maximumPollCount: maximumPollCount
+              )
+        else { return false }
         var endpoint: UInt8 = 1
         while endpoint < DWC2CompositeFIFOPlan.endpointCount {
-            if let input = DWC2RegisterLayout.inEndpointControl(endpoint) {
-                write(read(input) | DWC2CoreBits.setNAK, input)
-            }
-            if endpoint != 1,
-               let output = DWC2RegisterLayout.outEndpointControl(endpoint) {
-                write(read(output) | DWC2CoreBits.setNAK, output)
-            }
+            clearEndpointInterrupts(endpoint: endpoint)
             endpoint += 1
         }
-        write(0x0001_0001, DWC2RegisterLayout.allEndpointInterruptMask)
         state = .connected
+        return true
     }
 
     mutating func setDeviceAddress(_ address: UInt8) {
@@ -557,8 +655,6 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
               let control = DWC2RegisterLayout.inEndpointControl(endpoint),
               let transferSize = DWC2RegisterLayout.inEndpointTransferSize(
                   endpoint
-              ), let fifoStatus = DWC2RegisterLayout.inEndpointFIFOStatus(
-                  endpoint
               ), let fifo = DWC2RegisterLayout.fifoData(endpoint)
         else {
             return .invalidEndpoint
@@ -593,8 +689,20 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         }
 
         let wordCount = (bytes.count + 3) / 4
-        guard wordCount <= Int(read(fifoStatus) & 0xffff) else {
-            return .fifoBusy
+        if endpoint == 0 {
+            let status = DWC2NonPeriodicTransmitStatus(
+                rawValue: read(
+                    DWC2RegisterLayout.endpoint0TransmitFIFOStatus
+                )
+            )
+            guard status.canQueue(wordCount: wordCount) else {
+                return .fifoBusy
+            }
+        } else {
+            guard let fifoStatus = DWC2RegisterLayout.inEndpointFIFOStatus(
+                      endpoint
+                  ), wordCount <= Int(read(fifoStatus) & 0xffff)
+            else { return .fifoBusy }
         }
         write(encodedTransfer, transferSize)
         var endpointControl = read(control)
@@ -722,6 +830,28 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         }
         write(UInt32.max, input)
         write(UInt32.max, output)
+    }
+
+    private mutating func quiesceNonControlEndpoints() {
+        var endpoint: UInt8 = 1
+        while endpoint < DWC2CompositeFIFOPlan.endpointCount {
+            if let input = DWC2RegisterLayout.inEndpointControl(endpoint) {
+                var control = read(input) | DWC2CoreBits.setNAK
+                if control & DWC2CoreBits.endpointEnable != 0 {
+                    control |= DWC2CoreBits.endpointDisable
+                }
+                write(control, input)
+            }
+            if endpoint != 1,
+               let output = DWC2RegisterLayout.outEndpointControl(endpoint) {
+                var control = read(output) | DWC2CoreBits.setNAK
+                if control & DWC2CoreBits.endpointEnable != 0 {
+                    control |= DWC2CoreBits.endpointDisable
+                }
+                write(control, output)
+            }
+            endpoint += 1
+        }
     }
 
     private mutating func drainReceiveFIFO(

@@ -46,6 +46,7 @@ struct DWC2ControllerModelTests {
 
         let configuration2: UInt32 = 2
             | (2 << 3)
+            | (1 << 6)
             | (7 << 10)
             | (1 << 19)
         let configuration3: UInt32 = 4_080 << 16
@@ -66,13 +67,18 @@ struct DWC2ControllerModelTests {
             "wrong bus architecture"
         )
         expect(
+            capabilities.highSpeedPHYType == .utmi
+                && capabilities.utmiDataWidth == .bits8,
+            "UTMI capabilities were not decoded"
+        )
+        expect(
             capabilities.supportsSwiftOSDebugCompositeDevice,
             "capable composite controller rejected"
         )
     }
 
     private static func rejectsHostOnlyAndUndersizedControllers() {
-        let hostOnly: UInt32 = 6 | (7 << 10) | (1 << 19)
+        let hostOnly: UInt32 = 6 | (1 << 6) | (7 << 10) | (1 << 19)
         expect(
             DWC2HardwareCapabilities(
                 hardwareConfiguration2: hostOnly,
@@ -83,7 +89,8 @@ struct DWC2ControllerModelTests {
         )
 
         guard let small = DWC2HardwareCapabilities(
-                  hardwareConfiguration2: 4 | (2 << 10) | (1 << 19),
+                  hardwareConfiguration2: 4 | (1 << 6)
+                      | (2 << 10) | (1 << 19),
                   hardwareConfiguration3: 512 << 16,
                   hardwareConfiguration4: (2 << 26) | (1 << 25)
               )
@@ -93,6 +100,17 @@ struct DWC2ControllerModelTests {
         expect(
             !small.supportsSwiftOSDebugCompositeDevice,
             "undersized endpoint set accepted"
+        )
+        guard let ulpiOnly = DWC2HardwareCapabilities(
+                  hardwareConfiguration2: 4 | (2 << 6)
+                      | (7 << 10) | (1 << 19),
+                  hardwareConfiguration3: 4_080 << 16,
+                  hardwareConfiguration4: (7 << 26) | (1 << 25)
+              )
+        else { fail("ULPI-only capabilities were not decoded") }
+        expect(
+            !ulpiOnly.supportsSwiftOSDebugCompositeDevice,
+            "ULPI-only core entered the UTMI initialization path"
         )
         expect(
             DWC2CompositeFIFOPlan(availableDepthInWords: 591) == nil,
@@ -162,6 +180,20 @@ struct DWC2ControllerModelTests {
     }
 
     private static func validatesTransferSizeEncoding() {
+        let available = DWC2NonPeriodicTransmitStatus(
+            rawValue: 2 << 16 | 16
+        )
+        expect(
+            available.fifoAvailableWords == 16
+                && available.requestQueueAvailableEntries == 2
+                && available.canQueue(wordCount: 16),
+            "non-periodic transmit availability decoded incorrectly"
+        )
+        expect(
+            !DWC2NonPeriodicTransmitStatus(rawValue: 16)
+                .canQueue(wordCount: 1),
+            "empty non-periodic request queue accepted"
+        )
         expect(
             DWC2TransferSize.endpoint0SetupReception
                 == (3 << 29 | 1 << 19 | 24),

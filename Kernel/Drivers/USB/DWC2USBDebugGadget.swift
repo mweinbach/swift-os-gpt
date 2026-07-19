@@ -126,6 +126,10 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         state != .faulted
     }
 
+    var isDisplaySessionOpen: Bool {
+        displayEndpointOpen
+    }
+
     mutating func requestFullFrame() {
         guard state != .faulted else { return }
         displayTransmitter.requestFullFrame()
@@ -150,7 +154,17 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             displaySessionResetPending = false
             displayTransferInFlight = false
             state = .attached
-            event = .busReset
+            controller.acknowledgeGlobalInterrupts(
+                snapshot.global & (
+                    DWC2CoreBits.usbResetInterrupt
+                        | DWC2CoreBits.enumerationDoneInterrupt
+                        | DWC2CoreBits.usbSuspendInterrupt
+                        | DWC2CoreBits.wakeupInterrupt
+                )
+            )
+            // Every other bit in this snapshot predates the reset cleanup.
+            // Re-sample hardware on the next service pass.
+            return .busReset
         }
 
         if snapshot.didEnumerate {
@@ -609,7 +623,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
               case .statusIn = action
         else { return }
         endpointZeroPendingDisplayOpenState =
-            controlEndpoint.controlLineState & 1 != 0
+            setup.value & 1 != 0
     }
 
     private mutating func commitDisplayOpenState(_ isOpen: Bool?) {
@@ -649,7 +663,9 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             return .configured
         }
         if controller.state == .configured {
-            controller.deconfigureCompositeEndpoints()
+            guard controller.deconfigureCompositeEndpoints() else {
+                return fail()
+            }
             displayEndpointOpen = false
             displaySessionResetPending = false
             displayTransferInFlight = false

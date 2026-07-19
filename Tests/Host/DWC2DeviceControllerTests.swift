@@ -1,6 +1,23 @@
+private final class DWC2TestTrace {
+    var deviceControlWrites = [UInt32]()
+    var powerSettleCount = 0
+    var powerSettleResult = true
+}
+
 private struct DWC2TestRegisters: DWC2RegisterAccess {
     let words: UnsafeMutableBufferPointer<UInt32>
     var emulateHardwareCompletion = true
+    let trace: DWC2TestTrace
+
+    init(
+        words: UnsafeMutableBufferPointer<UInt32>,
+        emulateHardwareCompletion: Bool = true,
+        trace: DWC2TestTrace = DWC2TestTrace()
+    ) {
+        self.words = words
+        self.emulateHardwareCompletion = emulateHardwareCompletion
+        self.trace = trace
+    }
 
     mutating func read32(at offset: UInt) -> UInt32 {
         words[Int(offset / 4)]
@@ -18,6 +35,11 @@ private struct DWC2TestRegisters: DWC2RegisterAccess {
             words[index] = DWC2CoreBits.ahbIdle
             return
         }
+        if offset == DWC2RegisterLayout.deviceControl {
+            trace.deviceControlWrites.append(value)
+            words[index] = value & ~DWC2CoreBits.deviceControlCommandMask
+            return
+        }
         if offset == DWC2RegisterLayout.interruptStatus {
             words[index] &= ~value
             return
@@ -27,6 +49,11 @@ private struct DWC2TestRegisters: DWC2RegisterAccess {
             return
         }
         words[index] = value
+    }
+
+    mutating func settleAfterPowerOnProgramming() -> Bool {
+        trace.powerSettleCount += 1
+        return trace.powerSettleResult
     }
 
     private func isEndpointInterrupt(_ offset: UInt) -> Bool {
@@ -41,19 +68,22 @@ private struct DWC2TestRegisters: DWC2RegisterAccess {
 struct DWC2DeviceControllerTests {
     static func main() {
         initializesADeviceCapableCore()
+        initializesSixteenBitUTMI()
         rejectsInvalidAndTimedOutCores()
         handlesResetEnumerationAndConfiguration()
+        queuesEndpointZeroOnlyWithGlobalCapacity()
         queuesBoundedInAndOutTransfers()
         drainsReceivePacketsAndMalformedEntries()
         reportsInterruptSnapshots()
-        print("DWC2 device controller: 6 groups passed")
+        print("DWC2 device controller: 8 groups passed")
     }
 
     private static func initializesADeviceCapableCore() {
         withRegisters { words in
             configureCapableCore(words)
+            let trace = DWC2TestTrace()
             var controller = DWC2Controller(
-                registers: DWC2TestRegisters(words: words)
+                registers: DWC2TestRegisters(words: words, trace: trace)
             )
             guard case .ready(let capabilities) = controller.initialize(
                 maximumPollCount: 4
@@ -76,15 +106,81 @@ struct DWC2DeviceControllerTests {
                 "display FIFO was not programmed"
             )
             expect(
-                words[Int(DWC2RegisterLayout.usbConfiguration / 4)]
-                    & DWC2CoreBits.forceDeviceMode != 0,
+                words[Int(DWC2RegisterLayout.globalDFIFOConfiguration / 4)]
+                    == (1_744 << 16 | 4_080),
+                "endpoint-info base did not follow the dynamic FIFOs"
+            )
+            let usb = words[Int(DWC2RegisterLayout.usbConfiguration / 4)]
+            expect(
+                usb & DWC2CoreBits.forceDeviceMode != 0,
                 "device mode was not forced"
+            )
+            expect(
+                usb & DWC2CoreBits.usbTimeoutCalibrationMask == 7
+                    && usb & DWC2CoreBits.usbTurnaroundTimeMask == 9 << 10,
+                "eight-bit UTMI timing was not programmed"
+            )
+            expect(
+                usb & (
+                    DWC2CoreBits.forceHostMode
+                        | DWC2CoreBits.usbPHYInterface16
+                        | DWC2CoreBits.usbULPIUTMISelect
+                        | DWC2CoreBits.usbFullSpeedPHYSelect
+                        | DWC2CoreBits.usbDDRSelect
+                        | DWC2CoreBits.usbSRPCapable
+                        | DWC2CoreBits.usbHNPCapable
+                ) == 0,
+                "stale host, ULPI, or OTG PHY policy survived initialization"
+            )
+            expect(
+                trace.powerSettleCount == 1
+                    && trace.deviceControlWrites.contains(
+                        DWC2CoreBits.softDisconnect
+                            | DWC2CoreBits.powerOnProgrammingDone
+                    )
+                    && trace.deviceControlWrites.contains(
+                        DWC2CoreBits.softDisconnect
+                            | DWC2CoreBits.clearGlobalOutNAK
+                            | DWC2CoreBits.clearGlobalNonPeriodicInNAK
+                    ),
+                "DCTL power-on and global-NAK commands were not sequenced"
             )
             expect(
                 words[Int(DWC2RegisterLayout.ahbConfiguration / 4)]
                     & DWC2CoreBits.ahbGlobalInterruptEnable == 0,
                 "polled driver enabled unowned IRQ delivery"
             )
+        }
+    }
+
+    private static func queuesEndpointZeroOnlyWithGlobalCapacity() {
+        withReadyController { controller, words in
+            expect(controller.connect(), "controller did not connect")
+            expect(controller.handleBusReset(), "bus reset was not handled")
+            var payload: UInt32 = 0x4433_2211
+            withUnsafeBytes(of: &payload) { bytes in
+                words[Int(DWC2RegisterLayout.endpoint0TransmitFIFOStatus / 4)]
+                    = 1 << 16 | 1
+                expect(
+                    controller.queueInTransfer(endpoint: 0, bytes: bytes)
+                        == .queued,
+                    "EP0 ignored global non-periodic transmit capacity"
+                )
+                words[Int(DWC2RegisterLayout.endpoint0TransmitFIFOStatus / 4)]
+                    = 1 << 16
+                expect(
+                    controller.queueInTransfer(endpoint: 0, bytes: bytes)
+                        == .fifoBusy,
+                    "EP0 queued without non-periodic FIFO words"
+                )
+                words[Int(DWC2RegisterLayout.endpoint0TransmitFIFOStatus / 4)]
+                    = 1
+                expect(
+                    controller.queueInTransfer(endpoint: 0, bytes: bytes)
+                        == .fifoBusy,
+                    "EP0 queued without a non-periodic request slot"
+                )
+            }
         }
     }
 
@@ -112,6 +208,25 @@ struct DWC2DeviceControllerTests {
             expect(
                 controller.initialize(maximumPollCount: 2) == .ahbNotIdle,
                 "AHB timeout was not bounded"
+            )
+        }
+    }
+
+    private static func initializesSixteenBitUTMI() {
+        withRegisters { words in
+            configureCapableCore(words)
+            words[Int(DWC2RegisterLayout.hardwareConfiguration4 / 4)]
+                |= 1 << 14
+            var controller = DWC2Controller(
+                registers: DWC2TestRegisters(words: words)
+            )
+            guard case .ready = controller.initialize(maximumPollCount: 4)
+            else { fail("sixteen-bit UTMI controller did not initialize") }
+            let usb = words[Int(DWC2RegisterLayout.usbConfiguration / 4)]
+            expect(
+                usb & DWC2CoreBits.usbPHYInterface16 != 0
+                    && usb & DWC2CoreBits.usbTurnaroundTimeMask == 5 << 10,
+                "sixteen-bit UTMI timing was not programmed"
             )
         }
     }
@@ -206,8 +321,29 @@ struct DWC2DeviceControllerTests {
                 words[Int(outSize / 4)] == 1 << 19,
                 "endpoint-zero OUT status size is wrong"
             )
-            controller.deconfigureCompositeEndpoints()
+            guard let displayFIFOStatus =
+                      DWC2RegisterLayout.inEndpointFIFOStatus(3)
+            else { fail("display FIFO status missing") }
+            words[Int(displayFIFOStatus / 4)] = 1
+            var displayWord: UInt32 = 0xaabb_ccdd
+            withUnsafeBytes(of: &displayWord) { bytes in
+                expect(
+                    controller.queueInTransfer(endpoint: 3, bytes: bytes)
+                        == .queued,
+                    "display transfer did not enter flight"
+                )
+            }
+            expect(
+                controller.deconfigureCompositeEndpoints(),
+                "configured endpoints did not quiesce"
+            )
             expect(controller.state == .connected, "deconfigure state is wrong")
+            expect(
+                words[Int(displayIn / 4)]
+                    & (DWC2CoreBits.endpointDisable | DWC2CoreBits.setNAK)
+                    == (DWC2CoreBits.endpointDisable | DWC2CoreBits.setNAK),
+                "deconfigure left the display IN transfer active"
+            )
             expect(
                 words[Int(DWC2RegisterLayout.allEndpointInterruptMask / 4)]
                     == 0x0001_0001,
@@ -324,14 +460,26 @@ struct DWC2DeviceControllerTests {
         _ words: UnsafeMutableBufferPointer<UInt32>
     ) {
         words[Int(DWC2RegisterLayout.coreIdentifier / 4)] = 0x4f54_280a
+        let configuration2: UInt32 = 2 | (2 << 3) | (1 << 6)
+            | (7 << 10) | (1 << 19)
         words[Int(DWC2RegisterLayout.hardwareConfiguration2 / 4)]
-            = 2 | (2 << 3) | (7 << 10) | (1 << 19)
+            = configuration2
         words[Int(DWC2RegisterLayout.hardwareConfiguration3 / 4)] = 4_080 << 16
         words[Int(DWC2RegisterLayout.hardwareConfiguration4 / 4)]
             = (7 << 26) | (1 << 25)
         words[Int(DWC2RegisterLayout.resetControl / 4)] = DWC2CoreBits.ahbIdle
         words[Int(DWC2RegisterLayout.deviceControl / 4)]
             = DWC2CoreBits.softDisconnect
+        words[Int(DWC2RegisterLayout.usbConfiguration / 4)]
+            = DWC2CoreBits.forceHostMode
+                | DWC2CoreBits.usbPHYInterface16
+                | DWC2CoreBits.usbULPIUTMISelect
+                | DWC2CoreBits.usbFullSpeedPHYSelect
+                | DWC2CoreBits.usbDDRSelect
+                | DWC2CoreBits.usbSRPCapable
+                | DWC2CoreBits.usbHNPCapable
+        words[Int(DWC2RegisterLayout.endpoint0TransmitFIFOStatus / 4)]
+            = 1 << 16 | 64
     }
 
     private static func withReadyController(

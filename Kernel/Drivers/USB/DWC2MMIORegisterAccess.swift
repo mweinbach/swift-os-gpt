@@ -38,6 +38,21 @@ struct DWC2MMIORegisterAccess: DWC2RegisterAccess {
         }
         return true
     }
+
+    /// PWRONPRGDONE must remain asserted for at least 10 microseconds.
+    mutating func settleAfterPowerOnProgramming() -> Bool {
+        let frequency = AArch64.counterFrequency
+        guard frequency >= 100_000 else { return false }
+        let requiredTicks = (frequency + 99_999) / 100_000
+        let start = AArch64.counterValue
+        var remainingSpins = 100_000
+        while AArch64.counterValue &- start < requiredTicks {
+            guard remainingSpins > 0 else { return false }
+            remainingSpins -= 1
+            AArch64.spinHint()
+        }
+        return true
+    }
 }
 
 typealias DWC2DeviceController = DWC2Controller<DWC2MMIORegisterAccess>
