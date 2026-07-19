@@ -45,7 +45,7 @@ enum KernelMemoryRuntime {
         static let kernelData = 128
         static let userStacks = 704
         static let mmio = 768
-        static let guards = 1280
+        static let guards = 1344
         static let explicitReservations = 1536
     }
 
