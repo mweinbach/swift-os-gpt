@@ -21,12 +21,25 @@ private final class USBDebugGadgetRegisterBank {
         words[Int(DWC2RegisterLayout.interruptStatus / 4)] |= interrupt
     }
 
-    func injectSetup(_ bytes: [UInt8]) {
-        precondition(bytes.count == 8)
-        receiveWords = [pack(bytes, start: 0), pack(bytes, start: 4)]
+    func loadReceiveData(_ bytes: [UInt8]) {
+        receiveWords.removeAll(keepingCapacity: true)
+        var start = 0
+        while start < bytes.count {
+            receiveWords.append(pack(bytes, start: start))
+            start += 4
+        }
         nextReceiveWord = 0
+    }
+
+    func injectReceiveStatus(
+        endpoint: UInt8,
+        packetStatus: DWC2ReceivePacketStatus,
+        byteCount: UInt16
+    ) {
         words[Int(DWC2RegisterLayout.receiveStatusPop / 4)]
-            = 8 << 4 | 6 << 17
+            = UInt32(endpoint)
+                | UInt32(byteCount) << 4
+                | UInt32(packetStatus.rawValue) << 17
         injectGlobal(DWC2CoreBits.receiveFIFOLevelInterrupt)
     }
 
@@ -38,19 +51,14 @@ private final class USBDebugGadgetRegisterBank {
         injectGlobal(DWC2CoreBits.inEndpointInterrupt)
     }
 
-    func injectOutCompletion(_ endpoint: UInt8) {
-        words[Int(DWC2RegisterLayout.outEndpointInterrupt(endpoint)! / 4)]
-            |= DWC2CoreBits.endpointTransferComplete
-        words[Int(DWC2RegisterLayout.allEndpointInterrupts / 4)]
-            |= 1 << UInt32(endpoint + 16)
-        injectGlobal(DWC2CoreBits.outEndpointInterrupt)
-    }
-
     private func pack(_ bytes: [UInt8], start: Int) -> UInt32 {
-        UInt32(bytes[start])
-            | UInt32(bytes[start + 1]) << 8
-            | UInt32(bytes[start + 2]) << 16
-            | UInt32(bytes[start + 3]) << 24
+        var word: UInt32 = 0
+        var index = 0
+        while index < 4 && start + index < bytes.count {
+            word |= UInt32(bytes[start + index]) << UInt32(index * 8)
+            index += 1
+        }
+        return word
     }
 }
 
@@ -192,6 +200,8 @@ struct DWC2USBDebugGadgetTests {
                     "configuration did not activate data endpoints"
                 )
                 expect(gadget.state == .configured, "wrong gadget state")
+                setLineCoding(bank: bank, gadget: &gadget)
+                discardMaximumBulkOutPacket(bank: bank, gadget: &gadget)
                 let endpointTwoTransferSize = Int(
                     DWC2RegisterLayout.inEndpointTransferSize(2)! / 4
                 )
@@ -249,6 +259,73 @@ struct DWC2USBDebugGadgetTests {
         }
     }
 
+    private static func setLineCoding(
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        injectSetup(
+            [
+                0x21,
+                USBCDCRequest.setLineCoding,
+                0,
+                0,
+                USBDebugDeviceIdentity.cdcControlInterface,
+                0,
+                7,
+                0,
+            ],
+            bank: bank,
+            gadget: &gadget
+        )
+        bank.loadReceiveData([0x00, 0xc2, 0x01, 0x00, 0, 0, 8])
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .outDataReceived,
+            byteCount: 7
+        )
+        expect(
+            gadget.service() != .faulted,
+            "line coding was accepted before OUT completion"
+        )
+        bank.loadReceiveData([])
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .outTransferComplete,
+            byteCount: 0
+        )
+        expect(
+            gadget.service() != .faulted,
+            "completed line-coding OUT transfer faulted"
+        )
+        completeEndpointZero(bank: bank, gadget: &gadget)
+    }
+
+    private static func discardMaximumBulkOutPacket(
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        bank.loadReceiveData([UInt8](repeating: 0xa5, count: 512))
+        bank.injectReceiveStatus(
+            endpoint: 2,
+            packetStatus: .outDataReceived,
+            byteCount: 512
+        )
+        expect(
+            gadget.service() != .faulted,
+            "discarded high-speed OUT packet faulted on bounded staging"
+        )
+        bank.loadReceiveData([])
+        bank.injectReceiveStatus(
+            endpoint: 2,
+            packetStatus: .outTransferComplete,
+            byteCount: 0
+        )
+        expect(
+            gadget.service() != .faulted,
+            "discarded OUT endpoint was not rearmed on completion"
+        )
+    }
+
     private static func setControlLineState(
         _ value: UInt16,
         bank: USBDebugGadgetRegisterBank,
@@ -275,23 +352,26 @@ struct DWC2USBDebugGadgetTests {
         bank: USBDebugGadgetRegisterBank,
         gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
     ) {
-        injectSetup(
-            [
-                0x80,
-                USBStandardRequest.getDescriptor,
-                0,
-                USBDescriptorType.configuration,
-                0,
-                0,
-                UInt8(USBDebugDeviceIdentity.configurationByteCount),
-                0,
-            ],
-            bank: bank,
-            gadget: &gadget
-        )
         let inputTransferSize = Int(
             DWC2RegisterLayout.inEndpointTransferSize(0)! / 4
         )
+        let setup = [
+            UInt8(0x80),
+            USBStandardRequest.getDescriptor,
+            0,
+            USBDescriptorType.configuration,
+            0,
+            0,
+            UInt8(USBDebugDeviceIdentity.configurationByteCount),
+            0,
+        ]
+        let transferBeforeSetupCompletion = bank.words[inputTransferSize]
+        injectSetupData(setup, bank: bank, gadget: &gadget)
+        expect(
+            bank.words[inputTransferSize] == transferBeforeSetupCompletion,
+            "Chapter 9 action ran before SETUP transaction completion"
+        )
+        completeSetup(bank: bank, gadget: &gadget)
         expect(
             bank.words[inputTransferSize]
                 == DWC2TransferSize.endpoint0In(byteCount: 64),
@@ -323,11 +403,7 @@ struct DWC2USBDebugGadgetTests {
             "configuration descriptor did not arm its status OUT stage"
         )
 
-        bank.injectOutCompletion(0)
-        expect(
-            gadget.service() != .faulted,
-            "configuration descriptor status stage faulted gadget"
-        )
+        completeEndpointZeroOutStatus(bank: bank, gadget: &gadget)
         expect(
             bank.words[outputTransferSize]
                 == DWC2TransferSize.endpoint0SetupReception,
@@ -387,11 +463,7 @@ struct DWC2USBDebugGadgetTests {
             "string descriptor did not arm its status OUT stage"
         )
 
-        bank.injectOutCompletion(0)
-        expect(
-            gadget.service() != .faulted,
-            "string descriptor status stage faulted gadget"
-        )
+        completeEndpointZeroOutStatus(bank: bank, gadget: &gadget)
         expect(
             bank.words[outputTransferSize]
                 == DWC2TransferSize.endpoint0SetupReception,
@@ -404,8 +476,61 @@ struct DWC2USBDebugGadgetTests {
         bank: USBDebugGadgetRegisterBank,
         gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
     ) {
-        bank.injectSetup(bytes)
-        expect(gadget.service() != .faulted, "SETUP request faulted gadget")
+        injectSetupData(bytes, bank: bank, gadget: &gadget)
+        completeSetup(bank: bank, gadget: &gadget)
+    }
+
+    private static func injectSetupData(
+        _ bytes: [UInt8],
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        precondition(bytes.count == USBSetupPacket.byteCount)
+        bank.loadReceiveData(bytes)
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .setupDataReceived,
+            byteCount: UInt16(USBSetupPacket.byteCount)
+        )
+        expect(gadget.service() != .faulted, "SETUP data faulted gadget")
+    }
+
+    private static func completeSetup(
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        bank.loadReceiveData([])
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .setupTransactionComplete,
+            byteCount: 0
+        )
+        expect(gadget.service() != .faulted, "SETUP completion faulted gadget")
+    }
+
+    private static func completeEndpointZeroOutStatus(
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        bank.loadReceiveData([])
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .outDataReceived,
+            byteCount: 0
+        )
+        expect(
+            gadget.service() != .faulted,
+            "zero-length status OUT data faulted gadget"
+        )
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .outTransferComplete,
+            byteCount: 0
+        )
+        expect(
+            gadget.service() != .faulted,
+            "status OUT completion faulted gadget"
+        )
     }
 
     private static func completeEndpointZero(

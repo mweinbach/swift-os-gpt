@@ -330,7 +330,9 @@ struct DWC2ReceiveStatus: Equatable {
 }
 
 enum DWC2TransferSize {
-    static let endpoint0SetupReception: UInt32 = 3 << 29 | 1 << 19 | 64
+    /// Keep three eight-byte SETUP packets available as required by SUPCNT.
+    /// DOEPTSIZ0.XFRSIZ describes that setup window, not EP0's 64-byte MPS.
+    static let endpoint0SetupReception: UInt32 = 3 << 29 | 1 << 19 | 24
 
     static func endpoint0In(byteCount: UInt16) -> UInt32? {
         guard byteCount <= 64 else { return nil }

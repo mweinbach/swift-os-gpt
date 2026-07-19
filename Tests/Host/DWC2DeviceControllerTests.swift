@@ -137,6 +137,10 @@ struct DWC2DeviceControllerTests {
                 "setup reception was not armed"
             )
             expect(
+                words[Int(setupSize / 4)] & 0x7f == 24,
+                "setup reception used the control endpoint MPS as XFRSIZ"
+            )
+            expect(
                 words[Int(setupControl / 4)] & DWC2CoreBits.endpointEnable != 0,
                 "endpoint zero was not enabled"
             )

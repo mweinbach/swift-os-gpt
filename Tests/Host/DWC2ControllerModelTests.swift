@@ -163,6 +163,11 @@ struct DWC2ControllerModelTests {
 
     private static func validatesTransferSizeEncoding() {
         expect(
+            DWC2TransferSize.endpoint0SetupReception
+                == (3 << 29 | 1 << 19 | 24),
+            "EP0 setup window did not reserve three eight-byte packets"
+        )
+        expect(
             DWC2TransferSize.endpoint0In(byteCount: 64) == (1 << 19 | 64),
             "EP0 IN size encoded incorrectly"
         )
