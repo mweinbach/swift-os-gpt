@@ -15,7 +15,8 @@ Provenance files ignored by firmware:
 
 Raspberry Pi 5 firmware is self-contained in EEPROM. Do not add bootcode.bin,
 start*.elf, or fixup*.dat to this minimal partition. config.txt selects only the
-official dwc2 overlay in peripheral mode; no cmdline.txt is required.
+official dwc2 overlay in peripheral mode, and disables Linux-specific OS image
+checking for the bare-metal kernel; no cmdline.txt is required.
 
 USB-C debug contract (hardware-unverified): the kernel powers the DWC2 domain,
 enumerates development VID:PID 1209:5a17 as a CDC ACM composite gadget, and

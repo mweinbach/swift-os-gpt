@@ -90,8 +90,7 @@ struct KernelMonitor {
             // opportunity on every pass. A deferred board task may still use
             // bounded polling, so servicing USB immediately beforehand keeps
             // the final enumeration/status exchange deterministic.
-            serviceUSBDebug()
-            serviceKernelMonitorWorkOnce(cooperativeServiceHook)
+            serviceCooperativeWorkOnce()
             guard let animationResult = statusIndicator?.renderIfDue(
                       counterTick: AArch64.counterValue,
                       on: canvas
@@ -145,6 +144,13 @@ struct KernelMonitor {
                 AArch64.spinHint()
             }
         }
+    }
+
+    /// Advances transports and deferred board drivers without waiting for
+    /// console input or a rendered frame. Early Pi proofs use this same pass.
+    mutating func serviceCooperativeWorkOnce() {
+        serviceUSBDebug()
+        serviceKernelMonitorWorkOnce(cooperativeServiceHook)
     }
 
     private mutating func serviceUSBDebug() {

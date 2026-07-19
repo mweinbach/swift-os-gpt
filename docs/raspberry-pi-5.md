@@ -288,8 +288,10 @@ translation rather than selecting the first PL011 node.
 
 `enable_uart=1` and `uart_2ndstage=1` are explicit boot preconditions. The
 current PL011 driver does not program UART10 clocks, baud, pinmux, or control
-registers and has no bounded timeout when TX remains full, so physical bring-up
-still depends on firmware leaving the dedicated debug UART operational.
+registers, so physical serial still depends on firmware leaving the dedicated
+debug UART operational. TX-full polling is bounded per byte; the complete
+message is retained first and UART emission stops at the first failed byte, so
+a dead or uninitialized UART cannot indefinitely block later boot work.
 `pciex4_reset=0` preserves the bootloader's internal RP1 PCIe configuration;
 SwiftOS then discovers and maps only the DT-described GEM, configuration, power,
 and reset resources required by its Ethernet driver. It does not enumerate the
@@ -355,6 +357,11 @@ The Pi GICv2 path is linked but hardware-unverified. The current timer contract
 uses architectural PPI 30; complete Pi validation still requires decoding the
 timer interrupt tuple through its resolved interrupt parent, checking `CNTFRQ`,
 and proving repeating delivery through the real distributor and CPU interface.
+While that validation is pending, Pi display boots prove up to three timer IRQs
+for one counter-bounded second while servicing polled USB and deferred board
+work. Success retains the QEMU marker sequence; timeout emits the non-panic
+`SWIFTOS:TIMER_DEFERRED`, stops the timer, and enters the live monitor. QEMU's
+smoke proof remains strict and fail-stop.
 Reusing QEMU addresses or treating the linked GICv2 path as executed evidence
 would be an invalid support claim.
 

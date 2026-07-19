@@ -10,10 +10,18 @@ struct PL011 {
         self.baseAddress = baseAddress
     }
 
-    func write(byte: UInt8) {
-        while MMIO.load32(at: baseAddress + Self.flagOffset)
-            & Self.transmitFIFOFull != 0 {}
-        MMIO.store8(byte, at: baseAddress + Self.dataOffset)
+    @discardableResult
+    func write(byte: UInt8) -> Bool {
+        var registers = PL011MMIOTransmitRegisterAccess(
+            baseAddress: baseAddress,
+            dataOffset: Self.dataOffset,
+            flagOffset: Self.flagOffset
+        )
+        return transmitPL011Byte(
+            byte,
+            registers: &registers,
+            transmitFIFOFullMask: Self.transmitFIFOFull
+        )
     }
 
     func readByteIfAvailable() -> UInt8? {
@@ -22,5 +30,24 @@ struct PL011 {
             return nil
         }
         return UInt8(truncatingIfNeeded: MMIO.load32(at: baseAddress + Self.dataOffset))
+    }
+}
+
+private struct PL011MMIOTransmitRegisterAccess:
+    PL011TransmitRegisterAccess {
+    let baseAddress: UInt
+    let dataOffset: UInt
+    let flagOffset: UInt
+
+    mutating func readTransmitFlags() -> UInt32 {
+        MMIO.load32(at: baseAddress + flagOffset)
+    }
+
+    mutating func writeTransmitData(_ byte: UInt8) {
+        MMIO.store8(byte, at: baseAddress + dataOffset)
+    }
+
+    mutating func relaxTransmitPoll() {
+        AArch64.spinHint()
     }
 }

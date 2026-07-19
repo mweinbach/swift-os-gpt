@@ -104,6 +104,8 @@ def validate_successful_package(
             "config does not bound the pinned DTB window")
     require("pciex4_reset=0\n" in config,
             "config does not retain bootloader RP1 PCIe configuration")
+    require("os_check=0\n" in config,
+            "config does not disable Linux-specific firmware image checks")
     manifest = (output / "BOOT-MANIFEST.txt").read_text()
     require("overlays/dwc2.dtbo" in manifest,
             "human-readable manifest omits the DWC2 overlay")

@@ -222,7 +222,30 @@ private struct KernelConsoleChunkAccumulator {
     }
 }
 
+/// Emits one retained-console message to the best-effort serial transport.
+/// Newline expansion is atomic with respect to failure: if CR cannot be sent,
+/// LF and the remainder of this message are not attempted.
+protocol KernelConsoleSerialByteSink {
+    mutating func writeConsoleByte(_ byte: UInt8) -> Bool
+}
+
+func emitKernelConsoleBytesToSerial<Sink: KernelConsoleSerialByteSink>(
+    _ bytes: UnsafeBufferPointer<UInt8>,
+    sink: inout Sink
+) {
+    for byte in bytes {
+        if byte == 10, !sink.writeConsoleByte(13) { return }
+        if !sink.writeConsoleByte(byte) { return }
+    }
+}
+
 #if os(none)
+extension PL011: KernelConsoleSerialByteSink {
+    mutating func writeConsoleByte(_ byte: UInt8) -> Bool {
+        write(byte: byte)
+    }
+}
+
 /// Global allocation-free retained log. The linker owns its record storage;
 /// the only mutable runtime state is a ring cursor and an IRQ-safe SMP lock.
 enum KernelDebugLogRuntime {
@@ -260,12 +283,8 @@ enum KernelDebugLogRuntime {
         defer { unlock(restoring: interruptState) }
         text.withUTF8Buffer { bytes in
             appendLocked(bytes, source: source)
-            for byte in bytes {
-                if byte == 10 {
-                    serial.write(byte: 13)
-                }
-                serial.write(byte: byte)
-            }
+            var serialSink = serial
+            emitKernelConsoleBytesToSerial(bytes, sink: &serialSink)
         }
     }
 
@@ -285,7 +304,7 @@ enum KernelDebugLogRuntime {
             )
             buffer = active
         }
-        serial.write(byte: byte)
+        _ = serial.write(byte: byte)
     }
 
     static var statistics: KernelLogStatistics? {

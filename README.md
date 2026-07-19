@@ -213,8 +213,9 @@ and the official `dwc2.dtbo` from that same revision with byte hashes. It also
 produces a sparse MBR media image with
 a populated FAT32 boot partition and a signed type-0xda data partition. Set
 `RPI5_MEDIA_BLOCK_COUNT` to the exact target-card block count when the data
-partition should consume the remaining card. The packaged `config.txt` enables DWC2
-peripheral mode for USB-C debugging and asks Pi firmware to select an HDMI mode
+partition should consume the remaining card. The packaged `config.txt` disables
+Linux-specific firmware image checking for the bare-metal kernel, enables DWC2
+peripheral mode for USB-C debugging, and asks Pi firmware to select an HDMI mode
 from EDID and retain a 32-bit boot framebuffer. It also pins the expanded DTB
 to a bounded 48 MiB window, outside both the reserved restart destination and
 the high-memory upload workspace. The kernel discovers and maps

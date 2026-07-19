@@ -4,7 +4,8 @@ struct KernelDebugLogRuntimeTests {
         retainsCanonicalConsoleBytesAcrossChunks()
         marksExactBoundaryAsOneCompleteChunk()
         preservesMonotonicSequenceAcrossProducers()
-        print("kernel debug log runtime host tests: 3 groups passed")
+        retainsWholeMessageWhenSerialEmissionStops()
+        print("kernel debug log runtime host tests: 4 groups passed")
     }
 
     private static func retainsCanonicalConsoleBytesAcrossChunks() {
@@ -85,6 +86,41 @@ struct KernelDebugLogRuntimeTests {
         }
     }
 
+    private static func retainsWholeMessageWhenSerialEmissionStops() {
+        withLog(capacity: 2) { log in
+            let message = Array("A\nB".utf8)
+            var sink = FailingConsoleSerialSink(failingByte: 13)
+            message.withUnsafeBufferPointer { bytes in
+                // Production performs retention before best-effort emission.
+                log.appendCanonical(
+                    bytes,
+                    timestampTicks: 1,
+                    processorID: 0,
+                    source: .earlyConsole
+                )
+                emitKernelConsoleBytesToSerial(bytes, sink: &sink)
+            }
+            expect(
+                reconstructedBytes(log) == Array("A\r\nB".utf8),
+                "failed UART truncated retained message"
+            )
+            expect(
+                sink.attemptedBytes == [65, 13],
+                "CR failure did not stop before LF and message remainder"
+            )
+
+            let nextMessage = Array("C".utf8)
+            sink.failingByte = nil
+            nextMessage.withUnsafeBufferPointer { bytes in
+                emitKernelConsoleBytesToSerial(bytes, sink: &sink)
+            }
+            expect(
+                sink.attemptedBytes == [65, 13, 67],
+                "later message did not retry UART output"
+            )
+        }
+    }
+
     private static func reconstructedBytes(
         _ log: KernelDebugLogBuffer
     ) -> [UInt8] {
@@ -158,5 +194,15 @@ struct KernelDebugLogRuntimeTests {
 
     private static func fail(_ message: StaticString) -> Never {
         fatalError("FAIL: \(message)")
+    }
+}
+
+private struct FailingConsoleSerialSink: KernelConsoleSerialByteSink {
+    var failingByte: UInt8?
+    private(set) var attemptedBytes: [UInt8] = []
+
+    mutating func writeConsoleByte(_ byte: UInt8) -> Bool {
+        attemptedBytes.append(byte)
+        return byte != failingByte
     }
 }

@@ -163,7 +163,15 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
         }
         console.write("SWIFTOS:SERIAL_ONLY\n")
         console.write("SWIFTOS:SWIFT_OK\n")
-        proveTimerInterrupts(console: console)
+        var timerProofService = RaspberryPi5TimerProofService(
+            hook: RaspberryPi5CooperativeRuntime.cooperativeServiceHook(
+                for: platform.kind
+            )
+        )
+        proveTimerInterruptsCooperatively(
+            console: console,
+            service: &timerProofService
+        )
         runScheduledOrPark(
             console: console,
             platform: platform,
@@ -794,7 +802,16 @@ private func runDesktopSession(
     console.write("SWIFTOS:FRAMEBUFFER_READY\n")
     console.write("SWIFTOS:SWIFT_OK\n")
 
-    proveTimerInterrupts(console: console)
+    switch platform.kind {
+    case .qemuVirt:
+        // QEMU smoke requires all three IRQ markers and remains fail-stop.
+        proveTimerInterrupts(console: console)
+    case .raspberryPi5:
+        proveTimerInterruptsCooperatively(
+            console: console,
+            service: &monitor
+        )
+    }
     // QEMU currently hands its SMP BSP to the preemptive EL0 scheduler. A
     // single-CPU monitor boot instead owns bounded VirtIO-input polling. Until
     // Pi service work has its own kernel thread, that board also stays in the
@@ -1168,6 +1185,81 @@ private func proveTimerInterrupts(console: EarlyConsole) {
         if reported < 3 { AArch64.waitForInterrupt() }
     }
     InterruptSubsystem.stopPhysicalTimer()
+}
+
+/// Pi debug/display traffic is polling-driven, so timer validation may not
+/// own the boot CPU indefinitely while GICv2 bring-up is still unverified.
+private protocol CooperativeTimerProofService {
+    mutating func serviceTimerProofWorkOnce()
+}
+
+extension KernelMonitor: CooperativeTimerProofService {
+    mutating func serviceTimerProofWorkOnce() {
+        serviceCooperativeWorkOnce()
+    }
+}
+
+private struct RaspberryPi5TimerProofService:
+    CooperativeTimerProofService {
+    let hook: KernelMonitorServiceHook?
+
+    mutating func serviceTimerProofWorkOnce() {
+        serviceKernelMonitorWorkOnce(hook)
+    }
+}
+
+private func proveTimerInterruptsCooperatively<
+    Service: CooperativeTimerProofService
+>(
+    console: EarlyConsole,
+    service: inout Service
+) {
+    let frequency = AArch64.counterFrequency
+    let period = frequency / 100
+    let startingInterruptCount = InterruptSubsystem.timerInterruptCount
+    guard frequency > 0,
+          period > 0,
+          var policy = CooperativeTimerProofPolicy(
+              startedAtTicks: AArch64.counterValue,
+              startingInterruptCount: startingInterruptCount,
+              timeoutTicks: frequency
+          ),
+          InterruptSubsystem.startPhysicalTimer(periodTicks: period)
+    else {
+        InterruptSubsystem.stopPhysicalTimer()
+        console.write("SWIFTOS:TIMER_DEFERRED\n")
+        return
+    }
+
+    console.write(InterruptSubsystem.timerInterruptMarker)
+    while true {
+        service.serviceTimerProofWorkOnce()
+        switch policy.poll(
+            counterTick: AArch64.counterValue,
+            deliveredInterruptCount:
+                InterruptSubsystem.timerInterruptCount
+        ) {
+        case .waiting:
+            AArch64.spinHint()
+        case .report(let interruptNumber):
+            switch interruptNumber {
+            case 1: console.write("SWIFTOS:TIMER_1\n")
+            case 2: console.write("SWIFTOS:TIMER_2\n")
+            default: console.write("SWIFTOS:TIMER_3\n")
+            }
+            if policy.isComplete {
+                InterruptSubsystem.stopPhysicalTimer()
+                return
+            }
+        case .complete:
+            InterruptSubsystem.stopPhysicalTimer()
+            return
+        case .timedOut:
+            InterruptSubsystem.stopPhysicalTimer()
+            console.write("SWIFTOS:TIMER_DEFERRED\n")
+            return
+        }
+    }
 }
 
 private func park() -> Never {
