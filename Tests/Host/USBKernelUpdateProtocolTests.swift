@@ -236,6 +236,18 @@ struct USBKernelUpdateProtocolTests {
             receiver: &receiver,
             sink: &sink
         )
+        acceptData(
+            Array(artifact.bytes[0..<456]),
+            offset: 0,
+            sequence: 1,
+            artifact: artifact,
+            receiver: &receiver,
+            sink: &sink
+        )
+        expect(sink.writeCount == 1,
+               "last accepted DATA replay rewrote staging")
+        expect(receiver.nextOffset == 456,
+               "last accepted DATA replay advanced the offset")
         let resumedAfterData = accept(beginBytes, into: &receiver, sink: &sink)
         expectAccepted(resumedAfterData, code: .progress, phase: .receiving)
         expect(receiver.status().nextOffset == 456,
@@ -371,6 +383,42 @@ struct USBKernelUpdateProtocolTests {
                "SHA mismatch did not discard staging")
         expect(!digestSink.didPublish,
                "SHA mismatch published staged bytes")
+
+        var replayReceiver = requireReceiver()
+        var replaySink = RecordingUpdateSink()
+        _ = accept(
+            encode(
+                .begin(begin),
+                transferID: artifact.transferID,
+                sequence: 0
+            ),
+            into: &replayReceiver,
+            sink: &replaySink
+        )
+        acceptData(
+            artifact.bytes,
+            offset: 0,
+            sequence: 1,
+            artifact: artifact,
+            receiver: &replayReceiver,
+            sink: &replaySink
+        )
+        var corruptedReplay = artifact.bytes
+        corruptedReplay[0] ^= 1
+        corruptedReplay.withUnsafeBytes { raw in
+            let result = acceptDecoded(
+                .data(USBKernelUpdateData(offset: 0, bytes: raw)),
+                transferID: artifact.transferID,
+                sequence: 1,
+                into: &replayReceiver,
+                sink: &replaySink
+            )
+            expectRejected(result, code: .checksumMismatch)
+        }
+        expect(replaySink.writeCount == 1,
+               "corrupt replay reached staging")
+        expect(replaySink.discardCount == 1,
+               "corrupt replay did not discard staging")
 
         var targetReceiver = requireReceiver()
         var targetSink = RecordingUpdateSink()

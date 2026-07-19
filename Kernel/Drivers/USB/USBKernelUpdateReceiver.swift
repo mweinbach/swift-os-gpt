@@ -47,6 +47,7 @@ enum USBKernelUpdateReceiverEvent: Equatable {
     case transferAccepted(USBKernelUpdateDescriptor)
     case transferResumed(nextOffset: UInt64)
     case chunkStaged(sequence: UInt32, nextOffset: UInt64)
+    case chunkReplayAcknowledged(sequence: UInt32, nextOffset: UInt64)
     case transferCommitted(USBKernelUpdateDescriptor)
     case transferAborted(reason: UInt32)
 }
@@ -67,6 +68,7 @@ enum USBKernelUpdateReceiverRejection: Equatable {
     case sequenceMismatch(expected: UInt32, actual: UInt32)
     case offsetMismatch(expected: UInt64, actual: UInt64)
     case chunkLengthMismatch(expected: UInt32, actual: Int)
+    case replayedChunkMismatch(sequence: UInt32)
     case incompleteTransfer(expected: UInt64, actual: UInt64)
     case commitMetadataMismatch
     case sha256Mismatch
@@ -100,6 +102,10 @@ struct USBKernelUpdateReceiver {
 
     private var activeBegin: USBKernelUpdateBegin?
     private var nextDataSequence: UInt32 = 1
+    private var lastAcceptedDataSequence: UInt32 = 0
+    private var lastAcceptedDataOffset: UInt64 = 0
+    private var lastAcceptedDataByteCount: UInt32 = 0
+    private var lastAcceptedDataSHA256: USBKernelUpdateSHA256Digest?
     private var sha256 = USBKernelUpdateSHA256()
     private var imageCRC32 = USBKernelUpdateCRC32()
     private var stagingIsLive = false
@@ -306,6 +312,34 @@ struct USBKernelUpdateReceiver {
                 detail: descriptor.transferID
             )
         }
+
+        if packet.sequence == lastAcceptedDataSequence,
+           packet.sequence != 0,
+           data.offset == lastAcceptedDataOffset,
+           data.bytes.count == Int(lastAcceptedDataByteCount) {
+            var replaySHA256 = USBKernelUpdateSHA256()
+            guard replaySHA256.update(data.bytes),
+                  replaySHA256.finalizedDigest() == lastAcceptedDataSHA256
+            else {
+                return fatalRejection(
+                    .replayedChunkMismatch(sequence: packet.sequence),
+                    code: .checksumMismatch,
+                    detail: packet.sequence,
+                    sink: &sink
+                )
+            }
+            // The original packet was already hashed and staged. Reply with
+            // the durable offset without writing or hashing it a second time.
+            lastStatusCode = .progress
+            lastDetail = nextDataSequence
+            return .accepted(
+                event: .chunkReplayAcknowledged(
+                    sequence: packet.sequence,
+                    nextOffset: nextOffset
+                ),
+                status: status()
+            )
+        }
         guard packet.sequence == nextDataSequence else {
             return fatalRejection(
                 .sequenceMismatch(
@@ -345,7 +379,8 @@ struct USBKernelUpdateReceiver {
         // Hash before handing the bytes to storage. Every representable update
         // is far below SHA-256's bit-length limit, so failure is unreachable
         // after the receiver's artifact bound has been enforced.
-        guard sha256.update(data.bytes) else {
+        var chunkSHA256 = USBKernelUpdateSHA256()
+        guard chunkSHA256.update(data.bytes), sha256.update(data.bytes) else {
             return fatalRejection(
                 .stagingWriteFailed,
                 code: .storageFailure,
@@ -369,6 +404,10 @@ struct USBKernelUpdateReceiver {
         }
 
         nextOffset += UInt64(expectedByteCount)
+        lastAcceptedDataSequence = packet.sequence
+        lastAcceptedDataOffset = data.offset
+        lastAcceptedDataByteCount = expectedByteCount
+        lastAcceptedDataSHA256 = chunkSHA256.finalizedDigest()
         nextDataSequence &+= 1
         lastStatusCode = .progress
         lastDetail = nextDataSequence
@@ -580,6 +619,10 @@ struct USBKernelUpdateReceiver {
         activeDescriptor = nil
         nextOffset = 0
         nextDataSequence = 1
+        lastAcceptedDataSequence = 0
+        lastAcceptedDataOffset = 0
+        lastAcceptedDataByteCount = 0
+        lastAcceptedDataSHA256 = nil
         sha256 = USBKernelUpdateSHA256()
         imageCRC32 = USBKernelUpdateCRC32()
         stagingIsLive = false
