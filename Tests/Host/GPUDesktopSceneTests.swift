@@ -34,6 +34,9 @@ struct GPUDesktopSceneTests {
               pass.format == .bgra8UNormSRGB,
               case .setScissor(.rectangle(let scissor)) = commands.command(at: 1),
               case .drawQuad(let topBar) = commands.command(at: 2),
+              case .drawQuad(let panel) = commands.command(at: 3),
+              case .drawQuad(let sidebar) = commands.command(at: 4),
+              case .drawQuad(let accent) = commands.command(at: 5),
               case .drawQuad(let dock) = commands.command(at: 6),
               case .endRenderPass = commands.command(at: 7)
         else {
@@ -50,7 +53,14 @@ struct GPUDesktopSceneTests {
         )
         expect(topBar.bounds.width == fixed(800), "top bar geometry")
         expect(dock.bounds.width == fixed(260), "dock geometry")
-        expect(!topBar.isRounded && !dock.isRounded, "unsupported rounding")
+        expect(!topBar.isRounded, "top bar unexpectedly rounded")
+        expect(
+            panel.cornerRadii.topLeft == fixed(24)
+                && sidebar.cornerRadii.topLeft == fixed(20)
+                && accent.cornerRadii.topLeft == fixed(16)
+                && dock.cornerRadii.topLeft == fixed(22),
+            "retained corner radii"
+        )
     }
 
     private static func selectsIntegerScale() {
@@ -71,7 +81,9 @@ struct GPUDesktopSceneTests {
         guard case .setScissor(.rectangle(let scissor)) =
                 frame.commandBuffer.command(at: 1),
               case .drawQuad(let topBar) =
-                frame.commandBuffer.command(at: 2)
+                frame.commandBuffer.command(at: 2),
+              case .drawQuad(let dock) =
+                frame.commandBuffer.command(at: 6)
         else {
             fatalError("4K retained command order")
         }
@@ -85,6 +97,10 @@ struct GPUDesktopSceneTests {
             "4K physical viewport"
         )
         expect(topBar.bounds.width == fixed(2_400), "4K scaled geometry")
+        expect(
+            dock.cornerRadii.topLeft == fixed(66),
+            "4K scaled corner radius"
+        )
     }
 
     private static func rejectsInvalidPhysicalExtents() {

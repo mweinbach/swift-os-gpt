@@ -87,6 +87,8 @@ def main() -> int:
         "encodeResourceInlineWrite",
         "b8g8r8a8SRGB",
         "unitQuadResourceID",
+        "roundedVertexShaderHandle",
+        "roundedFragmentShaderHandle",
         "mutating func render(",
     )
     missing = [token for token in required if token not in combined]

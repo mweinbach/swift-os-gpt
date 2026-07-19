@@ -97,6 +97,8 @@ struct VirtIOGPU3DSession {
     private static let depthStencilAlphaHandle: UInt32 = 0x105
     private static let copyBlendHandle: UInt32 = 0x106
     private static let sourceOverBlendHandle: UInt32 = 0x107
+    private static let roundedVertexShaderHandle: UInt32 = 0x108
+    private static let roundedFragmentShaderHandle: UInt32 = 0x109
 
     private static let minimumCommandArenaByteCount: UInt64 = 4096
     private static let maximumSubmitRequestByteCount: UInt64 =
@@ -848,6 +850,8 @@ struct VirtIOGPU3DSession {
         guard let handles = VirGLIRPipelineHandles(
                   vertexShader: Self.vertexShaderHandle,
                   fragmentShader: Self.fragmentShaderHandle,
+                  roundedVertexShader: Self.roundedVertexShaderHandle,
+                  roundedFragmentShader: Self.roundedFragmentShaderHandle,
                   vertexElements: Self.vertexElementsHandle,
                   rasterizer: Self.rasterizerHandle,
                   depthStencilAlpha: Self.depthStencilAlphaHandle,

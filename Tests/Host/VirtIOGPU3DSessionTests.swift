@@ -277,6 +277,8 @@ struct VirtIOMMIOTransport {
         let commandByteCount = requestByteCount - 32
         var offset: UInt32 = 0
         var surfaceCount = 0
+        var shaderCreateMask: UInt8 = 0
+        var shaderBindMask: UInt8 = 0
         var framebufferCount = 0
         var clearCount = 0
         var scissorCount = 0
@@ -285,6 +287,7 @@ struct VirtIOMMIOTransport {
         var vertexBufferCount = 0
         var drawCount = 0
         var inlineWriteCount = 0
+        var packetCount = 0
         while offset < commandByteCount {
             let packet = stream + UInt64(offset)
             let header = PhysicalBytes.readLE32(at: packet)
@@ -297,6 +300,7 @@ struct VirtIOMMIOTransport {
             }
             let command = UInt8(truncatingIfNeeded: header)
             let objectType = UInt8(truncatingIfNeeded: header >> 8)
+            packetCount += 1
             switch command {
             case 1 where objectType == 8:
                 surfaceCount += 1
@@ -305,6 +309,16 @@ struct VirtIOMMIOTransport {
                       PhysicalBytes.readLE32(at: packet + 12) == 100
                 else {
                     return false
+                }
+            case 1 where objectType == 4:
+                let handle = PhysicalBytes.readLE32(at: packet + 4)
+                let stage = PhysicalBytes.readLE32(at: packet + 8)
+                switch (handle, stage) {
+                case (0x101, 0): shaderCreateMask |= 1 << 0
+                case (0x102, 1): shaderCreateMask |= 1 << 1
+                case (0x108, 0): shaderCreateMask |= 1 << 2
+                case (0x109, 1): shaderCreateMask |= 1 << 3
+                default: return false
                 }
             case 5:
                 framebufferCount += 1
@@ -340,13 +354,26 @@ struct VirtIOMMIOTransport {
                             == UInt32(560) | (UInt32(240) << 16)
                         && maximum
                             == UInt32(1_360) | (UInt32(840) << 16))
+            case 31:
+                let handle = PhysicalBytes.readLE32(at: packet + 4)
+                let stage = PhysicalBytes.readLE32(at: packet + 8)
+                switch (handle, stage) {
+                case (0x101, 0): shaderBindMask |= 1 << 0
+                case (0x102, 1): shaderBindMask |= 1 << 1
+                case (0x108, 0): shaderBindMask |= 1 << 2
+                case (0x109, 1): shaderBindMask |= 1 << 3
+                default: return false
+                }
             default:
                 break
             }
             offset += packetByteCount
         }
         return offset == commandByteCount
+            && packetCount == 38
             && surfaceCount == 1
+            && shaderCreateMask == 0xf
+            && shaderBindMask == 0xf
             && framebufferCount == 1
             && clearCount == 1
             && scissorCount == 2

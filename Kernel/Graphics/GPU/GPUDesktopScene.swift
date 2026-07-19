@@ -85,6 +85,7 @@ enum GPUDesktopScene {
             color: .panel,
             frame: Rectangle(x: 72, y: 90, width: 656, height: 420),
             opacity: 240,
+            cornerRadius: 24,
             zOrder: 2,
             into: &tree
         ) {
@@ -95,6 +96,7 @@ enum GPUDesktopScene {
             color: .terminal,
             frame: Rectangle(x: 72, y: 90, width: 164, height: 420),
             opacity: 216,
+            cornerRadius: 20,
             zOrder: 3,
             into: &tree
         ) {
@@ -105,6 +107,7 @@ enum GPUDesktopScene {
             color: .cyan,
             frame: Rectangle(x: 260, y: 116, width: 438, height: 92),
             opacity: 240,
+            cornerRadius: 16,
             zOrder: 4,
             into: &tree
         ) {
@@ -115,6 +118,7 @@ enum GPUDesktopScene {
             color: .panel,
             frame: Rectangle(x: 270, y: 540, width: 260, height: 44),
             opacity: 208,
+            cornerRadius: 22,
             zOrder: 5,
             into: &tree
         ) {
@@ -170,6 +174,7 @@ enum GPUDesktopScene {
         color: PixelColor,
         frame: Rectangle,
         opacity: UInt8,
+        cornerRadius: Int = 0,
         zOrder: Int32,
         into tree: inout RetainedLayerTree
     ) -> GPUDesktopSceneRejection? {
@@ -179,7 +184,7 @@ enum GPUDesktopScene {
                   content: .solidColor(color),
                   frame: frame,
                   opacity: opacity,
-                  cornerRadius: 0,
+                  cornerRadius: cornerRadius,
                   zOrder: zOrder
               )
         else {
