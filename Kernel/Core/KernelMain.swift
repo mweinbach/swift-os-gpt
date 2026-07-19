@@ -170,6 +170,7 @@ private func runRaspberryPiUSBDesktop(
         console.write("SWIFTOS:PANIC:USB_DISPLAY_MEMORY\n")
         park()
     }
+    console.write("SWIFTOS:GRAPHICS_DIAGNOSTIC\n")
     console.write("SWIFTOS:USB_DISPLAY_SURFACE\n")
     runDesktopSession(
         console: console,

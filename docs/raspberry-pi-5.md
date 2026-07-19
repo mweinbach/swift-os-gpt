@@ -57,8 +57,9 @@ additionally normalize allocation order, timestamps, and volume ID.
 publish an enabled `brcm,bcm2835-usb` node, which shared platform discovery
 translates through its parent `ranges` into a controller-neutral DWC2 MMIO
 resource. If `dr_mode` is present, SwiftOS accepts only `peripheral`; QEMU does
-not publish this resource. This boundary does not yet program DWC2 registers,
-enumerate on a host, or carry display frames.
+not publish this resource. SwiftOS retains that mapping, powers the USB domain
+through the discovered firmware mailbox, and binds the same board-neutral DWC2
+device controller used by host tests. Physical enumeration remains unverified.
 
 Build and statically inspect the Pi image with:
 
@@ -184,6 +185,52 @@ still depends on firmware leaving the dedicated debug UART operational. RP1
 UART/PCIe preservation is deliberately disabled: the bootstrap and final tables
 do not map the RP1 aperture, and SwiftOS does not yet own or quiesce RP1/PCIe DMA.
 
+## USB-C diagnostic display
+
+USB-C is a post-boot debug transport, not the early console and not a
+DisplayPort signal. After final mappings are installed, SwiftOS:
+
+1. uses the discovered `brcm,bcm2835-mbox` aperture and property channel 8 to
+   power legacy firmware USB device ID 3 with a bounded wait;
+2. validates the DWC2 identity, device-mode endpoint/FIFO capabilities, UTMI
+   PHY width, and dynamic FIFO plan before attaching to the host;
+3. initializes the core in polled PIO device mode and enumerates one composite
+   CDC ACM plus vendor-debug configuration; and
+4. streams versioned, sequenced, CRC-protected full frames and damage updates
+   over CDC data endpoint 2 only while the host has asserted DTR.
+
+The DT power-domain index for USB is 6, but Raspberry Pi's own power-domain
+driver deliberately maps that logical domain to the legacy `SET_POWER_STATE`
+USB device ID 3. SwiftOS follows the same split instead of treating those two
+number spaces as interchangeable.
+
+The source surface is the same completed diagnostic scanout presented over
+HDMI simplefb. If firmware supplies no supported simple framebuffer, the kernel
+creates an 800 x 600 XRGB surface and keeps the Pi in its monitor loop so polled
+USB and animation continue to advance. Both Pi routes currently use the
+diagnostic CPU compositor; USB transport does not make them V3D-rendered.
+
+On macOS, build and launch the repository's host-only AppKit viewer:
+
+```sh
+make usb-display-viewer
+.build/swiftos-usb-display --list
+.build/swiftos-usb-display
+```
+
+The viewer waits for `/dev/cu.usbmodem*`, pulses DTR on each open, validates the
+SDDP session/mode/frame stream, and presents at the guest's reported resolution,
+scale, PPI, and refresh metadata. Unknown Pi simplefb PPI and refresh remain
+unknown rather than being invented. AppKit, Foundation, Dispatch, and Darwin
+remain confined to `tools/USBDisplay`; none link into the boot artifact.
+
+Expected UART markers are `SWIFTOS:USB_POWER_READY`,
+`SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, and
+`SWIFTOS:USB_DEBUG_FRAME`. Early boot failures before attachment remain visible
+only on UART10. The host-test suite covers descriptors, control transactions,
+reset/reconnect, DTR restart, frame chunking, CRC, damage assembly, and viewer
+bounds, but no physical Pi has passed this sequence yet.
+
 ## Interrupt controller and timer
 
 BCM2712's DT describes an `arm,gic-400` GICv2, while the QEMU reference board
@@ -297,8 +344,9 @@ production invariant. A bounded PSF2 loader and diagnostic glyph rasterizer are
 host-tested, but the Pi path has no packaged font asset, native GPU glyph atlas,
 GPU upload/sampling path, or live font selection. QEMU's fixed VirGL mask atlas
 does not constitute Pi support. When no supported diagnostic framebuffer is
-present, current boot remains serial-only. Physical execution and HDMI output
-remain unverified.
+present, the Pi can render the same diagnostic desktop into its kernel-owned
+USB surface; if USB activation also fails, current boot remains serial-only.
+Physical execution, USB enumeration, and HDMI output remain unverified.
 
 ## Hardware validation gate
 
@@ -325,6 +373,11 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 - HDMI capture shows the diagnostic Swift-rendered desktop at the firmware-
   selected mode; the captured mode, reported refresh, display EDID, viewport
   scale, and visible letterbox bounds are retained with the boot evidence.
+- With and without HDMI attached, the log reaches `SWIFTOS:USB_POWER_READY`,
+  `SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, and
+  `SWIFTOS:USB_DEBUG_FRAME`; macOS reports VID `0x1209`, PID `0x5a17`, and a
+  `/dev/cu.usbmodem*` node, while the viewer validates hello, mode, full-frame,
+  CRC, damage, DTR-close, and DTR-reopen behavior.
 - At least three power-cycle boots and three warm resets produce the same staged
   serial protocol.
 - ELF inspection confirms AArch64, no Darwin load commands or framework symbols,
@@ -346,6 +399,8 @@ physical dimensions/PPI, and captured output at the selected native mode.
 - [Linux simple-framebuffer Device Tree binding](https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/display/simple-framebuffer.yaml)
 - [Raspberry Pi mailbox property interface](https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface)
 - [Raspberry Pi mailbox register interface](https://github.com/raspberrypi/firmware/wiki/Mailboxes)
+- [Raspberry Pi Linux power-domain mapping](https://github.com/raspberrypi/linux/blob/rpi-6.12.y/drivers/pmdomain/bcm/raspberrypi-power.c)
+- [DWC2 Device Tree binding](https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/usb/dwc2.yaml)
 - [Raspberry Pi boot files, Device Tree, and UART documentation](https://www.raspberrypi.com/documentation/computers/configuration.html)
 - [Raspberry Pi 5 hardware documentation](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#raspberry-pi-5)
 - [Raspberry Pi BCM2712 documentation](https://www.raspberrypi.com/documentation/computers/processors.html#bcm2712)

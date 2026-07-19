@@ -205,8 +205,16 @@ The same diagnostic renderer and terminal used by both QEMU backends draw
 through a shared logical canvas. Its integer viewport centers and letterboxes
 the 800 x 600 desktop on larger modes, while the Pi presenter cleans damaged
 cache ranges before firmware scanout reads them. Unsupported firmware pixel
-formats remain reserved rather than being returned to the allocator, and the
-kernel falls back to serial-only operation.
+formats remain reserved rather than being returned to the allocator.
+
+The Pi image also contains a board-neutral, bounded DWC2 device-mode stack. It
+powers the USB domain through the discovered firmware property mailbox,
+enumerates a CDC ACM plus vendor-debug composite device, and carries a versioned
+full-frame/damage stream to the macOS viewer over USB-C. The same completed
+simplefb surface is mirrored when HDMI exists; otherwise the kernel owns an
+800 x 600 headless diagnostic surface and remains in the monitor loop so the
+polled controller progresses. This code and the viewer are host-tested, but
+physical USB enumeration remains unverified.
 
 This is a diagnostic firmware-configured scanout handoff, not a production
 graphics path, a native BCM2712 HVS/HDMI modesetting driver, or V3D VII
@@ -224,7 +232,8 @@ GPU text support. None of this path has executed on physical Pi hardware yet.
 - an executable loader, process creation/destruction, demand paging, copy-on-
   write, signals, or a stable user system library and syscall ABI;
 - persistent block storage, VFS, filesystem, permissions, or recovery;
-- virtio/RP1 keyboard, pointer, block, entropy, USB, and network drivers;
+- virtio/RP1 keyboard, pointer, block, entropy, USB host/input, and network
+  drivers;
 - hardware execution and captured-pixel validation of the VirtIO/VirGL path,
   sustained frame-scheduler/graphics-worker integration, native BCM2712 V3D VII
   MMU/command submission, HVS display lists and IOMMU integration,
@@ -251,10 +260,12 @@ UART10 at `0x107d001000`, the GICv2 distributor/CPU-interface resources, PSCI
 and unpatched source-DTB contract. The package carries the official pinned
 `dwc2.dtbo`, applies it in peripheral mode, and records its hash. Platform
 discovery host-tests the translated DWC2 MMIO resource and keeps QEMU free of
-that Pi-only contract; no USB controller or display transport is operational
-yet. The kernel also contains a host-tested driver
-for the runtime-patched firmware simple framebuffer and mailbox resources. No
-physical Raspberry Pi 5 boot, UART, GICv2 timer delivery, PSCI startup,
+that Pi-only contract. The kernel retains the DWC2 and mailbox mappings, powers
+the USB domain, initializes the controller in polled PIO device mode, and can
+export the completed diagnostic desktop through the host-tested CDC/SDDP path.
+The kernel also contains a host-tested driver for the runtime-patched firmware
+simple framebuffer and a headless USB surface fallback. No physical Raspberry
+Pi 5 boot, UART, USB enumeration/frame, GICv2 timer delivery, PSCI startup,
 firmware-patched 8 GB allocator exercise, HDMI frame, input, or GUI path has
 been verified.
 

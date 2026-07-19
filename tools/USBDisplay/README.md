@@ -52,8 +52,11 @@ a Pi nor a window server.
 - Both supported little-endian `B8G8R8X8` and `B8G8R8A8` modes map directly to a
   Core Graphics image without changing guest pixels.
 
-This is an observation path for GPU-produced frames. It does not introduce a
-CPU renderer into the guest.
+This is an observation path for completed guest frames; it does not choose or
+replace the guest renderer. The current Pi simplefb and headless surfaces are
+explicit diagnostic CPU-rendered modes. A future V3D backend can export its
+completed CPU-visible presentation surface through the same protocol without
+changing the viewer.
 
 ## Pi 5 connection check
 
@@ -63,9 +66,17 @@ CPU renderer into the guest.
    a Mac port is not guaranteed to supply the Pi 5's peak requirement.
 3. Confirm macOS enumeration with `--list`. The viewer can be launched before
    the Pi and will wait through re-enumeration.
-4. Keep the serial log available during first hardware bring-up. A tty entry
-   proves USB enumeration, while the first displayed frame also proves CDC data,
-   wire framing, semantic negotiation, and framebuffer export.
+4. Keep UART10 available during first hardware bring-up. USB cannot report
+   failures that occur before the controller attaches. A tty entry proves USB
+   enumeration, while the first displayed frame also proves CDC data, wire
+   framing, semantic negotiation, and framebuffer export.
+
+The expected UART sequence is `SWIFTOS:USB_POWER_READY`,
+`SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, then
+`SWIFTOS:USB_DEBUG_FRAME`. Configuration follows host enumeration; the frame
+marker requires the macOS viewer to open the tty and assert DTR.
+`SWIFTOS:GRAPHICS_DIAGNOSTIC` identifies the current Pi renderer honestly; it is
+not a native V3D/HVS/HDMI acceleration marker.
 
 The viewer and guest path are covered by host tests and build inspection. They
 must not be described as Pi-hardware-verified until this checklist succeeds on

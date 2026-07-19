@@ -174,9 +174,14 @@ first probes the pinned firmware DTB for the exact UART10, GICv2, PSCI, CPU, and
 ATF-reservation contract, then adds it and the official `dwc2.dtbo` from that
 same revision with byte hashes. The packaged `config.txt` enables DWC2
 peripheral mode for USB-C debugging and asks Pi firmware to select an HDMI mode
-from EDID and retain a 32-bit boot framebuffer. The kernel discovers the
-translated DWC2 register resource, but controller operation is not yet a
-hardware-verified transport. Neither target executes the image on a Pi.
+from EDID and retain a 32-bit boot framebuffer. The kernel discovers and maps
+the translated DWC2 and firmware-mailbox resources, powers the USB domain,
+initializes DWC2 in bounded polled device mode, and exposes a CDC ACM diagnostic
+display stream. It can mirror a firmware framebuffer or use a kernel-owned
+800 x 600 surface when HDMI is absent. Build and run the macOS receiver with
+`make usb-display-viewer` and `.build/swiftos-usb-display`; see the
+[USB display viewer](tools/USBDisplay/README.md). This path is host-tested but
+has not enumerated on a physical Pi, so it is not a hardware-support claim.
 
 ## Honest status
 
@@ -195,9 +200,13 @@ publish online state and park. There is no loader, VFS, persistent storage,
 graphical input, user compositor/window protocol, or stable application ABI.
 Physical Raspberry Pi 5 execution remains unverified. The Pi path currently
 consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
-modesetting or V3D VII rendering. The QEMU session builds and uploads a fixed
-built-in 5 x 7 ASCII mask atlas for its `SWIFTOS` boot label, but there is no
-PSF2 asset loader, shaping/layout stack, dynamic atlas, or Pi GPU font path. The
-retained scene and diagnostic compositor remain kernel-side bootstrap
-infrastructure, not an EL0 window system. Each milestone must leave behind a
-repeatable boot or unit test rather than a mock UI.
+modesetting or V3D VII rendering. It can also export that completed diagnostic
+surface, or a headless kernel-owned surface, over its USB-C device controller to
+the host viewer. USB-C carries a versioned pixel stream here, not DisplayPort,
+and the current Pi pixels are still produced by the diagnostic CPU compositor.
+The QEMU session builds and uploads a fixed built-in 5 x 7 ASCII mask atlas for
+its `SWIFTOS` boot label, but there is no PSF2 asset loader, shaping/layout
+stack, dynamic atlas, or Pi GPU font path. The retained scene and diagnostic
+compositor remain kernel-side bootstrap infrastructure, not an EL0 window
+system. Each milestone must leave behind a repeatable boot or unit test rather
+than a mock UI.
