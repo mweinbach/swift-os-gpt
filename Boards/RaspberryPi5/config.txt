@@ -10,6 +10,11 @@ device_tree=bcm2712-rpi-5-b.dtb
 device_tree_address=0x03000000
 device_tree_end=0x03200000
 
+# RP1 is attached through the Pi 5's internal PCIe x4 controller. SwiftOS does
+# not yet enumerate/configure that root complex, so retain the BAR/range setup
+# established by the bootloader instead of resetting it before kernel entry.
+pciex4_reset=0
+
 # Route the USB-C data pair to the SoC DWC2 controller in device mode. This is
 # the physical debug transport; endpoint protocol and controller setup remain
 # SwiftOS driver responsibilities.

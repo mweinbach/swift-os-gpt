@@ -32,10 +32,43 @@ enum RP1GEMNetworkRuntime {
     private nonisolated(unsafe) static var faulted = false
     private nonisolated(unsafe) static var console: EarlyConsole?
     private nonisolated(unsafe) static var reportedConfiguration = false
+    private nonisolated(unsafe) static var pendingPlatform: Platform?
+    private nonisolated(unsafe) static var deferredActivation:
+        RP1GEMDeferredActivationGate?
+
+    /// Records physical-network work for the cooperative monitor loop. No RP1
+    /// MMIO is touched here, so HDMI presentation, USB gadget initialization,
+    /// and the serial READY marker all precede potentially blocking PHY work.
+    static func scheduleActivation(
+        console: EarlyConsole,
+        platform: Platform
+    ) {
+        guard case .raspberryPi5 = platform.kind,
+              activeService == nil,
+              pendingPlatform == nil,
+              deferredActivation == nil,
+              !faulted
+        else {
+            return
+        }
+        let frequency = AArch64.counterFrequency
+        guard let gate = RP1GEMDeferredActivationPolicy.makeGate(
+                  counterFrequency: frequency
+              )
+        else {
+            console.write("SWIFTOS:RP1_NET_DEFER_INVALID\n")
+            return
+        }
+
+        self.console = console
+        pendingPlatform = platform
+        deferredActivation = gate
+        console.write("SWIFTOS:RP1_NET_DEFERRED\n")
+    }
 
     /// Binds RP1 GEM to the same polling IPv4 service used by QEMU. Every
     /// address comes from linker ownership plus the live boot FDT.
-    static func activate(console: EarlyConsole, platform: Platform) {
+    private static func activate(console: EarlyConsole, platform: Platform) {
         guard activeService == nil, !faulted else { return }
         guard let description = platform.networkDeviceCandidate(at: 0),
               description.controller == .rp1GEM,
@@ -205,7 +238,7 @@ enum RP1GEMNetworkRuntime {
         for board: BoardKind
     ) -> KernelMonitorServiceHook? {
         guard case .raspberryPi5 = board,
-              activeService != nil,
+              activeService != nil || deferredActivation != nil,
               !faulted
         else {
             return nil
@@ -214,6 +247,25 @@ enum RP1GEMNetworkRuntime {
     }
 
     static func serviceOnce() {
+        if var gate = deferredActivation {
+            guard gate.poll(nowTicks: AArch64.counterValue) else {
+                deferredActivation = gate
+                return
+            }
+            deferredActivation = nil
+            guard let platform = pendingPlatform,
+                  let console = self.console
+            else {
+                pendingPlatform = nil
+                faulted = true
+                return
+            }
+            pendingPlatform = nil
+            console.write("SWIFTOS:RP1_NET_STARTING\n")
+            activate(console: console, platform: platform)
+            return
+        }
+
         guard var service = activeService else { return }
         let event = service.poll(nowTicks: AArch64.counterValue)
         if let pollingFault = NetworkBootCoordinator.pollingFault(

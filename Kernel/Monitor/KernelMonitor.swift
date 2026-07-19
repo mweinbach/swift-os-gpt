@@ -86,8 +86,12 @@ struct KernelMonitor {
 
     mutating func run() -> Never {
         while true {
-            serviceKernelMonitorWorkOnce(cooperativeServiceHook)
+            // Give the externally observable USB transport the first service
+            // opportunity on every pass. A deferred board task may still use
+            // bounded polling, so servicing USB immediately beforehand keeps
+            // the final enumeration/status exchange deterministic.
             serviceUSBDebug()
+            serviceKernelMonitorWorkOnce(cooperativeServiceHook)
             guard let animationResult = statusIndicator?.renderIfDue(
                       counterTick: AArch64.counterValue,
                       on: canvas

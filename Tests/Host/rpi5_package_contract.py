@@ -101,6 +101,8 @@ def validate_successful_package(
             "config does not pin the DTB above the restart destination")
     require("device_tree_end=0x03200000\n" in config,
             "config does not bound the pinned DTB window")
+    require("pciex4_reset=0\n" in config,
+            "config does not retain bootloader RP1 PCIe configuration")
     manifest = (output / "BOOT-MANIFEST.txt").read_text()
     require("overlays/dwc2.dtbo" in manifest,
             "human-readable manifest omits the DWC2 overlay")

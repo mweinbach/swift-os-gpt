@@ -132,7 +132,10 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             memory: memory
         )
     case .raspberryPi5:
-        RP1GEMNetworkRuntime.activate(console: console, platform: platform)
+        RP1GEMNetworkRuntime.scheduleActivation(
+            console: console,
+            platform: platform
+        )
         if let display = drivers.display {
             console.write(SimpleFramebufferDisplayDriver.readyMarker)
             runPlatformDesktop(
