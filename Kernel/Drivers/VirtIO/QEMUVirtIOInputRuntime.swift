@@ -348,6 +348,7 @@ enum QEMUVirtIOInputRuntime {
             switch queue.dequeue() {
             case .event(let queued):
                 observeCanonicalEvent(queued.event)
+                _ = SynchronousInputEventDispatcher.dispatch(queued.event)
                 dequeued += 1
             case .corruptRecordDiscarded:
                 runtimeConsole.write("SWIFTOS:VIRTIO_INPUT_QUEUE_CORRUPT\n")
