@@ -365,6 +365,18 @@ sdbg-protocol-host-test: | $(BUILD_DIR)
 		Tests/Host/SDBGProtocolTests.swift \
 		-o $(BUILD_DIR)/sdbg-protocol-host-tests
 	$(BUILD_DIR)/sdbg-protocol-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Debug/BootIdentity.swift \
+		Kernel/Debug/DebugStatusSnapshot.swift \
+		Kernel/Debug/KernelLogRing.swift \
+		Kernel/Debug/SDBGProtocol.swift \
+		Kernel/Debug/SDBGStreamDecoder.swift \
+		Kernel/Debug/SDBGTypedPayload.swift \
+		Kernel/Debug/SDBGService.swift \
+		Tests/Host/SDBGServiceTests.swift \
+		-o $(BUILD_DIR)/sdbg-service-host-tests
+	$(BUILD_DIR)/sdbg-service-host-tests
 
 host-test: debug-observability-host-test sdbg-protocol-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
