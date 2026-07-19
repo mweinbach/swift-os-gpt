@@ -444,6 +444,7 @@ private func runDesktopSession(
     let usbDebug = activateUSBDebugGadget(
         console: console,
         platform: platform,
+        memory: memory,
         scanout: scanout,
         viewport: viewport,
         kernelUpdateStaging: kernelUpdateStaging
@@ -494,6 +495,7 @@ private func runDesktopSession(
 private func activateUSBDebugGadget(
     console: EarlyConsole,
     platform: Platform,
+    memory: KernelMemoryActivation,
     scanout: ScanoutBuffer,
     viewport: DisplayViewport,
     kernelUpdateStaging: KernelUpdateStagingLayout?
@@ -514,7 +516,23 @@ private func activateUSBDebugGadget(
     else {
         return nil
     }
-    let sessionID = AArch64.counterValue | 1
+    guard platform.processorCount > 0,
+          platform.processorCount <= Int(UInt16.max),
+          memory.usablePageCount
+            <= UInt64.max / MemoryPageGeometry.pageSize,
+          let bootIdentity = KernelBootIdentityRuntime.create(
+              deviceTreeAddress: platform.deviceTreeAddress,
+              machineDiscriminator: UInt64(platform.kind.rawValue) + 1
+          ), let kernelDescription = USBDebugKernelDescription(
+              bootIdentity: bootIdentity,
+              configuredProcessorCount: UInt16(platform.processorCount),
+              managedMemoryByteCount: memory.usablePageCount
+                  * MemoryPageGeometry.pageSize
+          )
+    else {
+        console.write("SWIFTOS:USB_DEBUG_IDENTITY_INVALID\n")
+        return nil
+    }
     let updateStagingRegion: USBKernelUpdateRAMStagingRegion?
     if let kernelUpdateStaging {
         guard let region = USBKernelUpdateRAMStagingRegion(
@@ -535,7 +553,7 @@ private func activateUSBDebugGadget(
               scratchByteCount: 4_096,
               scanout: scanout,
               viewportScale: UInt16(viewport.scale),
-              sessionID: sessionID,
+              kernelDescription: kernelDescription,
               updateTargetMachine: .raspberryPi5,
               updateStagingRegion: updateStagingRegion
           )

@@ -8,7 +8,7 @@ extension DWC2USBDebugGadget where Registers == DWC2MMIORegisterAccess {
         scratchByteCount: UInt64,
         scanout: ScanoutBuffer,
         viewportScale: UInt16,
-        sessionID: UInt64,
+        kernelDescription: USBDebugKernelDescription,
         updateTargetMachine: USBKernelUpdateTargetMachine = .raspberryPi5,
         updateStagingRegion: USBKernelUpdateRAMStagingRegion? = nil
     ) {
@@ -23,7 +23,7 @@ extension DWC2USBDebugGadget where Registers == DWC2MMIORegisterAccess {
             scratchByteCount: scratchByteCount,
             scanout: scanout,
             viewportScale: viewportScale,
-            sessionID: sessionID,
+            kernelDescription: kernelDescription,
             updateTargetMachine: updateTargetMachine,
             updateStagingRegion: updateStagingRegion
         )

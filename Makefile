@@ -55,7 +55,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test debug-observability-host-test sdbg-protocol-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -225,6 +225,14 @@ usb-debug-display-host-test: | $(BUILD_DIR)
 		Kernel/Drivers/USB/USBKernelUpdateProtocol.swift \
 		Kernel/Drivers/USB/USBKernelUpdateReceiver.swift \
 		Kernel/Drivers/USB/USBKernelUpdateStreamReceiver.swift \
+		Kernel/Debug/BootIdentity.swift \
+		Kernel/Debug/DebugStatusSnapshot.swift \
+		Kernel/Debug/KernelLogRing.swift \
+		Kernel/Debug/SDBGProtocol.swift \
+		Kernel/Debug/SDBGStreamDecoder.swift \
+		Kernel/Debug/SDBGTypedPayload.swift \
+		Kernel/Debug/SDBGService.swift \
+		Kernel/Debug/SDBGTransportSession.swift \
 		Kernel/Drivers/USB/DWC2USBDebugGadget.swift \
 		Tests/Host/DWC2USBDebugGadgetTests.swift \
 		-o $(BUILD_DIR)/dwc2-usb-debug-gadget-host-tests
@@ -315,6 +323,20 @@ swiftos-control-host-test: | $(BUILD_DIR)
 		Tests/Host/SwiftOSControlTests.swift \
 		-o $(BUILD_DIR)/swiftos-control-host-tests
 	$(BUILD_DIR)/swiftos-control-host-tests
+	$(MACOS_SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Debug/BootIdentity.swift \
+		Kernel/Debug/DebugStatusSnapshot.swift \
+		Kernel/Debug/KernelLogRing.swift \
+		Kernel/Debug/SDBGProtocol.swift \
+		Kernel/Debug/SDBGStreamDecoder.swift \
+		Kernel/Debug/SDBGTypedPayload.swift \
+		Kernel/Debug/SDBGService.swift \
+		tools/SwiftOSControl/SDBGHostTypedPayload.swift \
+		tools/SwiftOSControl/SDBGHostStreamClient.swift \
+		Tests/Host/SDBGHostClientTests.swift \
+		-o $(BUILD_DIR)/swiftos-sdbg-host-client-tests
+	$(BUILD_DIR)/swiftos-sdbg-host-client-tests
 
 $(SWIFTOS_CONTROL): \
 		tools/SwiftOSControl/SwiftOSDiscovery.swift \
@@ -384,8 +406,35 @@ sdbg-protocol-host-test: | $(BUILD_DIR)
 		Tests/Host/SDBGServiceTests.swift \
 		-o $(BUILD_DIR)/sdbg-service-host-tests
 	$(BUILD_DIR)/sdbg-service-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Debug/BootIdentity.swift \
+		Kernel/Debug/DebugStatusSnapshot.swift \
+		Kernel/Debug/KernelLogRing.swift \
+		Kernel/Debug/SDBGProtocol.swift \
+		Kernel/Debug/SDBGStreamDecoder.swift \
+		Kernel/Debug/SDBGTypedPayload.swift \
+		Kernel/Debug/SDBGService.swift \
+		Kernel/Debug/SDBGTransportSession.swift \
+		Tests/Host/SDBGTransportSessionTests.swift \
+		-o $(BUILD_DIR)/sdbg-transport-session-host-tests
+	$(BUILD_DIR)/sdbg-transport-session-host-tests
 
-host-test: debug-observability-host-test sdbg-protocol-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-update-host-test swiftos-control-host-test
+network-wire-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Networking/NetworkWire.swift \
+		Kernel/Networking/EthernetII.swift \
+		Kernel/Networking/ARP.swift \
+		Kernel/Networking/IPv4.swift \
+		Kernel/Networking/UDP.swift \
+		Kernel/Networking/ICMPEcho.swift \
+		Tests/Host/NetworkWireCodecTests.swift \
+		-o $(BUILD_DIR)/network-wire-codec-host-tests
+	$(BUILD_DIR)/network-wire-codec-host-tests
+
+host-test: debug-observability-host-test sdbg-protocol-host-test network-wire-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \

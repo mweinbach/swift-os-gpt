@@ -62,6 +62,15 @@ enum KernelMemoryRuntime {
             && activeTables != nil
     }
 
+    /// Lock-coherent free-page count for diagnostics and admission policy.
+    /// The optional is nil until physical memory ownership is activated.
+    static var freePageCount: UInt64? {
+        let interruptState = lockAllocator()
+        let count = ownedClassifiedPageAllocator?.totalFreePageCount
+        unlockAllocator(restoring: interruptState)
+        return count
+    }
+
     static func activate(
         platform: Platform,
         console: EarlyConsole,

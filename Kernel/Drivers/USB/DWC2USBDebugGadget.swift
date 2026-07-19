@@ -18,6 +18,28 @@ enum USBDebugGadgetEvent: Equatable {
     case faulted
 }
 
+/// Immutable, board-neutral state needed by the USB diagnostic service. Live
+/// link, log, and allocator state is sampled by the gadget when it answers a
+/// request; this value only anchors the exact boot and machine-wide capacities.
+struct USBDebugKernelDescription: Equatable {
+    let bootIdentity: KernelBootIdentity
+    let configuredProcessorCount: UInt16
+    let managedMemoryByteCount: UInt64
+
+    init?(
+        bootIdentity: KernelBootIdentity,
+        configuredProcessorCount: UInt16,
+        managedMemoryByteCount: UInt64
+    ) {
+        guard configuredProcessorCount > 0,
+              managedMemoryByteCount > 0
+        else { return nil }
+        self.bootIdentity = bootIdentity
+        self.configuredProcessorCount = configuredProcessorCount
+        self.managedMemoryByteCount = managedMemoryByteCount
+    }
+}
+
 private enum DWC2USBDebugScratchLayout {
     static let endpointZeroMaximumPacketByteCount: UInt16 = 64
     static let controlReplyOffset = 0
@@ -38,8 +60,11 @@ private enum DWC2USBDebugScratchLayout {
     static let updateStatusByteCount =
         USBKernelUpdateProtocol.headerByteCount
             + USBKernelUpdateProtocol.statusPayloadByteCount
-    static let requiredByteCount = updateStatusOffset
-        + updateStatusByteCount
+    static let sdbgReceiveOffset = updateStatusOffset + updateStatusByteCount
+    static let sdbgReceiveByteCount = 512
+    static let sdbgTransmitOffset = sdbgReceiveOffset + sdbgReceiveByteCount
+    static let sdbgTransmitByteCount = 512
+    static let requiredByteCount = sdbgTransmitOffset + sdbgTransmitByteCount
 }
 
 private enum EndpointZeroInQueueResult {
@@ -78,12 +103,25 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         case none
         case display
         case updateStatus
+        case sdbg
+    }
+
+    /// CDC is one ordered stream. A host selects SUPD or SDBG with the first
+    /// valid wire magic after opening the port and reopens it to switch. This
+    /// prevents one protocol's payload from being misidentified as another.
+    private enum EndpointTwoInboundProtocol: UInt8 {
+        case undecided
+        case kernelUpdate
+        case sdbg
     }
 
     private var controller: DWC2Controller<Registers>
     private var controlEndpoint = USBControlEndpoint(speed: .full)
     private var displayTransmitter: USBDebugDisplayTransmitter
     private var updateReceiver: USBKernelUpdateStreamReceiver?
+    private var sdbgSession: SDBGTransportSession
+    private let kernelDescription: USBDebugKernelDescription
+    private let displayMode: DisplayMode
     private let scratchBaseAddress: UInt
     private var endpointZeroTransaction: EndpointZeroTransaction = .idle
     private var endpointZeroRequestedByteCount: UInt16 = 0
@@ -99,6 +137,13 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     private var displaySessionResetPending = false
     private var endpointTwoInFlight: EndpointTwoInFlight = .none
     private var endpointTwoOutNeedsRearm = false
+    private var endpointTwoProtocolResetPending = false
+    private var endpointTwoInboundProtocol:
+        EndpointTwoInboundProtocol = .undecided
+    private var endpointTwoInboundMagic: UInt32 = 0
+    private var endpointTwoInboundMagicByteCount = 0
+    private var sdbgInFlightByteCount = 0
+    private var sdbgSnapshotSequence: UInt64 = 1
     private var updateStatusPending = false
     private var updateStatusByteCount = 0
     private var updateStatusCommittedArtifact:
@@ -111,7 +156,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         scratchByteCount: UInt64,
         scanout: ScanoutBuffer,
         viewportScale: UInt16,
-        sessionID: UInt64,
+        kernelDescription: USBDebugKernelDescription,
         updateTargetMachine: USBKernelUpdateTargetMachine = .raspberryPi5,
         updateStagingRegion: USBKernelUpdateRAMStagingRegion? = nil,
         maximumInitializationPollCount: Int = 100_000
@@ -125,6 +170,12 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         else {
             return nil
         }
+        let displaySessionIDCandidate =
+            kernelDescription.bootIdentity.sessionID.high
+                ^ kernelDescription.bootIdentity.sessionID.low
+        let displaySessionID = displaySessionIDCandidate == 0
+            ? 1
+            : displaySessionIDCandidate
         var controller = DWC2Controller(registers: registers)
         guard case .ready = controller.initialize(
                   maximumPollCount: maximumInitializationPollCount
@@ -135,7 +186,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                   mode: scanout.mode,
                   bytesPerRow: scanout.bytesPerRow,
                   scaleNumerator: viewportScale,
-                  sessionID: sessionID,
+                  sessionID: displaySessionID,
                   // Endpoint 2 has a 128-word FIFO. Header + chunk prefix +
                   // data must fit in one 512-byte high-speed bulk transfer.
                   maximumChunkDataByteCount: 456
@@ -161,9 +212,29 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         } else {
             updateReceiver = nil
         }
+        guard let limits = SDBGServiceLimits(
+                  maximumRequestPayloadByteCount: 472,
+                  maximumResponsePayloadByteCount: 472,
+                  maximumLogEntriesPerResponse: 8
+              ), let sdbgSession = SDBGTransportSession(
+                  bootIdentity: kernelDescription.bootIdentity,
+                  service: SDBGService(limits: limits),
+                  receiveStorageBaseAddress: UInt(scratchBaseAddress)
+                      + UInt(DWC2USBDebugScratchLayout.sdbgReceiveOffset),
+                  receiveStorageByteCount:
+                      DWC2USBDebugScratchLayout.sdbgReceiveByteCount,
+                  outboundStorageBaseAddress: UInt(scratchBaseAddress)
+                      + UInt(DWC2USBDebugScratchLayout.sdbgTransmitOffset),
+                  outboundStorageByteCount:
+                      DWC2USBDebugScratchLayout.sdbgTransmitByteCount
+              )
+        else { return nil }
         self.controller = controller
         displayTransmitter = transmitter
         self.updateReceiver = updateReceiver
+        self.sdbgSession = sdbgSession
+        self.kernelDescription = kernelDescription
+        displayMode = scanout.mode
         self.scratchBaseAddress = UInt(scratchBaseAddress)
     }
 
@@ -201,6 +272,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         endpointTwoInFlight = .none
         endpointTwoOutNeedsRearm = false
         clearPendingUpdateStatus()
+        resetEndpointTwoProtocolState()
         state = .attached
         return true
     }
@@ -220,7 +292,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             endpointTwoInFlight = .none
             endpointTwoOutNeedsRearm = false
             clearPendingUpdateStatus()
-            updateReceiver?.resetTransport()
+            resetEndpointTwoProtocolState()
             state = .attached
             controller.acknowledgeGlobalInterrupts(
                 snapshot.global & (
@@ -245,7 +317,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             endpointTwoInFlight = .none
             endpointTwoOutNeedsRearm = false
             clearPendingUpdateStatus()
-            updateReceiver?.resetTransport()
+            resetEndpointTwoProtocolState()
             state = .enumerated
             event = .enumerated(controller.busSpeed)
         }
@@ -341,6 +413,21 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                             return fail()
                         }
                     }
+                case .sdbg:
+                    endpointTwoInFlight = .none
+                    guard sdbgInFlightByteCount > 0 else {
+                        return fail()
+                    }
+                    switch sdbgSession.consumeOutboundBytes(
+                        sdbgInFlightByteCount
+                    ) {
+                    case .consumed(_, let remainingByteCount):
+                        guard remainingByteCount == 0 else { return fail() }
+                    case .invalidByteCount:
+                        return fail()
+                    }
+                    sdbgInFlightByteCount = 0
+                    guard stageNextSDBGResponse() else { return fail() }
                 }
             }
         }
@@ -361,6 +448,10 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         if displaySessionResetPending && endpointTwoInFlight != .display {
             displayTransmitter.resetSession(requestFullFrame: true)
             displaySessionResetPending = false
+        }
+        if endpointTwoProtocolResetPending,
+           endpointTwoInFlight == .none {
+            resetEndpointTwoProtocolState()
         }
 
         if state == .configured,
@@ -386,8 +477,33 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         }
 
         if state == .configured,
+           displayEndpointOpen,
+           endpointTwoInFlight == .none,
+           !updateStatusPending {
+            guard stageNextSDBGResponse() else { return fail() }
+            let bytes = sdbgSession.outboundBytes
+            if bytes.count > 0 {
+                let result = controller.queueInTransfer(
+                    endpoint: 2,
+                    bytes: bytes
+                )
+                switch result {
+                case .queued:
+                    endpointTwoInFlight = .sdbg
+                    sdbgInFlightByteCount = bytes.count
+                case .fifoBusy:
+                    break
+                case .invalidState, .invalidEndpoint,
+                     .invalidBuffer, .invalidTransferSize:
+                    return fail()
+                }
+            }
+        }
+
+        if state == .configured,
            endpointTwoInFlight == .none,
            !updateStatusPending,
+           sdbgSession.pendingOutboundByteCount == 0,
            endpointTwoOutNeedsRearm {
             guard controller.armOutTransfer(
                       endpoint: 2,
@@ -402,7 +518,8 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         if state == .configured,
            displayEndpointOpen,
            endpointTwoInFlight == .none,
-           !updateStatusPending {
+           !updateStatusPending,
+           sdbgSession.pendingOutboundByteCount == 0 {
             let packet = displayPacketBuffer
             let transmitResult = displayTransmitter.prepareNextPacket(
                 into: packet
@@ -497,25 +614,13 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             guard status.endpoint == 2 || status.endpoint == 3 else {
                 return fail()
             }
-            if status.endpoint == 2,
-               copiedByteCount > 0,
-               var receiver = updateReceiver {
+            if status.endpoint == 2, copiedByteCount > 0 {
                 let receive = receiveBuffer
                 let bytes = UnsafeRawBufferPointer(
                     start: receive.baseAddress,
                     count: Int(copiedByteCount)
                 )
-                let appendResult = receiver.append(bytes)
-                updateReceiver = receiver
-                switch appendResult {
-                case .appended:
-                    guard stageNextUpdateResponse() else { return fail() }
-                case .invalidInput, .capacityExceeded:
-                    // Treat transport overflow as lost framing, not a gadget
-                    // fault. The host can retry BEGIN and resume the staged
-                    // offset already sealed by prior STATUS acknowledgements.
-                    updateReceiver?.resetTransport()
-                }
+                guard routeEndpointTwoInbound(bytes) else { return fail() }
             }
             return USBDebugGadgetEvent.none
 
@@ -554,7 +659,10 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                 return fail()
             }
             if status.endpoint == 2,
-               updateStatusPending || endpointTwoInFlight == .updateStatus {
+               updateStatusPending
+                || endpointTwoInFlight == .updateStatus
+                || sdbgSession.pendingOutboundByteCount > 0
+                || endpointTwoInFlight == .sdbg {
                 endpointTwoOutNeedsRearm = true
                 return USBDebugGadgetEvent.none
             }
@@ -784,8 +892,15 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         guard let isOpen else { return }
         let wasOpen = displayEndpointOpen
         displayEndpointOpen = isOpen
-        if isOpen && !wasOpen {
-            displaySessionResetPending = true
+        if isOpen != wasOpen {
+            if endpointTwoInFlight == .none {
+                resetEndpointTwoProtocolState()
+            } else {
+                endpointTwoProtocolResetPending = true
+            }
+            if isOpen {
+                displaySessionResetPending = true
+            }
         }
     }
 
@@ -815,7 +930,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             endpointTwoInFlight = .none
             endpointTwoOutNeedsRearm = false
             clearPendingUpdateStatus()
-            updateReceiver?.resetTransport()
+            resetEndpointTwoProtocolState()
             state = .configured
             return .configured
         }
@@ -828,7 +943,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             endpointTwoInFlight = .none
             endpointTwoOutNeedsRearm = false
             clearPendingUpdateStatus()
-            updateReceiver?.resetTransport()
+            resetEndpointTwoProtocolState()
             state = .enumerated
             return .deconfigured
         }
@@ -858,6 +973,231 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         )
     }
 
+    private mutating func routeEndpointTwoInbound(
+        _ bytes: UnsafeRawBufferPointer
+    ) -> Bool {
+        guard bytes.count == 0 || bytes.baseAddress != nil else { return false }
+        var index = 0
+        while index < bytes.count {
+            switch endpointTwoInboundProtocol {
+            case .kernelUpdate, .sdbg:
+                guard let base = bytes.baseAddress else { return false }
+                return appendEndpointTwoInbound(
+                    UnsafeRawBufferPointer(
+                        start: base.advanced(by: index),
+                        count: bytes.count - index
+                    )
+                )
+
+            case .undecided:
+                endpointTwoInboundMagic |= UInt32(bytes[index])
+                    << UInt32(endpointTwoInboundMagicByteCount * 8)
+                endpointTwoInboundMagicByteCount += 1
+                index += 1
+                guard endpointTwoInboundMagicByteCount == 4 else { continue }
+
+                if endpointTwoInboundMagic == USBKernelUpdateProtocol.magic {
+                    endpointTwoInboundProtocol = .kernelUpdate
+                } else if endpointTwoInboundMagic == SDBGProtocol.magic {
+                    endpointTwoInboundProtocol = .sdbg
+                } else {
+                    // Retain the latest three bytes so magic split after
+                    // arbitrary line noise is still recognized.
+                    endpointTwoInboundMagic >>= 8
+                    endpointTwoInboundMagicByteCount = 3
+                    continue
+                }
+
+                var magic = endpointTwoInboundMagic
+                endpointTwoInboundMagic = 0
+                endpointTwoInboundMagicByteCount = 0
+                let acceptedMagic = withUnsafeBytes(of: &magic) { wire in
+                    appendEndpointTwoInbound(wire)
+                }
+                guard acceptedMagic else { return false }
+            }
+        }
+        return true
+    }
+
+    private mutating func appendEndpointTwoInbound(
+        _ bytes: UnsafeRawBufferPointer
+    ) -> Bool {
+        switch endpointTwoInboundProtocol {
+        case .undecided:
+            return false
+
+        case .kernelUpdate:
+            guard var receiver = updateReceiver else { return true }
+            let result = receiver.append(bytes)
+            updateReceiver = receiver
+            switch result {
+            case .appended:
+                return stageNextUpdateResponse()
+            case .invalidInput, .capacityExceeded:
+                // Lost framing is recoverable. The sealed staging offset is
+                // owned below the stream receiver and survives this reset.
+                resetEndpointTwoProtocolState()
+                return true
+            }
+
+        case .sdbg:
+            switch sdbgSession.receive(bytes) {
+            case .accepted:
+                return stageNextSDBGResponse()
+            case .wouldBlock, .rejected:
+                resetEndpointTwoProtocolState()
+                return true
+            }
+        }
+    }
+
+    private mutating func stageNextSDBGResponse() -> Bool {
+        guard sdbgSession.pendingOutboundByteCount == 0 else { return true }
+        guard let snapshot = makeSDBGServiceSnapshot() else { return false }
+
+        // One input transfer can contain leading noise and several frames.
+        // Bound recovery work per service pass while still reaching the first
+        // valid request without waiting for another USB interrupt.
+        var remainingSteps = 16
+        while remainingSteps > 0 {
+            remainingSteps -= 1
+            switch sdbgSession.pump(
+                snapshot: snapshot,
+                lookupLogEntry: { sequence in
+                    Self.retainedLogEntry(sequence: sequence)
+                }
+            ) {
+            case .outboundReady, .outboundBackpressured,
+                 .needsMoreBytes:
+                return true
+            case .discardedMalformedFrame, .discardedUnexpectedMessage:
+                continue
+            case .snapshotIdentityMismatch, .serviceRejected:
+                return false
+            }
+        }
+        return true
+    }
+
+    private mutating func makeSDBGServiceSnapshot()
+        -> SDBGServiceSnapshot? {
+        let statistics = Self.retainedLogStatistics
+        let lostLogEntryCount = Self.saturatingAdd(
+            statistics.overwrittenEntryCount,
+            statistics.rejectedEntryCount
+        )
+        let freeMemoryByteCount = currentFreeMemoryByteCount()
+        let flags = DebugStatusFlags(
+            rawValue: DebugStatusFlags.virtualMemoryEnabled.rawValue
+                | DebugStatusFlags.userlandIsolated.rawValue
+        )
+        let debugLinkState: DebugLinkState
+        if state == .faulted {
+            debugLinkState = .failed
+        } else if displayEndpointOpen {
+            debugLinkState = .connected
+        } else if state == .configured {
+            debugLinkState = .ready
+        } else {
+            debugLinkState = .initializing
+        }
+        let updateState: DebugUpdateState
+        if updateStatusCommittedArtifact != nil {
+            updateState = .committed
+        } else if updateStatusPending {
+            updateState = .receiving
+        } else {
+            updateState = .idle
+        }
+        guard let status = DebugStatusSnapshot(
+                  snapshotSequence: sdbgSnapshotSequence,
+                  monotonicTicks: Self.monotonicTicks,
+                  bootSessionID: kernelDescription.bootIdentity.sessionID,
+                  phase: .driversReady,
+                  flags: flags,
+                  configuredProcessorCount:
+                      kernelDescription.configuredProcessorCount,
+                  onlineProcessorCount: 1,
+                  runnableThreadCount: 0,
+                  managedMemoryByteCount:
+                      kernelDescription.managedMemoryByteCount,
+                  freeMemoryByteCount: freeMemoryByteCount,
+                  displayState: .presenting,
+                  displayWidthPixels: displayMode.widthInPixels,
+                  displayHeightPixels: displayMode.heightInPixels,
+                  displayRefreshMilliHertz:
+                      displayMode.refreshRateMilliHertz ?? 0,
+                  debugLinkState: debugLinkState,
+                  updateState: updateState,
+                  oldestLogSequence: statistics.oldestSequence ?? 0,
+                  newestLogSequence: statistics.newestSequence ?? 0,
+                  lostLogEntryCount: lostLogEntryCount,
+                  lastError: .none
+              ), let snapshot = SDBGServiceSnapshot(
+                  bootIdentity: kernelDescription.bootIdentity,
+                  status: status,
+                  logStatistics: statistics
+              )
+        else { return nil }
+        if sdbgSnapshotSequence != UInt64.max {
+            sdbgSnapshotSequence += 1
+        }
+        return snapshot
+    }
+
+    private func currentFreeMemoryByteCount() -> UInt64 {
+#if os(none)
+        if let freePageCount = KernelMemoryRuntime.freePageCount,
+           freePageCount
+            <= kernelDescription.managedMemoryByteCount
+                / MemoryPageGeometry.pageSize {
+            return freePageCount * MemoryPageGeometry.pageSize
+        }
+#endif
+        return kernelDescription.managedMemoryByteCount
+    }
+
+    private static var retainedLogStatistics: KernelLogStatistics {
+#if os(none)
+        if let statistics = KernelDebugLogRuntime.statistics {
+            return statistics
+        }
+#endif
+        return KernelLogStatistics(
+            capacity: 1,
+            retainedCount: 0,
+            oldestSequence: nil,
+            newestSequence: nil,
+            nextSequence: 1,
+            overwrittenEntryCount: 0,
+            rejectedEntryCount: 0
+        )
+    }
+
+    private static var monotonicTicks: UInt64 {
+#if os(none)
+        return AArch64.counterValue
+#else
+        return 0
+#endif
+    }
+
+    private static func retainedLogEntry(
+        sequence: UInt64
+    ) -> KernelLogLookupResult {
+#if os(none)
+        if let result = KernelDebugLogRuntime.entry(sequence: sequence) {
+            return result
+        }
+#endif
+        return .notYetWritten
+    }
+
+    private static func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        lhs > UInt64.max - rhs ? UInt64.max : lhs + rhs
+    }
+
     private mutating func stageNextUpdateResponse() -> Bool {
         guard !updateStatusPending else { return true }
         guard var receiver = updateReceiver else { return true }
@@ -885,6 +1225,17 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         updateStatusPending = false
         updateStatusByteCount = 0
         updateStatusCommittedArtifact = nil
+    }
+
+    private mutating func resetEndpointTwoProtocolState() {
+        updateReceiver?.resetTransport()
+        sdbgSession.resetStream()
+        endpointTwoInboundProtocol = .undecided
+        endpointTwoInboundMagic = 0
+        endpointTwoInboundMagicByteCount = 0
+        sdbgInFlightByteCount = 0
+        endpointTwoProtocolResetPending = false
+        clearPendingUpdateStatus()
     }
 
     private mutating func serviceDiscardedOutEndpoint(
@@ -959,7 +1310,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         endpointTwoInFlight = .none
         endpointTwoOutNeedsRearm = false
         clearPendingUpdateStatus()
-        updateReceiver?.resetTransport()
+        resetEndpointTwoProtocolState()
         return .faulted
     }
 }

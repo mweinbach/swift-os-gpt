@@ -2,6 +2,7 @@ private final class USBDebugGadgetRegisterBank {
     var words = [UInt32](repeating: 0, count: 0x5_000 / 4)
     var receiveWords = [UInt32]()
     var nextReceiveWord = 0
+    var endpointTwoTransmitWords = [UInt32]()
 
     init() {
         words[Int(DWC2RegisterLayout.coreIdentifier / 4)] = 0x4f54_280a
@@ -52,6 +53,22 @@ private final class USBDebugGadgetRegisterBank {
         injectGlobal(DWC2CoreBits.inEndpointInterrupt)
     }
 
+    func clearEndpointTwoTransmitCapture() {
+        endpointTwoTransmitWords.removeAll(keepingCapacity: true)
+    }
+
+    var endpointTwoTransmitBytes: [UInt8] {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(endpointTwoTransmitWords.count * 4)
+        for word in endpointTwoTransmitWords {
+            bytes.append(UInt8(truncatingIfNeeded: word))
+            bytes.append(UInt8(truncatingIfNeeded: word >> 8))
+            bytes.append(UInt8(truncatingIfNeeded: word >> 16))
+            bytes.append(UInt8(truncatingIfNeeded: word >> 24))
+        }
+        return bytes
+    }
+
     private func pack(_ bytes: [UInt8], start: Int) -> UInt32 {
         var word: UInt32 = 0
         var index = 0
@@ -81,6 +98,10 @@ private struct USBDebugGadgetTestRegisters: DWC2RegisterAccess {
     }
 
     mutating func write32(_ value: UInt32, at offset: UInt) {
+        if offset == DWC2RegisterLayout.fifoData(2) {
+            bank.endpointTwoTransmitWords.append(value)
+            return
+        }
         let index = Int(offset / 4)
         if offset == DWC2RegisterLayout.resetControl,
            value & (
@@ -138,7 +159,7 @@ private struct USBDebugGadgetTestRegisters: DWC2RegisterAccess {
 struct DWC2USBDebugGadgetTests {
     static func main() {
         enumeratesConfiguresAndStreamsAFrame()
-        print("DWC2 USB debug gadget: 1 group passed")
+        print("DWC2 USB debug gadget: 2 groups passed")
     }
 
     private static func enumeratesConfiguresAndStreamsAFrame() {
@@ -167,7 +188,7 @@ struct DWC2USBDebugGadgetTests {
                           scratchByteCount: UInt64(scratchBytes.count),
                           scanout: scanout,
                           viewportScale: 1,
-                          sessionID: 0x55,
+                          kernelDescription: makeKernelDescription(),
                           updateStagingRegion: updateRegion,
                           maximumInitializationPollCount: 4
                       )
@@ -287,6 +308,11 @@ struct DWC2USBDebugGadgetTests {
                 }
                 expect(completedFrame == 1, "initial USB frame did not complete")
 
+                exerciseSDBGStatus(
+                    bank: bank,
+                    gadget: &gadget
+                )
+
                 setControlLineState(
                     0,
                     bank: bank,
@@ -337,6 +363,116 @@ struct DWC2USBDebugGadgetTests {
             }
           }
         }
+    }
+
+    private static func exerciseSDBGStatus(
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        let identity = makeKernelDescription().bootIdentity
+        var payload = [UInt8](
+            repeating: 0,
+            count: SDBGTypedPayloadProtocol.statusRequestByteCount
+        )
+        let payloadByteCount = payload.withUnsafeMutableBytes {
+            SDBGRequestCodec.encode(.status, into: $0)
+        }
+        guard let payloadByteCount else { fail("SDBG STATUS payload failed") }
+        var request = [UInt8](
+            repeating: 0,
+            count: SDBGProtocol.headerByteCount + payloadByteCount
+        )
+        let encoded = request.withUnsafeMutableBytes { output in
+            payload.withUnsafeBytes { input in
+                SDBGFrameEncoder.encode(
+                    envelope: SDBGEnvelope(
+                        kind: .request,
+                        flags: .none,
+                        bootSessionID: SDBGBootSessionID(
+                            high: identity.sessionID.high,
+                            low: identity.sessionID.low
+                        ),
+                        requestID: 0x44
+                    ),
+                    payload: UnsafeRawBufferPointer(
+                        start: input.baseAddress,
+                        count: payloadByteCount
+                    ),
+                    into: output
+                )
+            }
+        }
+        guard case .encoded(let requestByteCount) = encoded,
+              requestByteCount == request.count
+        else { fail("SDBG STATUS request failed") }
+
+        bank.clearEndpointTwoTransmitCapture()
+        bank.loadReceiveData(request)
+        bank.injectReceiveStatus(
+            endpoint: 2,
+            packetStatus: .outDataReceived,
+            byteCount: UInt16(request.count)
+        )
+        expect(gadget.service() == .none, "SDBG STATUS request faulted")
+
+        let captured = bank.endpointTwoTransmitBytes
+        guard captured.count >= SDBGProtocol.headerByteCount else {
+            fail("SDBG STATUS response was not queued")
+        }
+        let payloadLength = UInt32(captured[32])
+            | UInt32(captured[33]) << 8
+            | UInt32(captured[34]) << 16
+            | UInt32(captured[35]) << 24
+        let responseByteCount = SDBGProtocol.headerByteCount
+            + Int(payloadLength)
+        guard responseByteCount <= captured.count else {
+            fail("SDBG STATUS response was truncated")
+        }
+        var decoderStorage = [UInt8](repeating: 0, count: 512)
+        decoderStorage.withUnsafeMutableBytes { storage in
+            guard var decoder = SDBGStreamDecoder(
+                      storageBaseAddress: UInt(bitPattern: storage.baseAddress!),
+                      storageByteCount: storage.count,
+                      maximumPayloadByteCount: 472
+                  )
+            else { fail("SDBG response decoder failed") }
+            let response = Array(captured[0..<responseByteCount])
+            response.withUnsafeBytes {
+                expect(decoder.append($0) == .appended,
+                       "SDBG response did not append")
+            }
+            guard case .frame(let frame) = decoder.pump() else {
+                fail("SDBG response did not decode")
+            }
+            expect(frame.envelope.kind == .response,
+                   "SDBG response kind changed")
+            expect(frame.envelope.requestID == 0x44,
+                   "SDBG request correlation changed")
+            expect(
+                frame.envelope.bootSessionID == SDBGBootSessionID(
+                    high: identity.sessionID.high,
+                    low: identity.sessionID.low
+                ),
+                "SDBG response boot identity changed"
+            )
+            guard case .header(let header)
+                    = SDBGResponseCodec.decodeHeader(frame.payload)
+            else { fail("SDBG response header did not decode") }
+            expect(header.operationRawValue == SDBGOperation.status.rawValue,
+                   "SDBG STATUS operation changed")
+            expect(header.status == .success,
+                   "SDBG STATUS did not succeed")
+        }
+
+        bank.loadReceiveData([])
+        bank.injectReceiveStatus(
+            endpoint: 2,
+            packetStatus: .outTransferComplete,
+            byteCount: 0
+        )
+        expect(gadget.service() == .none, "SDBG OUT completion faulted")
+        bank.injectInCompletion(2)
+        expect(gadget.service() == .none, "SDBG IN completion faulted")
     }
 
     private static func exerciseCommittedKernelUpdate(
@@ -846,6 +982,28 @@ struct DWC2USBDebugGadgetTests {
               )
         else { return nil }
         return ScanoutBuffer(mode: mode, bytesPerRow: 16, mapping: mapping)
+    }
+
+    private static func makeKernelDescription() -> USBDebugKernelDescription {
+        let build = KernelBuildIdentity(
+            buildID: KernelIdentity128(high: 0x5357_4946, low: 0x544f_5301)!,
+            sourceRevision: 0x1234,
+            imageDigestPrefix: 0x5678,
+            flavor: .diagnostic,
+            abiRevision: 1
+        )
+        let boot = KernelBootIdentity(
+            sessionID: KernelIdentity128(high: 0x55, low: 0xaa)!,
+            build: build,
+            bootOrdinal: 0,
+            startedAtTicks: 1,
+            reason: .unknown
+        )
+        return USBDebugKernelDescription(
+            bootIdentity: boot,
+            configuredProcessorCount: 4,
+            managedMemoryByteCount: 512 * 1024 * 1024
+        )!
     }
 
     private static func expect(
