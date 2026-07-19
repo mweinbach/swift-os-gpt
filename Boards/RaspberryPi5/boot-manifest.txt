@@ -16,6 +16,20 @@ Raspberry Pi 5 firmware is self-contained in EEPROM. Do not add bootcode.bin,
 start*.elf, or fixup*.dat to this minimal partition. config.txt selects only the
 official dwc2 overlay in peripheral mode; no cmdline.txt is required.
 
+USB-C debug contract (hardware-unverified): the kernel powers the DWC2 domain,
+enumerates development VID:PID 1209:5a17 as a CDC ACM composite gadget, and
+exports its completed diagnostic desktop through the SDDP byte stream. In the
+SwiftOS source checkout, build and start the macOS receiver with:
+
+  make usb-display-viewer
+  .build/swiftos-usb-display --list
+  .build/swiftos-usb-display
+
+This is USB data, not DisplayPort. USB starts after memory and driver bring-up;
+UART10 remains the only route for failures before gadget attachment. Use a
+data-capable cable and adequate safe power rather than assuming a computer port
+can supply the Raspberry Pi 5's peak load.
+
 The packaging script refuses a non-empty destination, records the exact SwiftOS
 revision/dirty state and DTB repository revision, validates the AArch64 Image
 magic and 4 KiB flag, and writes the files in the fixed order above. The firmware
