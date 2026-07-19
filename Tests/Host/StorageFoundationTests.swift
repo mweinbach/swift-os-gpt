@@ -128,6 +128,24 @@ struct StorageFoundationTests {
             to: device,
             index: 0,
             status: 0,
+            type: MBRPartitionType.fat32LBA.rawValue,
+            start: 0,
+            count: 50
+        )
+        value = device
+        withScratch { scratch in
+            expect(
+                MBRPartitionDiscovery.read(from: &value, scratch: scratch)
+                    == .failure(.startsAtPartitionTable(index: 0)),
+                "partition aliasing the MBR was accepted"
+            )
+        }
+
+        clearPartitions(device)
+        writePartition(
+            to: device,
+            index: 0,
+            status: 0,
             type: MBRPartitionType.protectiveGPT.rawValue,
             start: 1,
             count: 99

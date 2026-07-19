@@ -1,7 +1,8 @@
 struct SwiftOSDataVolumeLayout: Equatable {
     static let superblockCount: UInt64 = 2
-    /// Bounds formatting and recovery even when the containing data partition
-    /// spans an entire large card (32 MiB at 512-byte logical blocks).
+    /// Bounds both bytes written and records scanned even when the containing
+    /// data partition spans an entire large device.
+    static let maximumKernelLogByteCount: UInt64 = 32 * 1_024 * 1_024
     static let maximumKernelLogBlockCount: UInt64 = 65_536
 
     let logicalBlockByteCount: Int
@@ -17,6 +18,8 @@ struct SwiftOSDataVolumeLayout: Equatable {
     ) {
         guard kernelLogBlockCount >= 2,
               kernelLogBlockCount <= Self.maximumKernelLogBlockCount,
+              kernelLogBlockCount <= Self.maximumKernelLogByteCount
+                / UInt64(geometry.logicalBlockByteCount),
               geometry.logicalBlockCount > Self.superblockCount,
               kernelLogBlockCount
                 < geometry.logicalBlockCount - Self.superblockCount
@@ -39,6 +42,8 @@ struct SwiftOSDataVolumeLayout: Equatable {
         guard kernelLogStartBlock == Self.superblockCount,
               kernelLogBlockCount >= 2,
               kernelLogBlockCount <= Self.maximumKernelLogBlockCount,
+              kernelLogBlockCount <= Self.maximumKernelLogByteCount
+                / UInt64(geometry.logicalBlockByteCount),
               userDataStartBlock == kernelLogStartBlock + kernelLogBlockCount,
               userDataBlockCount != 0,
               userDataStartBlock <= geometry.logicalBlockCount,

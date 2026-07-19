@@ -77,6 +77,7 @@ def validate_successful_package(
     expected_files = [
         "BOOT-MANIFEST.txt",
         "BUILD-METADATA.txt",
+        "MEDIA-LAYOUT.txt",
         "SHA256SUMS",
         "bcm2712-rpi-5-b.dtb",
         "config.txt",
@@ -111,18 +112,22 @@ def validate_successful_package(
         line.split("=", 1)
         for line in (output / "BUILD-METADATA.txt").read_text().splitlines()
     )
-    require(metadata["format"] == "swiftos-rpi5-boot-v2",
+    require(metadata["format"] == "swiftos-rpi5-boot-v3",
             "package format was not advanced")
     require(metadata["firmware_repository_revision"] == revision,
             "firmware revision was not recorded")
     require(metadata["dtb_sha256"] == sha256(dtb), "DTB hash mismatch")
     require(metadata["dwc2_overlay_sha256"] == sha256(overlay),
             "DWC2 overlay hash mismatch")
+    require(metadata["media_layout_sha256"] == sha256(
+        REPOSITORY / "Boards/RaspberryPi5/media-layout.txt"),
+        "media-layout hash mismatch")
 
     checksum_lines = (output / "SHA256SUMS").read_text().splitlines()
     expected_checksum_files = [
         "BOOT-MANIFEST.txt",
         "BUILD-METADATA.txt",
+        "MEDIA-LAYOUT.txt",
         "bcm2712-rpi-5-b.dtb",
         "config.txt",
         "kernel8.img",

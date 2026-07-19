@@ -1,4 +1,4 @@
-SwiftOS Raspberry Pi 5 boot-partition manifest, format 2
+SwiftOS Raspberry Pi 5 boot-partition manifest, format 3
 HARDWARE STATUS: UNVERIFIED. This manifest does not claim board support.
 
 Firmware-consumed files:
@@ -10,6 +10,7 @@ Firmware-consumed files:
 Provenance files ignored by firmware:
   BOOT-MANIFEST.txt          this file
   BUILD-METADATA.txt         input hashes and SwiftOS/firmware Git revisions
+  MEDIA-LAYOUT.txt           MBR, FAT32 boot, and signed user-data contract
   SHA256SUMS                 hashes of every other file in this manifest
 
 Raspberry Pi 5 firmware is self-contained in EEPROM. Do not add bootcode.bin,
@@ -54,6 +55,11 @@ The packaging script refuses a non-empty destination, records the exact SwiftOS
 revision/dirty state and DTB repository revision, validates the AArch64 Image
 magic and 4 KiB flag, and writes the files in the fixed order above. The firmware
 repository revision is not the EEPROM bootloader version. The DTB and overlay
-must both match that recorded revision. Filesystem allocation,
-FAT volume IDs, and timestamps are outside this byte-level manifest; image
-creation must normalize those separately for a reproducible whole-disk image.
+must both match that recorded revision.
+
+`tools/build_rpi5_media.py` converts this validated directory into a sparse,
+deterministic MBR image with a populated FAT32 boot partition and a type-0xda
+SwiftOS data partition. The data partition starts with duplicate signed volume
+headers and a bounded empty kernel-log arena; its remaining blocks are reserved
+for a future user filesystem. This packaging contract does not claim a working
+physical SD/MMC driver.

@@ -34,6 +34,7 @@ Raspberry Pi 5 keeps its boot firmware in EEPROM. It does not use
 | `overlays/dwc2.dtbo` | Official firmware overlay selecting the USB-C DWC2 controller. |
 | `BOOT-MANIFEST.txt` | Human-readable, explicitly unverified manifest. |
 | `BUILD-METADATA.txt` | Input hashes, SwiftOS revision/dirty state, and firmware-repository revision. |
+| `MEDIA-LAYOUT.txt` | MBR, FAT32 boot, signed data-volume, and arena contract. |
 | `SHA256SUMS` | Stable byte-level hashes of all preceding files. |
 
 The firmware normally prefers `kernel_2712.img` on BCM2712 and falls back to
@@ -50,8 +51,9 @@ individual hashes, and refuses to overwrite a non-empty directory. That value
 identifies the `raspberrypi/firmware` file set, not the board's EEPROM bootloader
 revision; physical evidence must record the EEPROM build separately. Given
 identical kernel bytes, firmware checkout, and board files, the listed file
-bytes and `SHA256SUMS` are reproducible. A reproducible FAT or disk image must
-additionally normalize allocation order, timestamps, and volume ID.
+bytes and `SHA256SUMS` are reproducible. `tools/build_rpi5_media.py` gives the
+FAT allocation, timestamps, volume ID, MBR, and signed data headers deterministic
+values, so two builds with the same package and geometry are byte-identical.
 
 `config.txt` applies `dwc2,dr_mode=peripheral`. The merged runtime DT can then
 publish an enabled `brcm,bcm2835-usb` node, which shared platform discovery
@@ -73,10 +75,38 @@ Package it with a pinned firmware checkout:
 RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware make rpi5-package
 ```
 
-Copy the resulting directory contents to an empty FAT boot partition. Do not
-add Raspberry Pi 4 firmware blobs. `sha256=1` asks the EEPROM firmware to log
+This writes both the validated boot directory and
+`.build/raspberry-pi-5/swiftos-rpi5-media.img`. The default image is a compact
+sparse 1 GiB artifact with a 256 MiB boot partition. For physical media, pass
+the exact 512-byte block count so partition two spans the remainder:
+
+```sh
+RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware \
+RPI5_MEDIA_BLOCK_COUNT=EXACT_CARD_BLOCK_COUNT make rpi5-package
+python3 tools/build_rpi5_media.py inspect \
+  .build/raspberry-pi-5/swiftos-rpi5-media.img
+```
+
+The builder refuses existing outputs and every non-regular-file target; it does
+not select, unmount, or write a physical disk. Its inspector validates bounded
+partition/FAT extents, every packaged file hash, duplicate data superblocks, and
+CRC-protected persistent records. Flashing remains a separate explicitly
+targeted operation. Do not add Raspberry Pi 4 firmware blobs. `sha256=1` asks
+the EEPROM firmware to log
 the hashes of loaded files; it does not replace checking `SHA256SUMS` before
 writing media.
+
+## SwiftOS data partition
+
+The second MBR entry uses type `0xda` and is accepted only when its `SWOSDATA`
+v1 superblock validates. Blocks zero and one are duplicate immutable headers.
+The next 4,096 512-byte blocks form the default 2 MiB kernel-log arena; CRCs and
+deterministic sequence-to-slot placement permit bounded recovery after a torn
+write. The remainder is reserved for a future user filesystem. The generic
+kernel layer exposes synchronous logical-block I/O and a partition-bounded view,
+but never maps that view into EL0. Files and mounts require a future VFS/syscall
+boundary. Until a physical Pi SD/MMC transport binds this layer, an image on the
+card is formatted correctly but the running kernel cannot persist records.
 
 ## AArch64 Image contract
 

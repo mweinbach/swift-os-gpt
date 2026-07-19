@@ -1,0 +1,27 @@
+SwiftOS Raspberry Pi 5 media layout, format 1
+
+Logical block size: 512 bytes
+Partition table: MBR
+Alignment: 2048 logical blocks (1 MiB)
+
+Partition 1:
+  role: firmware boot
+  bootable: yes
+  type: 0x0c (FAT32 LBA)
+  default size: 256 MiB
+  contents: every file covered by SHA256SUMS
+
+Partition 2:
+  role: SwiftOS user data
+  bootable: no
+  type: 0xda (non-filesystem data; requires SWOSDATA superblock)
+  size: remaining image blocks
+  blocks 0 and 1: identical SwiftOS data-volume v1 superblocks
+  default kernel-log arena: blocks 2 through 4097 (2 MiB)
+  remaining blocks: reserved for a future user filesystem
+
+The persistent kernel-log arena is CRC-protected and power-loss recoverable.
+The kernel may access only that bounded arena. The remaining user-data blocks
+will be exposed through a future VFS/syscall boundary and must never be mapped
+raw into EL0. The image contains the format and generic block layer, but no
+physical Raspberry Pi SD/MMC transport is claimed by this manifest.

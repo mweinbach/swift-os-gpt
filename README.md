@@ -172,7 +172,10 @@ RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware make rpi5-package
 bootstrap descriptor, architecture, and unresolved-symbol contract. Packaging
 first probes the pinned firmware DTB for the exact UART10, GICv2, PSCI, CPU, and
 ATF-reservation contract, then adds it and the official `dwc2.dtbo` from that
-same revision with byte hashes. The packaged `config.txt` enables DWC2
+same revision with byte hashes. It also produces a sparse MBR media image with
+a populated FAT32 boot partition and a signed type-0xda data partition. Set
+`RPI5_MEDIA_BLOCK_COUNT` to the exact target-card block count when the data
+partition should consume the remaining card. The packaged `config.txt` enables DWC2
 peripheral mode for USB-C debugging and asks Pi firmware to select an HDMI mode
 from EDID and retain a 32-bit boot framebuffer. It also pins the expanded DTB
 to a bounded 48 MiB window, outside both the reserved restart destination and
@@ -233,8 +236,11 @@ quads—including four shader-antialiased rounded layers—and seven GPU-sampled
 color or scanout pixels. The local QEMU build cannot hardware-exercise that
 accelerated route.
 The scheduler currently runs both user threads only on CPU0; secondary CPUs
-publish online state and park. There is no loader, VFS, persistent storage,
+publish online state and park. There is no loader, VFS, mounted user filesystem,
 graphical input, user compositor/window protocol, or stable application ABI.
+The board-neutral block, MBR, signed data-volume, and bounded persistent-log
+formats are host-tested, but persistence still requires a bound hardware block
+transport; raw data blocks are never exposed to EL0.
 Physical Raspberry Pi 5 execution remains unverified. The Pi path currently
 consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
 modesetting or V3D VII rendering. It can also export that completed diagnostic

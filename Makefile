@@ -15,6 +15,11 @@ RPI5_BOOT_OBJECT := $(RPI5_BUILD_DIR)/boot.o
 RPI5_HEADER_OBJECT := $(RPI5_BUILD_DIR)/image-header.o
 RPI5_KERNEL_ELF := $(RPI5_BUILD_DIR)/swiftos-rpi5.elf
 RPI5_KERNEL_IMAGE := $(RPI5_BUILD_DIR)/kernel8.img
+RPI5_MEDIA_IMAGE := $(RPI5_BUILD_DIR)/swiftos-rpi5-media.img
+RPI5_MEDIA_SIZE_MIB ?= 1024
+RPI5_MEDIA_BLOCK_COUNT ?=
+RPI5_BOOT_SIZE_MIB ?= 256
+RPI5_KERNEL_LOG_BLOCK_COUNT ?= 4096
 USB_DISPLAY_VIEWER := $(BUILD_DIR)/swiftos-usb-display
 USB_UPDATE := $(BUILD_DIR)/swiftos-usb-update
 SWIFTOS_CONTROL := $(BUILD_DIR)/swiftosctl
@@ -142,9 +147,16 @@ rpi5-package: rpi5-inspect
 		RPI5_DTB=$(RPI5_FIRMWARE)/boot/bcm2712-rpi-5-b.dtb
 	Boards/RaspberryPi5/package-boot.sh $(RPI5_KERNEL_IMAGE) \
 		$(RPI5_FIRMWARE) $(RPI5_BUILD_DIR)/boot
+	$(PYTHON) tools/build_rpi5_media.py build \
+		$(RPI5_BUILD_DIR)/boot $(RPI5_MEDIA_IMAGE) \
+		$(if $(RPI5_MEDIA_BLOCK_COUNT),--total-block-count $(RPI5_MEDIA_BLOCK_COUNT),--total-size-mib $(RPI5_MEDIA_SIZE_MIB)) \
+		--boot-size-mib $(RPI5_BOOT_SIZE_MIB) \
+		--kernel-log-block-count $(RPI5_KERNEL_LOG_BLOCK_COUNT)
+	$(PYTHON) tools/build_rpi5_media.py inspect $(RPI5_MEDIA_IMAGE) >/dev/null
 
 rpi5-package-test:
 	$(PYTHON) Tests/Host/rpi5_package_contract.py
+	$(PYTHON) Tests/Host/rpi5_media_image_contract.py
 
 run: build
 	$(QEMU) $(QEMU_FLAGS) -display cocoa -kernel $(KERNEL_BIN)

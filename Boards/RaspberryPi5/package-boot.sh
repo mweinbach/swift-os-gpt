@@ -43,6 +43,7 @@ SWIFTOS_REPOSITORY=$(git -C "$SCRIPT_DIRECTORY" rev-parse --show-toplevel 2>/dev
 [ -s "$FIRMWARE_DWC2_OVERLAY" ] || fail "DWC2 overlay is empty"
 [ -f "$SCRIPT_DIRECTORY/config.txt" ] || fail "board config.txt is missing"
 [ -f "$SCRIPT_DIRECTORY/boot-manifest.txt" ] || fail "board manifest is missing"
+[ -f "$SCRIPT_DIRECTORY/media-layout.txt" ] || fail "media layout is missing"
 
 FIRMWARE_REVISION=$(git -C "$FIRMWARE_CHECKOUT" rev-parse --verify HEAD 2>/dev/null) || \
     fail "firmware input must be a pinned raspberrypi/firmware Git checkout"
@@ -120,19 +121,22 @@ cp "$KERNEL_IMAGE" "$OUTPUT_DIRECTORY/kernel8.img"
 cp "$FIRMWARE_DTB" "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb"
 cp "$FIRMWARE_DWC2_OVERLAY" "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo"
 cp "$SCRIPT_DIRECTORY/boot-manifest.txt" "$OUTPUT_DIRECTORY/BOOT-MANIFEST.txt"
+cp "$SCRIPT_DIRECTORY/media-layout.txt" "$OUTPUT_DIRECTORY/MEDIA-LAYOUT.txt"
 chmod 0644 \
     "$OUTPUT_DIRECTORY/config.txt" \
     "$OUTPUT_DIRECTORY/kernel8.img" \
     "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb" \
     "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo" \
-    "$OUTPUT_DIRECTORY/BOOT-MANIFEST.txt"
+    "$OUTPUT_DIRECTORY/BOOT-MANIFEST.txt" \
+    "$OUTPUT_DIRECTORY/MEDIA-LAYOUT.txt"
 
 KERNEL_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/kernel8.img")
 DTB_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb")
 DWC2_OVERLAY_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo")
+MEDIA_LAYOUT_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/MEDIA-LAYOUT.txt")
 
 {
-    echo "format=swiftos-rpi5-boot-v2"
+    echo "format=swiftos-rpi5-boot-v3"
     echo "board=raspberry-pi-5-model-b"
     echo "hardware_verified=false"
     echo "swiftos_revision=$SWIFTOS_REVISION"
@@ -142,6 +146,7 @@ DWC2_OVERLAY_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo")
     echo "kernel_sha256=$KERNEL_SHA256"
     echo "dtb_sha256=$DTB_SHA256"
     echo "dwc2_overlay_sha256=$DWC2_OVERLAY_SHA256"
+    echo "media_layout_sha256=$MEDIA_LAYOUT_SHA256"
 } > "$OUTPUT_DIRECTORY/BUILD-METADATA.txt"
 chmod 0644 "$OUTPUT_DIRECTORY/BUILD-METADATA.txt"
 
@@ -149,6 +154,7 @@ chmod 0644 "$OUTPUT_DIRECTORY/BUILD-METADATA.txt"
     for FILE_NAME in \
         BOOT-MANIFEST.txt \
         BUILD-METADATA.txt \
+        MEDIA-LAYOUT.txt \
         bcm2712-rpi-5-b.dtb \
         config.txt \
         kernel8.img \

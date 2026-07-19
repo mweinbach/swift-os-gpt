@@ -57,6 +57,7 @@ enum MBRPartitionDiscoveryFailure: Equatable {
     case missingSignature
     case invalidStatus(index: Int)
     case emptyTypedEntry(index: Int)
+    case startsAtPartitionTable(index: Int)
     case outOfBounds(index: Int)
     case overlappingEntries(first: Int, second: Int)
     /// A protective MBR delegates authoritative discovery to a future bounded
@@ -110,6 +111,9 @@ enum MBRPartitionDiscovery {
             } else {
                 guard type != .protectiveGPT else {
                     return .failure(.protectiveGPTUnsupported)
+                }
+                guard start != 0 else {
+                    return .failure(.startsAtPartitionTable(index: index))
                 }
                 guard let range = BlockDeviceRange(
                     startBlock: start,

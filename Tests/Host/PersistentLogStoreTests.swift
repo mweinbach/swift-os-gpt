@@ -2,10 +2,33 @@
 struct PersistentLogStoreTests {
     static func main() {
         formatsAndSeparatesTheDataVolume()
+        boundsTheLogArenaByBytesForLargeBlocks()
         persistsAndBoundsKernelLogRecords()
         recoversFromTornRecordsAndOneBadSuperblock()
         roundTripsStructuredKernelEvents()
-        print("persistent log store host tests: 4 groups passed")
+        matchesTheVolatileRingRecordABI()
+        print("persistent log store host tests: 6 groups passed")
+    }
+
+    private static func boundsTheLogArenaByBytesForLargeBlocks() {
+        let geometry = BlockDeviceGeometry(
+            logicalBlockByteCount: 4_096,
+            logicalBlockCount: 20_000
+        )!
+        expect(
+            SwiftOSDataVolumeLayout(
+                geometry: geometry,
+                kernelLogBlockCount: 8_192
+            ) != nil,
+            "32 MiB 4K-block log arena was rejected"
+        )
+        expect(
+            SwiftOSDataVolumeLayout(
+                geometry: geometry,
+                kernelLogBlockCount: 8_193
+            ) == nil,
+            "4K-block log arena exceeded the byte cap"
+        )
     }
 
     private static func formatsAndSeparatesTheDataVolume() {
@@ -155,6 +178,47 @@ struct PersistentLogStoreTests {
                 "structured kernel event append failed"
             )
         }
+    }
+
+    private static func matchesTheVolatileRingRecordABI() {
+        let event = KernelLogEvent(
+            timestampTicks: 0x0102_0304_0506_0708,
+            level: .notice,
+            subsystem: .memory,
+            eventCode: 0x1122_3344,
+            processorID: 0x5566_7788,
+            flags: 0x99aa_bbcc,
+            argument0: 0xddee_ff00_1234_5678,
+            argument1: 0x8877_6655_4433_2211
+        )
+        var ringBytes = [UInt8](repeating: 0, count: KernelLogRing.recordByteCount)
+        ringBytes.withUnsafeMutableBytes { storage in
+            var ring = KernelLogRing(storage: storage)!
+            expect(
+                ring.append(event) == .appended(
+                    sequence: 1,
+                    overwrittenSequence: nil
+                ),
+                "volatile ring fixture append failed"
+            )
+        }
+        var persistentBytes = [UInt8](
+            repeating: 0,
+            count: PersistentKernelLogCodec.payloadByteCount
+        )
+        persistentBytes.withUnsafeMutableBytes { output in
+            expect(
+                PersistentKernelLogCodec.encode(
+                    KernelLogEntry(sequence: 1, event: event),
+                    into: output
+                ),
+                "persistent ABI fixture encode failed"
+            )
+        }
+        expect(
+            persistentBytes == ringBytes,
+            "persistent kernel-log payload drifted from the volatile ring ABI"
+        )
     }
 
     private static func formattedDevice(
