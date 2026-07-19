@@ -9,6 +9,7 @@ SECONDARY_STACK_SIZE = 64K;
 USER_STACK_SIZE = 64K;
 STACK_GUARD_SIZE = 4K;
 DMA_SCRATCH_SIZE = 4K;
+RP1_GEM_WORKSPACE_SIZE = 16K;
 TERMINAL_STORAGE_SIZE = 8K;
 FRAMEBUFFER_SIZE = 800 * 600 * 4;
 CLASSIFIED_FREE_RUN_STORAGE_SIZE = 24K;
@@ -179,6 +180,18 @@ SECTIONS
         __dma_scratch_end = .;
     }
 
+    .rp1_gem_workspace (NOLOAD) : ALIGN(4K)
+    {
+        __rp1_gem_workspace_start = .;
+        __rp1_gem_descriptor_page_start = .;
+        . += 4K;
+        __rp1_gem_descriptor_page_end = .;
+        __rp1_gem_cacheable_pages_start = .;
+        . += RP1_GEM_WORKSPACE_SIZE - 4K;
+        __rp1_gem_cacheable_pages_end = .;
+        __rp1_gem_workspace_end = .;
+    }
+
     .terminal_storage (NOLOAD) : ALIGN(4K)
     {
         __terminal_storage_start = .;
@@ -211,6 +224,17 @@ ASSERT((__boot_stack_top & 15) == 0, "boot stack must be 16-byte aligned")
 ASSERT((__boot_stack_bottom & 4095) == 0, "boot stack guard must be page aligned")
 ASSERT(((__bss_end - __bss_start) & 15) == 0, "BSS clear span must be 16-byte aligned")
 ASSERT((__dma_scratch_start & 4095) == 0, "DMA scratch must be page aligned")
+ASSERT((__rp1_gem_workspace_start & 4095) == 0,
+       "RP1 GEM workspace must be page aligned")
+ASSERT(__rp1_gem_workspace_end - __rp1_gem_workspace_start == 16K,
+       "RP1 GEM workspace must own exactly 16 KiB")
+ASSERT(__rp1_gem_descriptor_page_end
+           - __rp1_gem_descriptor_page_start == 4K,
+       "RP1 GEM descriptor storage must own exactly one page")
+ASSERT(__rp1_gem_descriptor_page_end == __rp1_gem_cacheable_pages_start,
+       "RP1 GEM descriptor page must not overlap cacheable storage")
+ASSERT(__rp1_gem_cacheable_pages_end == __rp1_gem_workspace_end,
+       "RP1 GEM cacheable workspace must be contiguous")
 ASSERT((__terminal_storage_start & 4095) == 0, "terminal storage must be page aligned")
 ASSERT((__framebuffer_start & 4095) == 0, "framebuffer must be page aligned")
 ASSERT((__debug_log_storage_start & 4095) == 0,

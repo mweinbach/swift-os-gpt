@@ -31,7 +31,7 @@ enum KernelMemoryRuntime {
     private static let classifiedFreeRunCapacity = 512
     private static let classifiedActiveAllocationCapacity = 512
     private static let kernelReadOnlyCapacity = 2
-    private static let kernelDataCapacity = 7
+    private static let kernelDataCapacity = 9
         + BootDriverResourceSet.maximumMemoryResourceCount
     private static let userStackCapacity = 2
     private static let mmioCapacity = 5
@@ -43,7 +43,7 @@ enum KernelMemoryRuntime {
     private enum LayoutOffset {
         static let kernelReadOnly = 0
         static let kernelData = 128
-        static let userStacks = 640
+        static let userStacks = 704
         static let mmio = 768
         static let guards = 1280
         static let explicitReservations = 1536
@@ -575,8 +575,29 @@ enum KernelMemoryRuntime {
             }
             secondaryIndex += 1
         }
-        guard appendIdentityData(
+        let gemWorkspace = KernelLinkerLayout.rp1GEMWorkspace
+        let gemDescriptors = KernelLinkerLayout.rp1GEMDescriptorPage
+        let gemCacheable = KernelLinkerLayout.rp1GEMCacheablePages
+        guard gemWorkspace.start >= secondaryStacks.end,
+              gemWorkspace.end <= data.end,
+              gemDescriptors.start == gemWorkspace.start,
+              gemDescriptors.length == MemoryPageGeometry.pageSize,
+              gemDescriptors.end == gemCacheable.start,
+              gemCacheable.end == gemWorkspace.end,
+              appendIdentityData(
                   start: secondaryStacks.end,
+                  end: gemDescriptors.start,
+                  to: kernelData,
+                  count: &dataCount
+              ),
+              appendIdentityNonCacheableData(
+                  start: gemDescriptors.start,
+                  end: gemDescriptors.end,
+                  to: kernelData,
+                  count: &dataCount
+              ),
+              appendIdentityData(
+                  start: gemDescriptors.end,
                   end: data.end,
                   to: kernelData,
                   count: &dataCount
@@ -828,6 +849,7 @@ enum KernelMemoryRuntime {
             return false
         }
         return pagingLayoutStorageIsValid()
+            && rp1GEMWorkspaceIsValid()
             && allocatorStart - mapStart >= requiredBytes(
                 PhysicalPageRange.self,
                 count: memoryMapCapacity
@@ -896,6 +918,22 @@ enum KernelMemoryRuntime {
             && reservationEnd <= region.length
     }
 
+    private static func rp1GEMWorkspaceIsValid() -> Bool {
+        let workspace = KernelLinkerLayout.rp1GEMWorkspace
+        let descriptors = KernelLinkerLayout.rp1GEMDescriptorPage
+        let cacheable = KernelLinkerLayout.rp1GEMCacheablePages
+        let data = KernelLinkerLayout.kernelData
+        return workspace.length == RP1GEMBootstrapMemory.workspaceByteCount
+            && MemoryPageGeometry.isPageAligned(workspace.start)
+            && MemoryPageGeometry.isPageAligned(workspace.end)
+            && descriptors.start == workspace.start
+            && descriptors.length == MemoryPageGeometry.pageSize
+            && descriptors.end == cacheable.start
+            && cacheable.end == workspace.end
+            && workspace.start >= data.start
+            && workspace.end <= data.end
+    }
+
     private static func explicitReservationStorage()
         -> UnsafeMutableBufferPointer<PhysicalByteSpan>? {
         layoutBuffer(
@@ -957,6 +995,25 @@ enum KernelMemoryRuntime {
             byteCount: end - start,
             role: .kernelData
         ) else {
+            return false
+        }
+        return append(region, to: storage, count: &count)
+    }
+
+    private static func appendIdentityNonCacheableData(
+        start: UInt64,
+        end: UInt64,
+        to storage: UnsafeMutableBufferPointer<FinalMappingRegion>,
+        count: inout Int
+    ) -> Bool {
+        guard end > start,
+              let region = FinalMappingRegion(
+                  virtualBaseAddress: start,
+                  physicalBaseAddress: start,
+                  byteCount: end - start,
+                  role: .kernelNonCacheableData
+              )
+        else {
             return false
         }
         return append(region, to: storage, count: &count)

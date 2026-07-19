@@ -33,6 +33,8 @@ struct PageMemoryType: Equatable {
 
     static let device = PageMemoryType(value: 0)
     static let normal = PageMemoryType(value: 1)
+    /// MAIR_EL1 Attr2: outer and inner non-cacheable Normal memory (0x44).
+    static let normalNonCacheable = PageMemoryType(value: 2)
 
     var attributeIndex: UInt64 {
         UInt64(value)
@@ -72,6 +74,14 @@ struct PageMappingAttributes: Equatable {
         global: true
     )
     static let kernelHeap = kernelData
+    static let kernelNonCacheableData = PageMappingAttributes(
+        memoryType: .normalNonCacheable,
+        writable: true,
+        userAccessible: false,
+        privilegedExecutable: false,
+        userExecutable: false,
+        global: true
+    )
     static let kernelDevice = PageMappingAttributes(
         memoryType: .device,
         writable: true,
@@ -135,6 +145,8 @@ struct MemoryRegionRole: Equatable {
     static let userText = MemoryRegionRole(value: 5)
     static let userReadOnlyData = MemoryRegionRole(value: 6)
     static let userData = MemoryRegionRole(value: 7)
+    /// Privileged RW/NX Normal Non-Cacheable memory for DMA descriptors.
+    static let kernelNonCacheableData = MemoryRegionRole(value: 8)
 
     var attributes: PageMappingAttributes {
         switch value {
@@ -145,6 +157,8 @@ struct MemoryRegionRole: Equatable {
         case 4: return .kernelDevice
         case 5: return .userText
         case 6: return .userReadOnlyData
+        case 7: return .userData
+        case 8: return .kernelNonCacheableData
         default: return .userData
         }
     }
@@ -203,7 +217,7 @@ struct PageTableDescriptor: Equatable {
             value |= tableOrPageBit
         }
         value |= attributes.memoryType.attributeIndex << 2
-        value |= UInt64(attributes.memoryType == .normal ? 3 : 2) << 8
+        value |= UInt64(attributes.memoryType == .device ? 2 : 3) << 8
         if attributes.userAccessible {
             value |= 1 << 6
         }

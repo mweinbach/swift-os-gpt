@@ -10,6 +10,7 @@ SECONDARY_STACK_SIZE = 64K;
 USER_STACK_SIZE = 64K;
 STACK_GUARD_SIZE = 4K;
 DMA_SCRATCH_SIZE = 4K;
+RP1_GEM_WORKSPACE_SIZE = 16K;
 TERMINAL_STORAGE_SIZE = 8K;
 FRAMEBUFFER_SIZE = 800 * 600 * 4;
 CLASSIFIED_FREE_RUN_STORAGE_SIZE = 24K;
@@ -187,6 +188,18 @@ SECTIONS
         __dma_scratch_end = .;
     }
 
+    .rp1_gem_workspace (NOLOAD) : ALIGN(4K)
+    {
+        __rp1_gem_workspace_start = .;
+        __rp1_gem_descriptor_page_start = .;
+        . += 4K;
+        __rp1_gem_descriptor_page_end = .;
+        __rp1_gem_cacheable_pages_start = .;
+        . += RP1_GEM_WORKSPACE_SIZE - 4K;
+        __rp1_gem_cacheable_pages_end = .;
+        __rp1_gem_workspace_end = .;
+    }
+
     .terminal_storage (NOLOAD) : ALIGN(4K)
     {
         __terminal_storage_start = .;
@@ -237,6 +250,19 @@ ASSERT(__dma_scratch_end - __dma_scratch_start == 4K,
        "DMA scratch must own one isolated cacheable page")
 ASSERT(__dma_scratch_end <= 0x100000000,
        "Pi firmware mailbox scratch must fit its 32-bit physical word")
+ASSERT((__rp1_gem_workspace_start & 4095) == 0,
+       "RP1 GEM workspace must be 4 KiB aligned")
+ASSERT(__rp1_gem_workspace_end - __rp1_gem_workspace_start == 16K,
+       "RP1 GEM workspace must own exactly 16 KiB")
+ASSERT(__rp1_gem_descriptor_page_end
+           - __rp1_gem_descriptor_page_start == 4K,
+       "RP1 GEM descriptor storage must own exactly one page")
+ASSERT(__rp1_gem_descriptor_page_end == __rp1_gem_cacheable_pages_start,
+       "RP1 GEM descriptor page must not overlap cacheable storage")
+ASSERT(__rp1_gem_cacheable_pages_end == __rp1_gem_workspace_end,
+       "RP1 GEM cacheable workspace must be contiguous")
+ASSERT(__rp1_gem_workspace_end <= 0x100000000,
+       "RP1 GEM 32-bit DMA workspace must remain below 4 GiB")
 ASSERT((__terminal_storage_start & 4095) == 0,
        "terminal storage must be 4 KiB aligned")
 ASSERT((__framebuffer_start & 4095) == 0,

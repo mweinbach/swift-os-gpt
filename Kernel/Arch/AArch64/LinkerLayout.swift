@@ -96,6 +96,24 @@ enum KernelLinkerLayout {
             end: archDebugLogStorageEnd()
         )
     }
+    static var rp1GEMWorkspace: LinkerRegion {
+        LinkerRegion(
+            start: archRP1GEMWorkspaceStart(),
+            end: archRP1GEMWorkspaceEnd()
+        )
+    }
+    static var rp1GEMDescriptorPage: LinkerRegion {
+        LinkerRegion(
+            start: archRP1GEMDescriptorPageStart(),
+            end: archRP1GEMDescriptorPageEnd()
+        )
+    }
+    static var rp1GEMCacheablePages: LinkerRegion {
+        LinkerRegion(
+            start: archRP1GEMCacheablePagesStart(),
+            end: archRP1GEMCacheablePagesEnd()
+        )
+    }
     static var userEntryPhysicalAddress: UInt64 { archUserEntryPhysical() }
 }
 
@@ -175,6 +193,18 @@ private func archClassifiedAllocationLedgerStorageEnd() -> UInt64
 @_silgen_name("arch_paging_layout_storage_end") private func archPagingLayoutStorageEnd() -> UInt64
 @_silgen_name("arch_debug_log_storage_start") private func archDebugLogStorageStart() -> UInt64
 @_silgen_name("arch_debug_log_storage_end") private func archDebugLogStorageEnd() -> UInt64
+@_silgen_name("arch_rp1_gem_workspace_start")
+private func archRP1GEMWorkspaceStart() -> UInt64
+@_silgen_name("arch_rp1_gem_workspace_end")
+private func archRP1GEMWorkspaceEnd() -> UInt64
+@_silgen_name("arch_rp1_gem_descriptor_page_start")
+private func archRP1GEMDescriptorPageStart() -> UInt64
+@_silgen_name("arch_rp1_gem_descriptor_page_end")
+private func archRP1GEMDescriptorPageEnd() -> UInt64
+@_silgen_name("arch_rp1_gem_cacheable_pages_start")
+private func archRP1GEMCacheablePagesStart() -> UInt64
+@_silgen_name("arch_rp1_gem_cacheable_pages_end")
+private func archRP1GEMCacheablePagesEnd() -> UInt64
 @_silgen_name("arch_user_entry_physical") private func archUserEntryPhysical() -> UInt64
 @_silgen_name("arch_secondary_entry_address") private func archSecondaryEntryAddress() -> UInt64
 @_silgen_name("arch_install_ttbr0") private func archInstallTTBR0(_ value: UInt64)

@@ -411,7 +411,12 @@ enum FinalTranslationTableBuilder {
         pool: inout FinalTranslationTablePagePool
     ) -> FinalTranslationTableBuildResult {
         pool.reset()
-        guard validate(layout: layout) else {
+        guard validate(layout: layout),
+              nonCacheableDataIsUniquelyMapped(
+                  availablePhysicalMemory: availablePhysicalMemory,
+                  layout: layout
+              )
+        else {
             return .failed(.invalidLayout)
         }
         guard let rootTable = pool.allocatePage() else {
@@ -577,7 +582,8 @@ enum FinalTranslationTableBuilder {
         }
         index = 0
         while index < layout.kernelDataRegions.count {
-            guard layout.kernelDataRegions[index].role == .kernelData else {
+            let role = layout.kernelDataRegions[index].role
+            guard role == .kernelData || role == .kernelNonCacheableData else {
                 return false
             }
             index += 1
@@ -597,6 +603,101 @@ enum FinalTranslationTableBuilder {
             index += 1
         }
         return true
+    }
+
+    /// Normal Non-Cacheable and Normal Write-Back aliases to one physical page
+    /// are architecturally unsafe. This validation is deliberately physical,
+    /// not virtual, and covers the allocator-provided direct map as well as all
+    /// exact mappings. It therefore fails closed if a caller forgets to split
+    /// the privileged kernel-data identity map around a descriptor page.
+    private static func nonCacheableDataIsUniquelyMapped(
+        availablePhysicalMemory: PhysicalMemoryMap,
+        layout: FinalAddressSpaceLayout
+    ) -> Bool {
+        var nonCacheableIndex = 0
+        while nonCacheableIndex < layout.kernelDataRegions.count {
+            let region = layout.kernelDataRegions[nonCacheableIndex]
+            if region.role != .kernelNonCacheableData {
+                nonCacheableIndex += 1
+                continue
+            }
+
+            var index = 0
+            while index < layout.kernelDataRegions.count {
+                if index != nonCacheableIndex,
+                   physicalRegionsOverlap(
+                       region,
+                       layout.kernelDataRegions[index]
+                   ) {
+                    return false
+                }
+                index += 1
+            }
+            if physicallyOverlaps(region, layout.kernelText)
+                || physicallyOverlaps(region, layout.userText)
+                || physicallyOverlaps(region, layout.userReadOnlyData) {
+                return false
+            }
+
+            index = 0
+            while index < layout.kernelReadOnlyDataRegions.count {
+                if physicalRegionsOverlap(
+                    region,
+                    layout.kernelReadOnlyDataRegions[index]
+                ) {
+                    return false
+                }
+                index += 1
+            }
+            index = 0
+            while index < layout.userStacks.count {
+                if physicalRegionsOverlap(region, layout.userStacks[index]) {
+                    return false
+                }
+                index += 1
+            }
+            index = 0
+            while index < layout.mmioRegions.count {
+                if physicalRegionsOverlap(region, layout.mmioRegions[index]) {
+                    return false
+                }
+                index += 1
+            }
+            index = 0
+            while index < availablePhysicalMemory.count {
+                guard let freeRange = availablePhysicalMemory.range(at: index)
+                else {
+                    return false
+                }
+                let freeEnd = freeRange.endAddress
+                if region.physicalBaseAddress < freeEnd
+                    && freeRange.baseAddress
+                        < region.physicalBaseAddress + region.byteCount {
+                    return false
+                }
+                index += 1
+            }
+            nonCacheableIndex += 1
+        }
+        return true
+    }
+
+    private static func physicallyOverlaps(
+        _ first: FinalMappingRegion,
+        _ second: FinalMappingRegion?
+    ) -> Bool {
+        guard let second else { return false }
+        return physicalRegionsOverlap(first, second)
+    }
+
+    private static func physicalRegionsOverlap(
+        _ first: FinalMappingRegion,
+        _ second: FinalMappingRegion
+    ) -> Bool {
+        first.physicalBaseAddress
+                < second.physicalBaseAddress + second.byteCount
+            && second.physicalBaseAddress
+                < first.physicalBaseAddress + first.byteCount
     }
 
     private static func valid(

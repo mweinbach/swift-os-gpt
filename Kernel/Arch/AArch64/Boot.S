@@ -108,7 +108,8 @@ _start:
 #endif
     dsb     sy
 
-    mov     x2, #0xff00             /* MAIR attr0=device, attr1=normal WB */
+    /* MAIR attr0=device-nGnRE, attr1=normal WBWA, attr2=normal NC. */
+    ldr     x2, =0x000000000044ff00
     msr     mair_el1, x2
 
     /*
@@ -193,7 +194,7 @@ _secondary_start:
     msr     cpacr_el1, x1
     msr     cntkctl_el1, xzr
 
-    mov     x1, #0xff00
+    ldr     x1, =0x000000000044ff00
     msr     mair_el1, x1
     ldr     x1, =0x00000000b5a03519
     mrs     x2, id_aa64mmfr0_el1
@@ -886,6 +887,16 @@ ADDRESS_ACCESSOR arch_paging_layout_storage, __paging_layout_storage
 ADDRESS_ACCESSOR arch_paging_layout_storage_end, __paging_layout_storage_end
 ADDRESS_ACCESSOR arch_debug_log_storage_start, __debug_log_storage_start
 ADDRESS_ACCESSOR arch_debug_log_storage_end, __debug_log_storage_end
+ADDRESS_ACCESSOR arch_rp1_gem_workspace_start, __rp1_gem_workspace_start
+ADDRESS_ACCESSOR arch_rp1_gem_workspace_end, __rp1_gem_workspace_end
+ADDRESS_ACCESSOR arch_rp1_gem_descriptor_page_start, \
+                 __rp1_gem_descriptor_page_start
+ADDRESS_ACCESSOR arch_rp1_gem_descriptor_page_end, \
+                 __rp1_gem_descriptor_page_end
+ADDRESS_ACCESSOR arch_rp1_gem_cacheable_pages_start, \
+                 __rp1_gem_cacheable_pages_start
+ADDRESS_ACCESSOR arch_rp1_gem_cacheable_pages_end, \
+                 __rp1_gem_cacheable_pages_end
 ADDRESS_ACCESSOR arch_user_entry_physical, __user_entry_physical
 ADDRESS_ACCESSOR arch_secondary_entry_address, _secondary_start
 
