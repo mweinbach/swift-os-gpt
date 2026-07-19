@@ -190,6 +190,12 @@ belong to the RP1 host controller and cannot be used as gadget ports. This
 physical requirement is checked before treating a missing macOS CDC device as
 a driver or kernel failure.
 
+`make swiftosctl` builds the automation-oriented macOS control client. Its
+`discover`, `doctor`, and `wait-ready` commands use IOKit to match only
+SwiftOS's `1209:5a17` identity and associate the exact CDC tty; `--json` makes
+the same state available to scripts and agents without scraping System
+Profiler output.
+
 The same CDC stream accepts bounded `SUPD` kernel updates. Build the uploader
 with `make usb-update`, validate with `--dry-run`, close the display viewer so
 only one process owns the tty, then pass the explicit `/dev/cu.usbmodem*` path.

@@ -17,6 +17,7 @@ RPI5_KERNEL_ELF := $(RPI5_BUILD_DIR)/swiftos-rpi5.elf
 RPI5_KERNEL_IMAGE := $(RPI5_BUILD_DIR)/kernel8.img
 USB_DISPLAY_VIEWER := $(BUILD_DIR)/swiftos-usb-display
 USB_UPDATE := $(BUILD_DIR)/swiftos-usb-update
+SWIFTOS_CONTROL := $(BUILD_DIR)/swiftosctl
 
 SWIFTC ?= swiftc
 MACOS_SWIFTC ?= xcrun swiftc
@@ -54,7 +55,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -305,7 +306,28 @@ $(USB_UPDATE): \
 
 usb-update: $(USB_UPDATE)
 
-host-test: firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-update-host-test
+swiftos-control-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(MACOS_SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		-framework IOKit \
+		tools/SwiftOSControl/SwiftOSDiscovery.swift \
+		Tests/Host/SwiftOSControlTests.swift \
+		-o $(BUILD_DIR)/swiftos-control-host-tests
+	$(BUILD_DIR)/swiftos-control-host-tests
+
+$(SWIFTOS_CONTROL): \
+		tools/SwiftOSControl/SwiftOSDiscovery.swift \
+		tools/SwiftOSControl/SwiftOSControlCLI.swift | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/swiftos-control-module-cache
+	$(MACOS_SWIFTC) -parse-as-library -whole-module-optimization \
+		-swift-version 5 -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/swiftos-control-module-cache \
+		-framework IOKit $^ -o $@
+
+swiftosctl: $(SWIFTOS_CONTROL)
+
+host-test: firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
