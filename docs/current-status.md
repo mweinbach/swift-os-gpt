@@ -86,9 +86,11 @@ this path:
 - creates one GPU-only color target, one six-vertex unit-quad buffer, a VirGL
   context, surface/framebuffer, shaders, vertex elements, rasterizer,
   depth/stencil/alpha state, and copy/source-over blend state;
-- clears and renders the first desktop as five GPU quads, then publishes the
-  resource through set-scanout and flush after 13 ordered fenced transactions;
-  and
+- constructs an 800 x 600 five-layer `RetainedLayerTree`, marks a full logical
+  `DamageRegion`, maps it through a centered integer `DisplayViewport`, and
+  lowers it through `GPURetainedSceneCompiler` into one GPU clear and five GPU
+  quads; then publishes the compiler-provided full presentation damage through
+  set-scanout and flush after 13 ordered fenced transactions; and
 - preserves the initialized session and compiler so later immutable render-IR
   frames can be lowered, submitted, and flushed with a checked damage rectangle
   without CPU pixel backing or uploads.
@@ -110,11 +112,13 @@ The supporting shared infrastructure includes:
 
 The deterministic transport tests verify the exact bootstrap packet sequence,
 fences, unit-quad upload, pipeline/draw stream, reusable frame submission, and
-damage flush. A source audit rejects software-rasterizer and framebuffer types
-from accelerated activation and execution. The installed local QEMU build does
-not expose a GL-backed VirGL device, however, so the accelerated markers and
-pixels have not been observed on a locally hardware-exercised backend and there
-is no accelerated screenshot evidence yet.
+damage flush. Scene-builder tests cover painter order, 1080p and 4K integer
+viewport scaling, and full-clear presentation damage. A source audit requires
+the `GPUDesktopScene` crossing and rejects software-rasterizer and framebuffer
+types from accelerated activation and execution. The installed local QEMU
+build does not expose a GL-backed VirGL device, however, so the accelerated
+markers and pixels have not been observed on a locally hardware-exercised
+backend and there is no accelerated screenshot evidence yet.
 
 ## Operating modes
 

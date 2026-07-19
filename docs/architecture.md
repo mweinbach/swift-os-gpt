@@ -183,11 +183,15 @@ generation-stable GPU configuration, supports separate external control
 buffers, validates bounded capsets, and creates a live context when a compatible
 VirGL2 device is available. Its production target is a host-private format-100
 `B8G8R8A8_SRGB` render/scanout resource; pixel backing is never mapped or
-uploaded by the CPU. The session creates and uploads an immutable GPU unit quad,
-installs its shaders and fixed pipeline, clears and draws the first desktop as
-five source-over GPU quads, then sets scanout and flushes after 13 ordered
-fenced transactions. The retained context/compiler can lower later immutable IR
-frames into the same target and issue a fenced flush for checked damage.
+uploaded by the CPU. The session creates and uploads an immutable GPU unit quad
+and installs its shaders and fixed pipeline. `GPUDesktopScene` builds a
+five-layer 800 x 600 retained tree and full damage;
+`GPURetainedSceneCompiler` applies the centered integer viewport and emits the
+attachment clear, scissor, and five source-over GPU quads. The returned full
+presentation damage is carried into the fenced flush, with the lifecycle still
+totaling 13 ordered transactions. The retained context/compiler can lower later
+immutable IR frames into the same target and issue a fenced flush for checked
+damage.
 
 The existing end-to-end QEMU smoke still exercises a separate host 2D resource
 with CPU-generated diagnostic backing, transfer, flush, and scanout. It is
@@ -213,9 +217,10 @@ rate nor physical display dimensions, so pixel-fit scaling is available but
 refresh/PPI-aware policy waits for a live EDID/DDC or equivalent metadata
 driver. The implementation remains hardware-unverified.
 
-The production QEMU branch draws its initial clear, top bar, panel, sidebar,
-accent card, and dock on the GPU. Its bounded lowering supports solid quads,
-affine Q16 transforms, clear/load/store, clipping, and copy/source-over blend.
+The production QEMU branch draws its initial retained scene's attachment clear,
+top bar, panel, sidebar, accent card, and dock on the GPU. Its bounded lowering
+supports solid quads, affine Q16 transforms, clear/load/store, clipping, and
+copy/source-over blend.
 Terminal glyphs, rounded coverage, and the continuous retained status animation
 still run only in the explicit diagnostic CPU path. There are no textures,
 paths, shadows, live font atlas, window/surface protocol, graphical input path,
@@ -230,8 +235,9 @@ userland and not evidence of a complete desktop environment.
 The eventual user compositor will own GPU queues and scanout. Applications will
 submit owned surfaces and damage rectangles through handles rather than
 receiving scanout or device mappings. QEMU VirGL and native Pi V3D/HVS drivers
-implement the same command, memory-domain, synchronization, and presentation
-contracts; retained scene and animation policy remain shared.
+will implement the same command, memory-domain, synchronization, and
+presentation contracts with separate hardware backends; retained scene and
+animation policy remain shared.
 
 ## User ABI direction
 

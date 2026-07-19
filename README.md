@@ -65,8 +65,10 @@ The verified QEMU path now includes:
    layers, fixed-point easing, and paced animation in the single-CPU monitor;
 6. a production QEMU GPU path that negotiates VirGL, creates a host-private
    format-100 `B8G8R8A8_SRGB` render/scanout target and GPU unit-quad buffer,
-   installs its shaders and fixed pipeline, lowers the first desktop into GPU
-   clear and source-over quad commands, and publishes scanout only after 13
+   installs its shaders and fixed pipeline, builds the 800 x 600 boot desktop
+   as five retained logical layers, compiles full logical damage through the
+   shared retained-scene compiler into one GPU clear and five source-over quad
+   draws at a centered integer scale, and publishes scanout only after 13
    ordered fenced transactions; the initialized session also accepts reusable
    GPU-only render-IR submissions and flushes their declared damage; and
 7. shared GPU foundations around that path: bounded render commands and
@@ -175,9 +177,10 @@ The repository boots a freestanding EL1 Swift kernel, replaces its bootstrap map
 with owned final mappings, proves IRQ-driven preemption and isolated EL0 Swift
 threads, brings multiple described CPUs online through PSCI, and renders and
 presents its diagnostic QEMU desktop through two display backends. It also
-contains a production VirGL boot route whose first desktop is generated from a
-GPU clear and five GPU quads, with no CPU pixel storage, but the local QEMU build
-cannot hardware-exercise that accelerated route.
+contains a production VirGL boot route whose first desktop is built from
+retained scene state and full damage, then compiled into one GPU clear and five
+GPU quads with no CPU pixel storage. The local QEMU build cannot
+hardware-exercise that accelerated route.
 The scheduler currently runs both user threads only on CPU0; secondary CPUs
 publish online state and park. There is no loader, VFS, persistent storage,
 graphical input, user compositor/window protocol, or stable application ABI.

@@ -230,14 +230,15 @@ path only.
 The generic graphics contracts are no longer tied to ramfb, VirtIO, or Pi. They
 separate a GPU rasterizer, display presenter, image-memory domain, command queue,
 fences, frame-slot lifetime, and scene publication. The shared retained-scene
-compiler can therefore feed the QEMU VirGL backend or native Pi V3D VII backend
-without duplicating UI policy. The QEMU boot path now contains an active VirGL
-session route; the Pi V3D VII route does not exist yet.
+compiler now feeds the QEMU VirGL boot session; a future native Pi V3D VII
+backend must consume the same commands without duplicating UI policy. The Pi
+route does not exist yet.
 
 QEMU can boot without ramfb through a Swift modern VirtIO-MMIO GPU 2D driver;
 that smoke remains CPU-rasterized diagnostic evidence. A separate production
 QEMU branch now creates a format-100 sRGB VirGL target and GPU unit quad,
-installs its pipeline, renders its first desktop as GPU quads, and retains a
+installs its pipeline, builds its first desktop through the shared retained-scene
+compiler, renders the resulting clear and five quads on the GPU, and retains a
 reusable GPU-only IR submission/damage-flush session. The installed local QEMU
 lacks a GL-backed VirGL device, so this route is source/protocol/host-tested but
 not locally hardware-exercised. None of it implements or validates Raspberry Pi

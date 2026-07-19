@@ -1,9 +1,10 @@
 # Renderer foundation
 
 SwiftOS rendering is guest-owned Swift code. It does not call SwiftUI, Metal,
-CoreGraphics, a host window server, or a Linux graphics stack. QEMU and
-Raspberry Pi drivers lower the same retained scene and backend-neutral GPU
-command contract into their own hardware protocols.
+CoreGraphics, a host window server, or a Linux graphics stack. The production
+QEMU driver lowers the shared retained scene and backend-neutral GPU command
+contract to VirGL. A future native Raspberry Pi driver must lower that same
+contract to V3D/HVS without changing UI policy.
 
 ## Production invariant
 
@@ -34,9 +35,15 @@ diagnostic framebuffer setup. On a compatible VirGL2 device, the guest:
    `R32G32_FLOAT` vertices without creating any pixel backing store;
 4. creates the color surface, framebuffer, shaders, vertex elements,
    rasterizer, depth/stencil/alpha state, and copy/source-over blend state;
-5. clears the target and lowers the first desktop into five source-over solid
-   quads through the device-neutral render IR; and
-6. sets scanout and flushes only after all dependent queue work completes.
+5. builds the first desktop as five retained logical layers, then uses
+   `GPURetainedSceneCompiler` to lower full logical damage into one attachment
+   clear and five source-over solid quads; and
+6. sets scanout and flushes the compiler-provided presentation damage only
+   after all dependent queue work completes.
+
+`DisplayViewport` centers and integer-scales the 800 x 600 logical scene. The
+full-damage clear includes letterboxes, so the first presentation damage is the
+complete scanout.
 
 The validated lifecycle uses 13 fenced control-queue transactions: display
 query; two capset metadata queries; selected-capset payload; context creation;
@@ -108,21 +115,22 @@ The QEMU backend negotiates optional VirtIO 3D features, reads stable device
 configuration, enumerates and validates bounded VirGL capability sets, encodes
 context/resource/transfer/submit control messages, and emits VirGL surface,
 framebuffer, clear, fixed-state, shader, draw, and GPU-to-GPU copy commands. The
-boot path now creates that context and submits a GPU-generated desktop, while a
+boot path now creates that context and submits a GPU-rasterized retained desktop
+compiled through `GPUDesktopScene` and `GPURetainedSceneCompiler`, while a
 reusable session API accepts later GPU-only IR frames with bounded damage.
 
-The Pi backend uses the same generic commands and scheduling contracts. Device
-tree discovery identifies the enabled V3D VII hub/core/SMS regions, HVS scanout
-registers, and the requirement for graphics address translation; boot-resource
-planning maps those MMIO regions as Device memory. Discovery and mapping do not
-constitute V3D command submission or HDMI output.
+The planned Pi backend will use the same generic commands and scheduling
+contracts. Device tree discovery identifies the enabled V3D VII hub/core/SMS
+regions, HVS scanout registers, and the requirement for graphics address
+translation; boot-resource planning maps those MMIO regions as Device memory.
+Discovery and mapping do not constitute V3D command submission or HDMI output.
 
 The production frame path will keep three offscreen GPU render targets and a
 separate persistent scanout image. After a frame fence completes, the GPU copies
 only the damaged region into scanout before presentation. This avoids reusing a
 render target while the display engine may still read the visible front image.
-QEMU and Pi implement that model with different queue and display drivers, not
-different UI semantics.
+QEMU and Pi will implement that model with different queue and display drivers,
+not different UI semantics.
 
 ## Verified proof and validation boundary
 
@@ -135,9 +143,11 @@ compositor repaint.
 
 The accelerated session and IR lowering have deterministic host tests for exact
 packet order, fence progression, format/capability rejection, unit-quad upload,
-pipeline state, initial quad draws, reusable submission, and damage flush. The
-GPU-only source audit separately prevents software rasterizer or framebuffer
-types from entering accelerated activation and execution.
+pipeline state, retained boot-scene construction, 1080p and 4K integer viewport
+scaling, full-clear presentation damage, initial quad draws, reusable
+submission, and damage flush. The GPU-only source audit separately requires the
+retained scene crossing and prevents software rasterizer or framebuffer types
+from entering accelerated activation and execution.
 
 The live animation loop currently belongs to the single-CPU EL1 diagnostic
 monitor. The Pi image and diagnostic multicore QEMU path rasterize the same
@@ -170,7 +180,8 @@ physical Pi output are hardware-verified.
   after object handles and checked user-copy exist.
 
 This is the base of a modern UI renderer, not yet a window server. The QEMU
-accelerated branch currently produces a static clear-and-quad bootstrap frame;
+accelerated branch currently produces a static retained-scene bootstrap frame
+(one attachment clear plus five quads);
 there are no EL0 surfaces, textures, paths, rounded GPU coverage, live font
 atlas, input routing, or sustained compositor loop yet, and the checked-in GPU
 frame has not been exercised by the installed local QEMU.
