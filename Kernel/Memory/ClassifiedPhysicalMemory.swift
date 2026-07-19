@@ -112,6 +112,8 @@ enum PhysicalMemoryDomainSelection: Equatable {
 struct ClassifiedPageAllocationConstraints: Equatable {
     let pageCount: UInt64
     let alignmentInPages: UInt64
+    /// Lowest byte address at which the allocation may begin, inclusive.
+    let minimumAddress: UInt64
     /// Highest byte address the allocation may occupy, inclusive.
     let maximumAddress: UInt64
     let requiredCapabilities: PhysicalMemoryCapabilities
@@ -120,12 +122,14 @@ struct ClassifiedPageAllocationConstraints: Equatable {
     init(
         pageCount: UInt64,
         alignmentInPages: UInt64 = 1,
+        minimumAddress: UInt64 = 0,
         maximumAddress: UInt64 = .max,
         requiredCapabilities: PhysicalMemoryCapabilities = .none,
         domainSelection: PhysicalMemoryDomainSelection = .any
     ) {
         self.pageCount = pageCount
         self.alignmentInPages = alignmentInPages
+        self.minimumAddress = minimumAddress
         self.maximumAddress = maximumAddress
         self.requiredCapabilities = requiredCapabilities
         self.domainSelection = domainSelection
@@ -421,6 +425,8 @@ struct ClassifiedPhysicalMemoryAllocator {
     ) -> ClassifiedPageAllocationResult {
         guard constraints.pageCount > 0,
               constraints.alignmentInPages > 0,
+              constraints.minimumAddress <= constraints.maximumAddress,
+              MemoryPageGeometry.alignUp(constraints.minimumAddress) != nil,
               MemoryPageGeometry.byteCount(
                   forPageCount: constraints.pageCount
               ) != nil
@@ -548,7 +554,17 @@ struct ClassifiedPhysicalMemoryAllocator {
             }
 
             let run = classifiedRun.range
-            let startPage = run.baseAddress / MemoryPageGeometry.pageSize
+            guard let minimumBase = MemoryPageGeometry.alignUp(
+                      constraints.minimumAddress
+                  )
+            else {
+                index += 1
+                continue
+            }
+            let firstAllowedBase = run.baseAddress > minimumBase
+                ? run.baseAddress
+                : minimumBase
+            let startPage = firstAllowedBase / MemoryPageGeometry.pageSize
             let remainder = startPage % constraints.alignmentInPages
             let pageAdjustment = remainder == 0
                 ? 0

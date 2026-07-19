@@ -442,6 +442,33 @@ struct ClassifiedPhysicalMemoryTests {
                 bounded.range.endAddress - 1 == 0x5fff,
                 "bounded allocation end"
             )
+
+            let minimumBounded = expectAllocation(
+                allocator.allocate(
+                    ClassifiedPageAllocationConstraints(
+                        pageCount: 1,
+                        alignmentInPages: 2,
+                        minimumAddress: 0x7001,
+                        maximumAddress: 0x9fff,
+                        requiredCapabilities: .cpuReadable
+                    )
+                ),
+                "minimum-bounded aligned allocation"
+            )
+            expect(
+                minimumBounded.range.baseAddress == 0x8000,
+                "minimum address was not rounded up before alignment"
+            )
+            expect(
+                allocator.allocate(
+                    ClassifiedPageAllocationConstraints(
+                        pageCount: 1,
+                        minimumAddress: 0xa000,
+                        maximumAddress: 0x9fff
+                    )
+                ) == .invalidRequest,
+                "inverted address bounds were accepted"
+            )
         }
 
         withAllocator(freeCapacity: 1, allocationCapacity: 1) {
