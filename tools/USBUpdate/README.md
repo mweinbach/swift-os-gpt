@@ -2,7 +2,10 @@
 
 `swiftos-usb-update` validates and pushes a Raspberry Pi 5 `kernel8.img` over
 the same CDC ACM connection used by the USB diagnostic display. It never
-reports success until the guest acknowledges an SHA-256-verified commit.
+reports staging success until the guest acknowledges an SHA-256-verified
+commit. That acknowledgement precedes guest activation policy; confirm the Pi
+disconnects, re-enumerates, and boots the expected image.
+Only one host process can own the tty, so close the display viewer first.
 
 Build and inspect devices:
 
@@ -83,11 +86,22 @@ version, unsupported target, invalid offset, checksum mismatch, storage
 failure, busy, and aborted occupy `0x0100...0x0107`. Phases are idle `0`,
 receiving `1`, verifying `2`, committed `3`, and rejected `4`.
 
-COMMIT is the durable boundary: the guest must calculate SHA-256 across the
-complete staged artifact and must not return committed until its activation
-metadata is safely written. A reconnect after a lost COMMIT response can issue
-BEGIN again; a guest that already completed the same transfer returns committed
-with `nextOffset == totalLength`.
+COMMIT is the verified staging boundary: the guest calculates SHA-256 across
+the complete staged artifact, validates the Pi Image header, seals activation
+metadata, sends COMMITTED, and only then may its kernel policy perform a
+bounded soft restart. A reconnect after a lost COMMIT response can issue BEGIN
+again; a guest that already completed the same transfer returns committed with
+`nextOffset == totalLength`.
+
+The CLI therefore reports sealed staging and a requested chainload, not an
+end-to-end boot result. Confirm that the CDC device disconnects, re-enumerates,
+and exposes the expected new boot identity; UART remains the policy-failure
+diagnostic path until that identity exchange exists on SUPD itself.
+
+This first updater is intentionally volatile. A successful soft restart runs
+the staged RAM image, while a power cycle returns to `kernel8.img` on the
+microSD card. SHA-256 and CRC32 provide corruption detection, not signer or host
+authentication; use this only on a physically trusted development connection.
 
 Run the host protocol tests with:
 

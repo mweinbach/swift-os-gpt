@@ -205,7 +205,9 @@ private final class USBUpdateRunner {
         if beginStatus.code == .committed,
            beginStatus.phase == .committed
         {
-            printStatus("device reports this image is already committed")
+            printStatus(
+                "device reports this image is already sealed in staging; chainload policy will run after STATUS completion"
+            )
             return true
         }
 
@@ -273,7 +275,9 @@ private final class USBUpdateRunner {
             )
             throw error
         }
-        printStatus("device verified and committed the update")
+        printStatus(
+            "device verified and sealed the update; chainload requested after this acknowledgement"
+        )
         return true
     }
 
@@ -410,9 +414,10 @@ struct USBUpdateMain {
       --help                 Show this help.
 
     The device stages exact-offset chunks, verifies the complete SHA-256, and
-    must acknowledge COMMIT before this command reports success. Transport
-    interruptions restart with idempotent BEGIN and resume at the device's
-    acknowledged offset.
+    must acknowledge COMMIT before this command reports staging success.
+    Activation is a later guest-policy step; confirm the Pi disconnects,
+    re-enumerates, and boots the expected image. Transport interruptions restart
+    with idempotent BEGIN and resume at the device's acknowledged offset.
     """
 }
 

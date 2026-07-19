@@ -174,14 +174,32 @@ first probes the pinned firmware DTB for the exact UART10, GICv2, PSCI, CPU, and
 ATF-reservation contract, then adds it and the official `dwc2.dtbo` from that
 same revision with byte hashes. The packaged `config.txt` enables DWC2
 peripheral mode for USB-C debugging and asks Pi firmware to select an HDMI mode
-from EDID and retain a 32-bit boot framebuffer. The kernel discovers and maps
+from EDID and retain a 32-bit boot framebuffer. It also pins the expanded DTB
+to a bounded 48 MiB window, outside both the reserved restart destination and
+the high-memory upload workspace. The kernel discovers and maps
 the translated DWC2 and firmware-mailbox resources, powers the USB domain,
 initializes DWC2 in bounded polled device mode, and exposes a CDC ACM diagnostic
 display stream. It can mirror a firmware framebuffer or use a kernel-owned
 800 x 600 surface when HDMI is absent. Build and run the macOS receiver with
 `make usb-display-viewer` and `.build/swiftos-usb-display`; see the
-[USB display viewer](tools/USBDisplay/README.md). This path is host-tested but
-has not enumerated on a physical Pi, so it is not a hardware-support claim.
+[USB display viewer](tools/USBDisplay/README.md).
+
+The same CDC stream accepts bounded `SUPD` kernel updates. Build the uploader
+with `make usb-update`, validate with `--dry-run`, close the display viewer so
+only one process owns the tty, then pass the explicit `/dev/cu.usbmodem*` path.
+The guest stages at most 16 MiB above 64 MiB, verifies frame CRCs, whole-image
+SHA-256 and CRC32, and the Pi Image header before it acknowledges COMMIT. It
+then chainloads only when the complete 32 MiB destination was reserved at boot,
+the current CPU is Pi CPU0, parked managed secondaries enter PSCI CPU_OFF,
+firmware reports every other described CPU OFF, and bounded USB plus interrupt
+shutdown succeeds. Future busy secondary workloads must service the same
+restart checkpoint from a bounded scheduler or interrupt path. See the
+[USB kernel updater](tools/USBUpdate/README.md). This is a volatile development
+update: a power cycle loads the microSD image again, and integrity hashes do not
+authenticate the connected host. COMMITTED confirms sealed staging, not the
+subsequent policy handoff; verify the disconnect, re-enumeration, and new boot
+identity. The path is host-tested but has not run on a physical Pi, so it is
+not a hardware-support claim.
 
 ## Honest status
 

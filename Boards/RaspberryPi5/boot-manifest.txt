@@ -25,6 +25,22 @@ SwiftOS source checkout, build and start the macOS receiver with:
   .build/swiftos-usb-display --list
   .build/swiftos-usb-display
 
+The same CDC stream also accepts the SUPD kernel update protocol. Close the
+display viewer before opening the updater, then validate and send one explicit
+Pi Image with:
+
+  make usb-update
+  .build/swiftos-usb-update --image .build/raspberry-pi-5/kernel8.img --dry-run
+  .build/swiftos-usb-update --device /dev/cu.usbmodemSWIFTOS1 \
+    --image .build/raspberry-pi-5/kernel8.img
+
+COMMIT stages, validates, and conditionally chainloads the image from RAM after
+the host receives its final status. COMMITTED proves sealed staging, not that
+the later policy handoff succeeded; confirm the USB disconnect, re-enumeration,
+and expected boot identity. This update is volatile; power cycling returns to
+kernel8.img on this partition. SHA-256 verifies transport integrity, not host
+authenticity. Persistent USB updates require a future SD/MMC writer.
+
 This is USB data, not DisplayPort. USB starts after memory and driver bring-up;
 UART10 remains the only route for failures before gadget attachment. Use a
 data-capable cable and adequate safe power rather than assuming a computer port
