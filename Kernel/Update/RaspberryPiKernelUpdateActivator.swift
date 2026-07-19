@@ -25,6 +25,8 @@ enum RaspberryPiKernelUpdatePreparationResult: Equatable {
 /// no transport state and performs no activation until the caller has returned
 /// COMMITTED to the host and quiesced every active driver.
 enum RaspberryPiKernelUpdateActivator {
+    private static let processorShutdownPollLimit: UInt64 = 100_000
+
     static func prepare(
         platform: Platform,
         reservedDestination: KernelUpdateDestinationWindow?,
@@ -123,10 +125,11 @@ enum RaspberryPiKernelUpdateActivator {
         )
     }
 
-    /// Requires the boot processor to be affinity zero and every other CPU
-    /// described by firmware to report PSCI OFF. QEMU and active secondaries
-    /// are deliberately rejected until a stop rendezvous exists.
-    static func processorsAreQuiescent(platform: Platform) -> Bool {
+    /// Requests every kernel-managed secondary to enter PSCI CPU_OFF, then
+    /// requires firmware to report every non-boot affinity OFF. The rendezvous
+    /// itself is transport-neutral; this Pi policy adds the board's affinity-0
+    /// boot contract and preserves a bounded, authoritative PSCI proof.
+    static func quiesceProcessors(platform: Platform) -> Bool {
         guard platform.kind == .raspberryPi5 else { return false }
         let executing = ProcessorAffinity.fromMPIDR(
             AArch64.multiprocessorAffinity
@@ -143,6 +146,7 @@ enum RaspberryPiKernelUpdateActivator {
             return false
         }
 
+        // Validate the complete topology before issuing a no-return request.
         var sawExecutingProcessor = false
         var processorIndex = 0
         while processorIndex < 64,
@@ -163,11 +167,6 @@ enum RaspberryPiKernelUpdateActivator {
             }
             if affinity == executing {
                 sawExecutingProcessor = true
-            } else if PSCIFirmware.affinityInfo(
-                        conduit: conduit,
-                        targetAffinity: affinity.rawValue
-                      ) != .off {
-                return false
             }
             processorIndex += 1
         }
@@ -176,6 +175,32 @@ enum RaspberryPiKernelUpdateActivator {
               sawExecutingProcessor
         else {
             return false
+        }
+
+        switch SMPKernelRestartRendezvous.request() {
+        case .noManagedSecondaries, .requested:
+            break
+        case .invalidRegistry:
+            return false
+        }
+
+        processorIndex = 0
+        while processorIndex < 64,
+              let rawAffinity = platform.processorAffinity(
+                  at: processorIndex
+              ) {
+            let affinity = ProcessorAffinity(
+                deviceTreeValue: rawAffinity
+            )!
+            if affinity != executing,
+               !waitUntilOff(
+                   conduit: conduit,
+                   affinity: affinity,
+                   pollLimit: processorShutdownPollLimit
+               ) {
+                return false
+            }
+            processorIndex += 1
         }
         return true
     }
@@ -193,6 +218,29 @@ enum RaspberryPiKernelUpdateActivator {
                 prepared.image.runtimeImageByteCount,
             trampolineByteCount: prepared.trampolineByteCount
         )
+    }
+
+    private static func waitUntilOff(
+        conduit: PSCIConduit,
+        affinity: ProcessorAffinity,
+        pollLimit: UInt64
+    ) -> Bool {
+        var pollCount: UInt64 = 0
+        while pollCount < pollLimit {
+            switch PSCIFirmware.affinityInfo(
+                conduit: conduit,
+                targetAffinity: affinity.rawValue
+            ) {
+            case .off:
+                return true
+            case .on, .onPending:
+                AArch64.spinHint()
+            case .failure:
+                return false
+            }
+            pollCount += 1
+        }
+        return false
     }
 
     private static func rawBuffer(

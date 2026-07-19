@@ -144,11 +144,18 @@ struct DWC2USBDebugGadgetTests {
     private static func enumeratesConfiguresAndStreamsAFrame() {
         let bank = USBDebugGadgetRegisterBank()
         var pixels = Array(UInt8(0)..<UInt8(32))
-        var scratch = [UInt8](repeating: 0, count: 2_048)
-        pixels.withUnsafeMutableBytes { source in
+        var scratch = [UInt8](repeating: 0, count: 4_096)
+        var updateStaging = [UInt8](repeating: 0, count: 512)
+        updateStaging.withUnsafeMutableBytes { updateBytes in
+          pixels.withUnsafeMutableBytes { source in
             scratch.withUnsafeMutableBytes { scratchBytes in
                 guard let sourceBase = source.baseAddress,
                       let scratchBase = scratchBytes.baseAddress,
+                      let updateBase = updateBytes.baseAddress,
+                      let updateRegion = USBKernelUpdateRAMStagingRegion(
+                          baseAddress: UInt64(UInt(bitPattern: updateBase)),
+                          byteCount: UInt64(updateBytes.count)
+                      ),
                       let scanout = makeScanout(
                           sourceBase: sourceBase,
                           sourceByteCount: source.count
@@ -161,6 +168,7 @@ struct DWC2USBDebugGadgetTests {
                           scanout: scanout,
                           viewportScale: 1,
                           sessionID: 0x55,
+                          updateStagingRegion: updateRegion,
                           maximumInitializationPollCount: 4
                       )
                 else {
@@ -227,13 +235,25 @@ struct DWC2USBDebugGadgetTests {
                 )
                 expect(gadget.state == .configured, "wrong gadget state")
                 setLineCoding(bank: bank, gadget: &gadget)
+                exerciseCommittedKernelUpdate(
+                    bank: bank,
+                    gadget: &gadget
+                )
                 discardMaximumBulkOutPacket(bank: bank, gadget: &gadget)
                 let endpointTwoTransferSize = Int(
                     DWC2RegisterLayout.inEndpointTransferSize(2)! / 4
                 )
                 expect(
-                    bank.words[endpointTwoTransferSize] == 0,
-                    "display streamed before the CDC tty was opened"
+                    bank.words[endpointTwoTransferSize]
+                        == DWC2TransferSize.bulk(
+                            byteCount: UInt32(
+                                USBKernelUpdateProtocol.headerByteCount
+                                    + USBKernelUpdateProtocol
+                                        .statusPayloadByteCount
+                            ),
+                            maximumPacketSize: 512
+                        ),
+                    "display replaced SUPD traffic before the tty was opened"
                 )
 
                 setControlLineState(
@@ -315,6 +335,214 @@ struct DWC2USBDebugGadgetTests {
                     "stale display completion escaped configured reset cleanup"
                 )
             }
+          }
+        }
+    }
+
+    private static func exerciseCommittedKernelUpdate(
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        let image = makePiUpdateImage()
+        let transferID: UInt32 = 0x1020_3040
+        let digest = updateDigest(image)
+        let crc = updateCRC32(image)
+        sendUpdatePacket(
+            encodedUpdatePacket(
+                .begin(
+                    USBKernelUpdateBegin(
+                        artifactKind: .kernelBootImage,
+                        targetMachine: .raspberryPi5,
+                        totalLength: UInt64(image.count),
+                        chunkByteCount: 64,
+                        totalChunkCount: 2,
+                        sha256: digest,
+                        imageCRC32: crc
+                    )
+                ),
+                transferID: transferID,
+                sequence: 0
+            ),
+            expectsCommittedEvent: false,
+            bank: bank,
+            gadget: &gadget
+        )
+
+        let first = Array(image[0..<64])
+        first.withUnsafeBytes { bytes in
+            sendUpdatePacket(
+                encodedUpdatePacket(
+                    .data(USBKernelUpdateData(offset: 0, bytes: bytes)),
+                    transferID: transferID,
+                    sequence: 1
+                ),
+                expectsCommittedEvent: false,
+                bank: bank,
+                gadget: &gadget
+            )
+        }
+        let second = Array(image[64..<128])
+        second.withUnsafeBytes { bytes in
+            sendUpdatePacket(
+                encodedUpdatePacket(
+                    .data(USBKernelUpdateData(offset: 64, bytes: bytes)),
+                    transferID: transferID,
+                    sequence: 2
+                ),
+                expectsCommittedEvent: false,
+                bank: bank,
+                gadget: &gadget
+            )
+        }
+
+        sendUpdatePacket(
+            encodedUpdatePacket(
+                .commit(
+                    USBKernelUpdateCommit(
+                        totalLength: UInt64(image.count),
+                        sha256: digest
+                    )
+                ),
+                transferID: transferID,
+                sequence: 3
+            ),
+            expectsCommittedEvent: true,
+            bank: bank,
+            gadget: &gadget
+        )
+    }
+
+    private static func sendUpdatePacket(
+        _ packet: [UInt8],
+        expectsCommittedEvent: Bool,
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        bank.loadReceiveData(packet)
+        bank.injectReceiveStatus(
+            endpoint: 2,
+            packetStatus: .outDataReceived,
+            byteCount: UInt16(packet.count)
+        )
+        expect(
+            gadget.service() == .none,
+            "update became ready before STATUS was transferred"
+        )
+        let endpointTwoTransferSize = Int(
+            DWC2RegisterLayout.inEndpointTransferSize(2)! / 4
+        )
+        expect(
+            bank.words[endpointTwoTransferSize]
+                == DWC2TransferSize.bulk(
+                    byteCount: UInt32(
+                        USBKernelUpdateProtocol.headerByteCount
+                            + USBKernelUpdateProtocol.statusPayloadByteCount
+                    ),
+                    maximumPacketSize: 512
+                ),
+            "SUPD STATUS did not take endpoint-two IN priority"
+        )
+
+        bank.loadReceiveData([])
+        bank.injectReceiveStatus(
+            endpoint: 2,
+            packetStatus: .outTransferComplete,
+            byteCount: 0
+        )
+        expect(
+            gadget.service() == .none,
+            "update became ready at OUT completion"
+        )
+
+        bank.injectInCompletion(2)
+        let completion = gadget.service()
+        if expectsCommittedEvent {
+            guard case .kernelUpdateReady(let artifact) = completion,
+                  artifact.descriptor.totalLength == 128,
+                  case .raspberryPi5(let metadata) = artifact.imageMetadata,
+                  metadata.runtimeImageByteCount == 4_096
+            else {
+                fail("committed STATUS completion did not emit sealed update")
+            }
+        } else {
+            expect(
+                completion == .none,
+                "non-committed STATUS emitted an update event"
+            )
+        }
+    }
+
+    private static func encodedUpdatePacket(
+        _ message: USBKernelUpdateMessage,
+        transferID: UInt32,
+        sequence: UInt32
+    ) -> [UInt8] {
+        var output = [UInt8](repeating: 0, count: 512)
+        let byteCount = output.withUnsafeMutableBytes { bytes -> Int in
+            guard case .encoded(let count) = USBKernelUpdatePacketEncoder.encode(
+                      message,
+                      transferID: transferID,
+                      sequence: sequence,
+                      into: bytes
+                  )
+            else { fail("SUPD fixture encoding failed") }
+            return count
+        }
+        return Array(output[0..<byteCount])
+    }
+
+    private static func makePiUpdateImage() -> [UInt8] {
+        var image = [UInt8](repeating: 0, count: 128)
+        writeUpdateUInt32(0x1400_0010, to: &image, at: 0)
+        writeUpdateUInt64(0x0008_0000, to: &image, at: 8)
+        writeUpdateUInt64(4_096, to: &image, at: 16)
+        writeUpdateUInt64(2, to: &image, at: 24)
+        writeUpdateUInt32(0x644d_5241, to: &image, at: 56)
+        image[64] = 0xd5
+        return image
+    }
+
+    private static func updateDigest(
+        _ bytes: [UInt8]
+    ) -> USBKernelUpdateSHA256Digest {
+        var sha = USBKernelUpdateSHA256()
+        bytes.withUnsafeBytes { input in
+            expect(sha.update(input), "SUPD fixture SHA rejected input")
+        }
+        return sha.finalizedDigest()
+    }
+
+    private static func updateCRC32(_ bytes: [UInt8]) -> UInt32 {
+        var crc = USBKernelUpdateCRC32()
+        bytes.withUnsafeBytes { crc.update($0) }
+        return crc.value
+    }
+
+    private static func writeUpdateUInt32(
+        _ value: UInt32,
+        to bytes: inout [UInt8],
+        at offset: Int
+    ) {
+        var index = 0
+        while index < 4 {
+            bytes[offset + index] = UInt8(
+                truncatingIfNeeded: value >> UInt32(index * 8)
+            )
+            index += 1
+        }
+    }
+
+    private static func writeUpdateUInt64(
+        _ value: UInt64,
+        to bytes: inout [UInt8],
+        at offset: Int
+    ) {
+        var index = 0
+        while index < 8 {
+            bytes[offset + index] = UInt8(
+                truncatingIfNeeded: value >> UInt64(index * 8)
+            )
+            index += 1
         }
     }
 

@@ -6,7 +6,10 @@ struct KernelMonitor {
     private var display: ActiveDisplayBackend
     private let canvas: ScaledFramebufferCanvas
     private let serial: PL011
+    private let platform: Platform
     private let boardKind: BoardKind
+    private let kernelUpdateDestination: KernelUpdateDestinationWindow?
+    private let kernelUpdateStaging: KernelUpdateStagingLayout?
     private let mode: DisplayMode
     private var statusIndicator: AnimatedStatusIndicator?
     private var wroteAnimationFrameMarker = false
@@ -21,7 +24,9 @@ struct KernelMonitor {
     init(
         canvas: ScaledFramebufferCanvas,
         display: ActiveDisplayBackend,
-        boardKind: BoardKind,
+        platform: Platform,
+        kernelUpdateDestination: KernelUpdateDestinationWindow?,
+        kernelUpdateStaging: KernelUpdateStagingLayout?,
         storageAddress: UInt64,
         serial: PL011,
         usbDebug: RaspberryPiUSBDebugGadget? = nil
@@ -32,7 +37,10 @@ struct KernelMonitor {
         )
         self.canvas = canvas
         self.display = display
-        self.boardKind = boardKind
+        self.platform = platform
+        self.boardKind = platform.kind
+        self.kernelUpdateDestination = kernelUpdateDestination
+        self.kernelUpdateStaging = kernelUpdateStaging
         mode = display.mode
         statusIndicator = AnimatedStatusIndicator(
             logicalBounds: canvas.viewport.logicalBounds,
@@ -141,9 +149,62 @@ struct KernelMonitor {
         case .faulted:
             serialWrite("SWIFTOS:USB_DEBUG_FAULT\n")
             usbDebug = nil
+        case .kernelUpdateReady(let artifact):
+            handleKernelUpdateReady(artifact)
         case .none, .busReset, .enumerated, .deconfigured:
             break
         }
+    }
+
+    private mutating func handleKernelUpdateReady(
+        _ artifact: USBKernelUpdateSealedArtifact
+    ) {
+        guard let staging = kernelUpdateStaging,
+              artifact.stagingRegion.baseAddress
+                == staging.image.baseAddress,
+              artifact.stagingRegion.byteCount == staging.image.byteCount,
+              artifact.descriptor.totalLength
+                <= artifact.stagingRegion.byteCount,
+              case .raspberryPi5(let sealedMetadata)
+                = artifact.imageMetadata
+        else {
+            serialWrite("SWIFTOS:USB_UPDATE_POLICY_REJECTED\n")
+            return
+        }
+        let preparation = RaspberryPiKernelUpdateActivator.prepare(
+            platform: platform,
+            reservedDestination: kernelUpdateDestination,
+            staging: staging,
+            rawImageByteCount: artifact.descriptor.totalLength
+        )
+        guard case .prepared(let prepared) = preparation,
+              prepared.image == sealedMetadata
+        else {
+            serialWrite("SWIFTOS:USB_UPDATE_IMAGE_REJECTED\n")
+            return
+        }
+        guard RaspberryPiKernelUpdateActivator.quiesceProcessors(
+                  platform: platform
+              )
+        else {
+            serialWrite("SWIFTOS:USB_UPDATE_CPUS_ACTIVE\n")
+            return
+        }
+
+        serialWrite("SWIFTOS:USB_UPDATE_COMMITTED\n")
+        serialWrite("SWIFTOS:USB_UPDATE_ACTIVATING\n")
+        guard var gadget = usbDebug,
+              gadget.quiesceForKernelActivation()
+        else {
+            serialWrite("SWIFTOS:PANIC:USB_UPDATE_QUIESCE\n")
+            while true { AArch64.waitForEvent() }
+        }
+        usbDebug = gadget
+        guard InterruptSubsystem.quiesceForKernelRestart() else {
+            serialWrite("SWIFTOS:PANIC:USB_UPDATE_INTERRUPTS\n")
+            while true { AArch64.waitForEvent() }
+        }
+        RaspberryPiKernelUpdateActivator.activate(prepared)
     }
 
     private func displayPanic() -> Never {

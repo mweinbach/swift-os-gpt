@@ -1,5 +1,6 @@
-/// Allocation-free SHA-256 used to authenticate a staged kernel update before
-/// it can be published. The implementation owns no platform or transport
+/// Allocation-free SHA-256 used to verify the integrity of a staged kernel
+/// update before its metadata can be sealed. Authenticity and activation are
+/// separate policy layers. This implementation owns no platform or transport
 /// policy and is suitable for the freestanding Embedded Swift guest.
 struct USBKernelUpdateSHA256Digest: Equatable {
     let word0: UInt32

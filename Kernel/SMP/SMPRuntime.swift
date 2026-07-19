@@ -2,6 +2,142 @@
 // secondary's acquire load happens before it derives or dereferences the state
 // buffer; there is no separately raced Swift pointer/count registry.
 private nonisolated(unsafe) var publishedProcessorStateRegistry: UInt64 = 0
+// Zero means no request. CPU0 is the single request writer, so an incrementing
+// epoch lets a secondary retry after a failed PSCI CPU_OFF without racing a
+// stale request from an earlier activation attempt.
+private nonisolated(unsafe) var publishedKernelRestartEpoch: UInt64 = 0
+// Stored as PSCIConduit.rawValue + 1 so zero remains an unpublished sentinel.
+private nonisolated(unsafe) var publishedKernelRestartConduit: UInt64 = 0
+
+enum SMPKernelRestartRequestResult: Equatable {
+    case noManagedSecondaries
+    case requested(epoch: UInt64, managedSecondaryCount: Int)
+    case invalidRegistry
+}
+
+enum SMPKernelRestartCheckpointResult: Equatable {
+    case idle
+    case invalidContext
+    /// CPU_OFF is specified not to return on success. Any returned value is a
+    /// failure, retained here so host tests and future diagnostics can classify
+    /// the firmware response without weakening the CPU0 affinity proof.
+    case shutdownReturned(PSCIReturnValue)
+}
+
+/// Transport-neutral, allocation-free rendezvous state shared by the boot CPU
+/// and kernel-managed secondaries. The current secondary execution path is a
+/// WFE park loop, so release-store + SEV is a bounded wakeup mechanism without
+/// depending on a USB driver or a board-specific interrupt controller.
+///
+/// A future scheduler that runs work on secondary CPUs must call `checkpoint`
+/// from a bounded per-CPU scheduling/interrupt path, or replace SEV with a
+/// broadcast IPI. CPU0 still proves firmware affinity OFF before chainloading,
+/// so omission can only reject an update; it cannot permit an unsafe handoff.
+enum SMPKernelRestartRendezvous {
+    static func request() -> SMPKernelRestartRequestResult {
+        let registry = archSMPLoadAcquire(&publishedProcessorStateRegistry)
+        guard registry != 0 else { return .noManagedSecondaries }
+        let stateBaseAddress = registry & ~UInt64(0x7)
+        let processorCount = Int((registry & 0x7) + 1)
+        guard processorCount > 0,
+              processorCount
+                <= ProcessorStartupPlan.maximumOnlineProcessorCount,
+              stateBaseAddress != 0,
+              stateBaseAddress <= UInt64(UInt.max),
+              stateBaseAddress & 0x7 == 0,
+              UnsafeMutablePointer<UInt64>(
+                  bitPattern: UInt(stateBaseAddress)
+              ) != nil
+        else {
+            return .invalidRegistry
+        }
+        guard processorCount > 1 else {
+            return .noManagedSecondaries
+        }
+        guard decodePublishedConduit() != nil else {
+            return .invalidRegistry
+        }
+
+        let priorEpoch = archSMPLoadAcquire(&publishedKernelRestartEpoch)
+        var nextEpoch = priorEpoch &+ 1
+        if nextEpoch == 0 { nextEpoch = 1 }
+        archSMPStoreRelease(&publishedKernelRestartEpoch, nextEpoch)
+        archSMPSendEvent()
+        return .requested(
+            epoch: nextEpoch,
+            managedSecondaryCount: processorCount - 1
+        )
+    }
+
+    /// Services at most one request epoch. The logical ID is the same dense
+    /// context value established by the PSCI CPU_ON path. Success never returns
+    /// because PSCI powers the calling processor off.
+    static func checkpoint(
+        logicalProcessorID: UInt64,
+        observedEpoch: inout UInt64
+    ) -> SMPKernelRestartCheckpointResult {
+        let requestedEpoch = archSMPLoadAcquire(
+            &publishedKernelRestartEpoch
+        )
+        guard requestedEpoch != 0,
+              requestedEpoch != observedEpoch
+        else {
+            return .idle
+        }
+        observedEpoch = requestedEpoch
+
+        let registry = archSMPLoadAcquire(&publishedProcessorStateRegistry)
+        let stateBaseAddress = registry & ~UInt64(0x7)
+        let processorCount = (registry & 0x7) + 1
+        guard registry != 0,
+              logicalProcessorID > 0,
+              logicalProcessorID < processorCount,
+              logicalProcessorID <= UInt64(Int.max),
+              stateBaseAddress != 0,
+              stateBaseAddress <= UInt64(UInt.max),
+              let stateBase = UnsafeMutablePointer<UInt64>(
+                  bitPattern: UInt(stateBaseAddress)
+              ),
+              let conduit = decodePublishedConduit()
+        else {
+            return .invalidContext
+        }
+        let stateAddress = stateBase.advanced(by: Int(logicalProcessorID))
+        let state = ProcessorBootState(
+            rawValue: archSMPLoadAcquire(stateAddress)
+        )
+        guard state == .online || state == .shutdownFailed else {
+            return .invalidContext
+        }
+
+        archSMPStoreRelease(
+            stateAddress,
+            ProcessorBootState.stopping.rawValue
+        )
+        archSMPPrepareCPUOff()
+        let response = PSCIReturnValue(
+            rawRegisterValue: PSCIFirmware.call(
+                conduit: conduit,
+                functionID: PSCIFunctionID.cpuOff,
+                argument0: 0
+            )
+        )
+        archSMPStoreRelease(
+            stateAddress,
+            ProcessorBootState.shutdownFailed.rawValue
+        )
+        archSMPSendEvent()
+        return .shutdownReturned(response)
+    }
+
+    private static func decodePublishedConduit() -> PSCIConduit? {
+        let encoded = archSMPLoadAcquire(&publishedKernelRestartConduit)
+        guard encoded > 0,
+              encoded - 1 <= UInt64(UInt8.max)
+        else { return nil }
+        return PSCIConduit(rawValue: UInt8(encoded - 1))
+    }
+}
 
 /// Executes a PSCI SMP startup plan. All buffers must have static or otherwise
 /// kernel-lifetime storage because a secondary processor publishes through the
@@ -54,6 +190,22 @@ struct SMPRuntime {
         return reportStorage[index]
     }
 
+    func processorState(
+        logicalProcessorID: Int
+    ) -> ProcessorBootState? {
+        guard logicalProcessorID >= 0,
+              logicalProcessorID < plan.processorCount,
+              let stateBase = stateStorage.baseAddress
+        else {
+            return nil
+        }
+        return ProcessorBootState(
+            rawValue: archSMPLoadAcquire(
+                stateBase.advanced(by: logicalProcessorID)
+            )
+        )
+    }
+
     /// `secondaryEntryPhysicalAddress` is passed verbatim as CPU_ON x2. It must
     /// be a nonzero, four-byte-aligned physical address executable with the
     /// secondary's initial MMU state. `pollLimit` bounds each acquire-load loop.
@@ -85,6 +237,11 @@ struct SMPRuntime {
         }
         let registry = UInt64(UInt(bitPattern: stateBase))
             | UInt64(plan.processorCount - 1)
+        archSMPStoreRelease(&publishedKernelRestartEpoch, 0)
+        archSMPStoreRelease(
+            &publishedKernelRestartConduit,
+            UInt64(conduit.rawValue) + 1
+        )
         archSMPStoreRelease(&publishedProcessorStateRegistry, registry)
 
         var onlineProcessorCount = 1
@@ -247,3 +404,8 @@ private func archSMPRelax()
 /// Sends an event after online publication, expected to execute SEV.
 @_silgen_name("arch_smp_send_event")
 private func archSMPSendEvent()
+
+/// Masks local exceptions, disables the local physical timer, and orders the
+/// stopping-state publication before PSCI CPU_OFF.
+@_silgen_name("arch_smp_prepare_cpu_off")
+private func archSMPPrepareCPUOff()

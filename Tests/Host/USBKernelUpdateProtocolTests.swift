@@ -162,7 +162,7 @@ struct USBKernelUpdateProtocolTests {
         )
         expectAccepted(beginResult, code: .accepted, phase: .receiving)
         expect(sink.beginCount == 1, "staging did not begin once")
-        expect(!sink.didPublish, "BEGIN published an unvalidated artifact")
+        expect(!sink.didSeal, "BEGIN sealed an unvalidated artifact")
 
         acceptData(
             Array(artifact.bytes[0..<456]),
@@ -172,7 +172,7 @@ struct USBKernelUpdateProtocolTests {
             receiver: &receiver,
             sink: &sink
         )
-        expect(!sink.didPublish, "partial DATA published an artifact")
+        expect(!sink.didSeal, "partial DATA sealed an artifact")
         acceptData(
             Array(artifact.bytes[456..<700]),
             offset: 456,
@@ -181,7 +181,7 @@ struct USBKernelUpdateProtocolTests {
             receiver: &receiver,
             sink: &sink
         )
-        expect(!sink.didPublish, "complete DATA published before COMMIT")
+        expect(!sink.didSeal, "complete DATA sealed before COMMIT")
 
         let result = accept(
             encode(
@@ -199,7 +199,7 @@ struct USBKernelUpdateProtocolTests {
         )
         expectAccepted(result, code: .committed, phase: .committed)
         expect(receiver.phase == .committed, "receiver did not commit")
-        expect(sink.didPublish, "validated artifact was not published")
+        expect(sink.didSeal, "validated artifact was not sealed")
         expect(sink.stagedBytes == artifact.bytes,
                "staged artifact differs from source")
         expect(sink.discardCount == 0, "successful stage was discarded")
@@ -301,7 +301,7 @@ struct USBKernelUpdateProtocolTests {
                "sequence fault was not sticky")
         expect(sink.discardCount == 1,
                "sequence fault did not discard staging")
-        expect(!sink.didPublish, "faulted transfer was published")
+        expect(!sink.didSeal, "faulted transfer was sealed")
 
         let blocked = accept(
             encode(
@@ -381,8 +381,8 @@ struct USBKernelUpdateProtocolTests {
         expectRejected(badCommit, code: .checksumMismatch)
         expect(digestSink.discardCount == 1,
                "SHA mismatch did not discard staging")
-        expect(!digestSink.didPublish,
-               "SHA mismatch published staged bytes")
+        expect(!digestSink.didSeal,
+               "SHA mismatch sealed staged bytes")
 
         var replayReceiver = requireReceiver()
         var replaySink = RecordingUpdateSink()
@@ -457,7 +457,7 @@ struct USBKernelUpdateProtocolTests {
         var beginCount = 0
         var writeCount = 0
         var discardCount = 0
-        var didPublish = false
+        var didSeal = false
         var activeTransferID: UInt32 = 0
 
         mutating func beginStaging(
@@ -469,7 +469,7 @@ struct USBKernelUpdateProtocolTests {
                 repeating: 0,
                 count: Int(descriptor.totalLength)
             )
-            didPublish = false
+            didSeal = false
             return true
         }
 
@@ -492,13 +492,13 @@ struct USBKernelUpdateProtocolTests {
             return true
         }
 
-        mutating func publishValidated(
+        mutating func sealValidated(
             _ descriptor: USBKernelUpdateDescriptor
         ) -> Bool {
             guard descriptor.transferID == activeTransferID else {
                 return false
             }
-            didPublish = true
+            didSeal = true
             return true
         }
 

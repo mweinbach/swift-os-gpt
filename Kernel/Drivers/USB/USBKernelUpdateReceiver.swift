@@ -12,12 +12,11 @@ struct USBKernelUpdateDescriptor: Equatable {
 
 /// Storage boundary for USB update reception.
 ///
-/// `beginStaging` and `writeStagedBytes` must address an inactive, non-bootable
-/// staging area. They must never overwrite the running kernel or change boot
-/// selection. `publishValidated` is the only callback permitted to make the
-/// staged artifact active, and the receiver invokes it only after exact length,
-/// sequence, SHA-256, and whole-image CRC validation. Byte buffers are borrowed
-/// only for the duration of each call.
+/// `beginStaging` and `writeStagedBytes` must address an inactive staging area.
+/// They must never overwrite the running kernel or change boot selection.
+/// `sealValidated` records that exact length, sequence, SHA-256, and whole-image
+/// CRC integrity checks succeeded; it must not activate the artifact. Byte
+/// buffers are borrowed only for the duration of each call.
 protocol USBKernelUpdateStagingSink {
     mutating func beginStaging(
         _ descriptor: USBKernelUpdateDescriptor
@@ -29,7 +28,7 @@ protocol USBKernelUpdateStagingSink {
         at offset: UInt64
     ) -> Bool
 
-    mutating func publishValidated(
+    mutating func sealValidated(
         _ descriptor: USBKernelUpdateDescriptor
     ) -> Bool
 
@@ -75,7 +74,7 @@ enum USBKernelUpdateReceiverRejection: Equatable {
     case imageCRC32Mismatch(expected: UInt32, actual: UInt32)
     case stagingRejected
     case stagingWriteFailed
-    case publishFailed
+    case sealFailed
 }
 
 enum USBKernelUpdateReceiverResult: Equatable {
@@ -268,7 +267,7 @@ struct USBKernelUpdateReceiver {
         )
 
         // A committed transfer is no longer live, so replacing its metadata
-        // does not discard or mutate the published artifact.
+        // does not discard or mutate the sealed artifact.
         clearTransfer()
         activeBegin = begin
         activeDescriptor = descriptor
@@ -499,11 +498,12 @@ struct USBKernelUpdateReceiver {
             )
         }
 
-        // This is deliberately the first callback allowed to change which
-        // artifact is bootable.
-        guard sink.publishValidated(descriptor) else {
+        // Integrity verification only seals the inactive staging metadata.
+        // Activation and boot-selection policy are deliberately outside this
+        // receiver.
+        guard sink.sealValidated(descriptor) else {
             return fatalRejection(
-                .publishFailed,
+                .sealFailed,
                 code: .storageFailure,
                 detail: 3,
                 sink: &sink

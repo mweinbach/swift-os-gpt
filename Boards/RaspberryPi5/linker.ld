@@ -4,7 +4,8 @@ ENTRY(rpi5_image_entry)
 
 IMAGE_LOAD_ADDRESS = 0x00080000;
 UPDATE_DESTINATION_SIZE = 32M;
-BOOT_STACK_SIZE = 64K;
+/* Match the universal desktop/driver stack contract used by QEMU. */
+BOOT_STACK_SIZE = 128K;
 SECONDARY_STACK_SIZE = 64K;
 USER_STACK_SIZE = 64K;
 STACK_GUARD_SIZE = 4K;

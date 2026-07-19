@@ -2,7 +2,9 @@ OUTPUT_ARCH(aarch64)
 ENTRY(_start)
 
 KERNEL_LOAD_ADDRESS = 0x40080000;
-BOOT_STACK_SIZE = 64K;
+/* The integrated desktop/driver loop retains boot state and has measured
+ * call depth above 64K; keep a mapped margin beyond the guard page. */
+BOOT_STACK_SIZE = 128K;
 SECONDARY_STACK_SIZE = 64K;
 USER_STACK_SIZE = 64K;
 STACK_GUARD_SIZE = 4K;

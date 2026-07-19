@@ -12,6 +12,9 @@ enum USBDebugGadgetEvent: Equatable {
     case configured
     case deconfigured
     case frameCompleted(UInt64)
+    /// Emitted only after the host has received the committed STATUS packet.
+    /// Activation remains a separate kernel-policy operation.
+    case kernelUpdateReady(USBKernelUpdateSealedArtifact)
     case faulted
 }
 
@@ -20,14 +23,23 @@ private enum DWC2USBDebugScratchLayout {
     static let controlReplyOffset = 0
     static let controlReplyByteCount = 128
     static let receiveOffset = 128
-    static let receiveByteCount = 64
-    static let endpointZeroReceiveStageOffset = 192
+    static let receiveByteCount = 512
+    static let endpointZeroReceiveStageOffset = 640
     static let endpointZeroReceiveStageByteCount = 64
-    static let displayPacketOffset = 256
+    static let displayPacketOffset = 704
     static let displayPacketByteCount =
         USBDebugDisplayProtocol.maximumPacketByteCount
-    static let requiredByteCount = displayPacketOffset
+    static let updateStreamOffset = displayPacketOffset
         + displayPacketByteCount
+    static let updateStreamByteCount =
+        USBKernelUpdateStreamReceiver.minimumStorageByteCount
+    static let updateStatusOffset = updateStreamOffset
+        + updateStreamByteCount
+    static let updateStatusByteCount =
+        USBKernelUpdateProtocol.headerByteCount
+            + USBKernelUpdateProtocol.statusPayloadByteCount
+    static let requiredByteCount = updateStatusOffset
+        + updateStatusByteCount
 }
 
 private enum EndpointZeroInQueueResult {
@@ -62,9 +74,16 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         case statusOut
     }
 
+    private enum EndpointTwoInFlight: UInt8 {
+        case none
+        case display
+        case updateStatus
+    }
+
     private var controller: DWC2Controller<Registers>
     private var controlEndpoint = USBControlEndpoint(speed: .full)
     private var displayTransmitter: USBDebugDisplayTransmitter
+    private var updateReceiver: USBKernelUpdateStreamReceiver?
     private let scratchBaseAddress: UInt
     private var endpointZeroTransaction: EndpointZeroTransaction = .idle
     private var endpointZeroRequestedByteCount: UInt16 = 0
@@ -78,7 +97,12 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     private var endpointZeroPendingDisplayOpenState: Bool?
     private var displayEndpointOpen = false
     private var displaySessionResetPending = false
-    private var displayTransferInFlight = false
+    private var endpointTwoInFlight: EndpointTwoInFlight = .none
+    private var endpointTwoOutNeedsRearm = false
+    private var updateStatusPending = false
+    private var updateStatusByteCount = 0
+    private var updateStatusCommittedArtifact:
+        USBKernelUpdateSealedArtifact?
     private(set) var state: USBDebugGadgetState = .attached
 
     init?(
@@ -88,6 +112,8 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         scanout: ScanoutBuffer,
         viewportScale: UInt16,
         sessionID: UInt64,
+        updateTargetMachine: USBKernelUpdateTargetMachine = .raspberryPi5,
+        updateStagingRegion: USBKernelUpdateRAMStagingRegion? = nil,
         maximumInitializationPollCount: Int = 100_000
     ) {
         guard scratchBaseAddress <= UInt64(UInt.max),
@@ -117,8 +143,27 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         else {
             return nil
         }
+        let updateReceiver: USBKernelUpdateStreamReceiver?
+        if let updateStagingRegion {
+            guard let receiver = USBKernelUpdateStreamReceiver(
+                      storageBaseAddress: scratchBaseAddress
+                          + UInt64(
+                              DWC2USBDebugScratchLayout.updateStreamOffset
+                          ),
+                      storageByteCount: UInt64(
+                          DWC2USBDebugScratchLayout.updateStreamByteCount
+                      ),
+                      targetMachine: updateTargetMachine,
+                      stagingRegion: updateStagingRegion
+                  )
+            else { return nil }
+            updateReceiver = receiver
+        } else {
+            updateReceiver = nil
+        }
         self.controller = controller
         displayTransmitter = transmitter
+        self.updateReceiver = updateReceiver
         self.scratchBaseAddress = UInt(scratchBaseAddress)
     }
 
@@ -140,6 +185,26 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         displayTransmitter.requestDamage(damage)
     }
 
+    /// Disconnects the USB device and drains controller FIFOs before a caller
+    /// leaves the current kernel. This never activates the staged image.
+    mutating func quiesceForKernelActivation(
+        maximumPollCount: Int = 100_000
+    ) -> Bool {
+        guard state != .faulted,
+              controller.quiesceForRestart(
+                  maximumPollCount: maximumPollCount
+              )
+        else { return false }
+        resetEndpointZeroTransaction()
+        displayEndpointOpen = false
+        displaySessionResetPending = false
+        endpointTwoInFlight = .none
+        endpointTwoOutNeedsRearm = false
+        clearPendingUpdateStatus()
+        state = .attached
+        return true
+    }
+
     mutating func service() -> USBDebugGadgetEvent {
         guard state != .faulted else { return .faulted }
         let snapshot = controller.interruptSnapshot()
@@ -152,7 +217,10 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             resetEndpointZeroTransaction()
             displayEndpointOpen = false
             displaySessionResetPending = false
-            displayTransferInFlight = false
+            endpointTwoInFlight = .none
+            endpointTwoOutNeedsRearm = false
+            clearPendingUpdateStatus()
+            updateReceiver?.resetTransport()
             state = .attached
             controller.acknowledgeGlobalInterrupts(
                 snapshot.global & (
@@ -174,6 +242,10 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             )
             displayEndpointOpen = false
             displaySessionResetPending = false
+            endpointTwoInFlight = .none
+            endpointTwoOutNeedsRearm = false
+            clearPendingUpdateStatus()
+            updateReceiver?.resetTransport()
             state = .enumerated
             event = .enumerated(controller.busSpeed)
         }
@@ -243,17 +315,32 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                 directionIn: true,
                 mask: interrupt
             )
-            if interrupt & DWC2CoreBits.endpointTransferComplete != 0,
-               displayTransferInFlight {
-                let completedFrame = displayTransmitter.phase == .frameEnd
-                    ? displayTransmitter.activeFrameID
-                    : 0
-                guard displayTransmitter.commitPreparedPacket() else {
-                    return fail()
-                }
-                displayTransferInFlight = false
-                if completedFrame != 0 {
-                    event = .frameCompleted(completedFrame)
+            if interrupt & DWC2CoreBits.endpointTransferComplete != 0 {
+                switch endpointTwoInFlight {
+                case .none:
+                    break
+                case .display:
+                    let completedFrame = displayTransmitter.phase == .frameEnd
+                        ? displayTransmitter.activeFrameID
+                        : 0
+                    guard displayTransmitter.commitPreparedPacket() else {
+                        return fail()
+                    }
+                    endpointTwoInFlight = .none
+                    if completedFrame != 0 {
+                        event = .frameCompleted(completedFrame)
+                    }
+                case .updateStatus:
+                    endpointTwoInFlight = .none
+                    let committedArtifact = updateStatusCommittedArtifact
+                    clearPendingUpdateStatus()
+                    if let committedArtifact {
+                        event = .kernelUpdateReady(committedArtifact)
+                    } else {
+                        guard stageNextUpdateResponse() else {
+                            return fail()
+                        }
+                    }
                 }
             }
         }
@@ -271,14 +358,51 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             controller.acknowledgeGlobalInterrupts(acknowledged)
         }
 
-        if displaySessionResetPending && !displayTransferInFlight {
+        if displaySessionResetPending && endpointTwoInFlight != .display {
             displayTransmitter.resetSession(requestFullFrame: true)
             displaySessionResetPending = false
         }
 
         if state == .configured,
+           endpointTwoInFlight == .none,
+           updateStatusPending {
+            let status = updateStatusBuffer
+            let result = controller.queueInTransfer(
+                endpoint: 2,
+                bytes: UnsafeRawBufferPointer(
+                    start: status.baseAddress,
+                    count: updateStatusByteCount
+                )
+            )
+            switch result {
+            case .queued:
+                endpointTwoInFlight = .updateStatus
+            case .fifoBusy:
+                break
+            case .invalidState, .invalidEndpoint,
+                 .invalidBuffer, .invalidTransferSize:
+                return fail()
+            }
+        }
+
+        if state == .configured,
+           endpointTwoInFlight == .none,
+           !updateStatusPending,
+           endpointTwoOutNeedsRearm {
+            guard controller.armOutTransfer(
+                      endpoint: 2,
+                      byteCount: UInt32(
+                          controller.busSpeed.bulkMaximumPacketSize
+                      )
+                  ) == .queued
+            else { return fail() }
+            endpointTwoOutNeedsRearm = false
+        }
+
+        if state == .configured,
            displayEndpointOpen,
-           !displayTransferInFlight {
+           endpointTwoInFlight == .none,
+           !updateStatusPending {
             let packet = displayPacketBuffer
             let transmitResult = displayTransmitter.prepareNextPacket(
                 into: packet
@@ -299,7 +423,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                 )
                 switch result {
                 case .queued:
-                    displayTransferInFlight = true
+                    endpointTwoInFlight = .display
                 case .fifoBusy:
                     break
                 case .invalidState, .invalidEndpoint,
@@ -373,6 +497,26 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             guard status.endpoint == 2 || status.endpoint == 3 else {
                 return fail()
             }
+            if status.endpoint == 2,
+               copiedByteCount > 0,
+               var receiver = updateReceiver {
+                let receive = receiveBuffer
+                let bytes = UnsafeRawBufferPointer(
+                    start: receive.baseAddress,
+                    count: Int(copiedByteCount)
+                )
+                let appendResult = receiver.append(bytes)
+                updateReceiver = receiver
+                switch appendResult {
+                case .appended:
+                    guard stageNextUpdateResponse() else { return fail() }
+                case .invalidInput, .capacityExceeded:
+                    // Treat transport overflow as lost framing, not a gadget
+                    // fault. The host can retry BEGIN and resume the staged
+                    // offset already sealed by prior STATUS acknowledgements.
+                    updateReceiver?.resetTransport()
+                }
+            }
             return USBDebugGadgetEvent.none
 
         case .outTransferComplete:
@@ -406,14 +550,24 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                     return fail()
                 }
             }
-            guard status.endpoint == 2 || status.endpoint == 3,
-                  controller.armOutTransfer(
+            guard status.endpoint == 2 || status.endpoint == 3 else {
+                return fail()
+            }
+            if status.endpoint == 2,
+               updateStatusPending || endpointTwoInFlight == .updateStatus {
+                endpointTwoOutNeedsRearm = true
+                return USBDebugGadgetEvent.none
+            }
+            guard controller.armOutTransfer(
                       endpoint: status.endpoint,
                       byteCount: UInt32(
                           controller.busSpeed.bulkMaximumPacketSize
                       )
                   ) == .queued
             else { return fail() }
+            if status.endpoint == 2 {
+                endpointTwoOutNeedsRearm = false
+            }
             return USBDebugGadgetEvent.none
 
         case .globalOutNAK, .dataToggleError:
@@ -658,7 +812,10 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             displayTransmitter.resetSession(requestFullFrame: true)
             displayEndpointOpen = controlEndpoint.controlLineState & 1 != 0
             displaySessionResetPending = false
-            displayTransferInFlight = false
+            endpointTwoInFlight = .none
+            endpointTwoOutNeedsRearm = false
+            clearPendingUpdateStatus()
+            updateReceiver?.resetTransport()
             state = .configured
             return .configured
         }
@@ -668,7 +825,10 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             }
             displayEndpointOpen = false
             displaySessionResetPending = false
-            displayTransferInFlight = false
+            endpointTwoInFlight = .none
+            endpointTwoOutNeedsRearm = false
+            clearPendingUpdateStatus()
+            updateReceiver?.resetTransport()
             state = .enumerated
             return .deconfigured
         }
@@ -696,6 +856,35 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             endpointAddress: address,
             halted: controlEndpoint.isEndpointHalted(address)
         )
+    }
+
+    private mutating func stageNextUpdateResponse() -> Bool {
+        guard !updateStatusPending else { return true }
+        guard var receiver = updateReceiver else { return true }
+        let result = receiver.pump()
+        updateReceiver = receiver
+        guard case .response(let response) = result else { return true }
+
+        let output = updateStatusBuffer
+        let encodeResult = USBKernelUpdatePacketEncoder.encode(
+            .status(response.status),
+            transferID: response.transferID,
+            sequence: 0,
+            into: output
+        )
+        guard case .encoded(let byteCount) = encodeResult,
+              byteCount <= output.count
+        else { return false }
+        updateStatusByteCount = byteCount
+        updateStatusCommittedArtifact = response.committedArtifact
+        updateStatusPending = true
+        return true
+    }
+
+    private mutating func clearPendingUpdateStatus() {
+        updateStatusPending = false
+        updateStatusByteCount = 0
+        updateStatusCommittedArtifact = nil
     }
 
     private mutating func serviceDiscardedOutEndpoint(
@@ -743,6 +932,13 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         )
     }
 
+    private var updateStatusBuffer: UnsafeMutableRawBufferPointer {
+        buffer(
+            offset: DWC2USBDebugScratchLayout.updateStatusOffset,
+            count: DWC2USBDebugScratchLayout.updateStatusByteCount
+        )
+    }
+
     private func buffer(
         offset: Int,
         count: Int
@@ -760,7 +956,10 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         resetEndpointZeroTransaction()
         displayEndpointOpen = false
         displaySessionResetPending = false
-        displayTransferInFlight = false
+        endpointTwoInFlight = .none
+        endpointTwoOutNeedsRearm = false
+        clearPendingUpdateStatus()
+        updateReceiver?.resetTransport()
         return .faulted
     }
 }

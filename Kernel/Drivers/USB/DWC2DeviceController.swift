@@ -359,6 +359,78 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         state = .disconnected
     }
 
+    /// Bounded, controller-wide shutdown for a kernel handoff. The device is
+    /// soft-disconnected before endpoint activity is disabled, every interrupt
+    /// source is masked, and both FIFO directions are flushed. DWC2 DMA is
+    /// disabled by this driver from initialization onward, so no memory access
+    /// can survive a successful return.
+    mutating func quiesceForRestart(
+        maximumPollCount: Int = 100_000
+    ) -> Bool {
+        guard maximumPollCount > 0,
+              state == .connected || state == .configured
+                || state == .disconnected
+        else { return false }
+
+        var deviceControl = read(DWC2RegisterLayout.deviceControl)
+        deviceControl &= ~DWC2CoreBits.deviceControlCommandMask
+        deviceControl |= DWC2CoreBits.softDisconnect
+        write(deviceControl, DWC2RegisterLayout.deviceControl)
+
+        write(0, DWC2RegisterLayout.interruptMask)
+        write(0, DWC2RegisterLayout.allEndpointInterruptMask)
+        write(0, DWC2RegisterLayout.inEndpointInterruptMask)
+        write(0, DWC2RegisterLayout.outEndpointInterruptMask)
+        write(0, DWC2RegisterLayout.inEndpointFIFOEmptyMask)
+
+        var ahb = read(DWC2RegisterLayout.ahbConfiguration)
+        ahb &= ~(
+            DWC2CoreBits.ahbDMAEnable
+                | DWC2CoreBits.ahbGlobalInterruptEnable
+        )
+        write(ahb, DWC2RegisterLayout.ahbConfiguration)
+        let activeEndpoints = requestAllEndpointDisables()
+        guard waitForEndpointDisables(
+                  activeEndpoints,
+                  maximumPollCount: maximumPollCount
+              )
+        else { return false }
+
+        write(
+            DWC2CoreBits.transmitFIFOFlush
+                | DWC2CoreBits.allTransmitFIFOs,
+            DWC2RegisterLayout.resetControl
+        )
+        guard waitForClear(
+                  offset: DWC2RegisterLayout.resetControl,
+                  mask: DWC2CoreBits.transmitFIFOFlush,
+                  maximumPollCount: maximumPollCount
+              )
+        else { return false }
+        write(DWC2CoreBits.receiveFIFOFlush, DWC2RegisterLayout.resetControl)
+        guard waitForClear(
+                  offset: DWC2RegisterLayout.resetControl,
+                  mask: DWC2CoreBits.receiveFIFOFlush,
+                  maximumPollCount: maximumPollCount
+              )
+        else { return false }
+        guard waitForSet(
+                  offset: DWC2RegisterLayout.resetControl,
+                  mask: DWC2CoreBits.ahbIdle,
+                  maximumPollCount: maximumPollCount
+              )
+        else { return false }
+
+        var endpoint: UInt8 = 0
+        while endpoint < DWC2CompositeFIFOPlan.endpointCount {
+            clearEndpointInterrupts(endpoint: endpoint)
+            endpoint += 1
+        }
+        write(UInt32.max, DWC2RegisterLayout.interruptStatus)
+        state = .disconnected
+        return true
+    }
+
     mutating func interruptSnapshot() -> DWC2InterruptSnapshot {
         let global = read(DWC2RegisterLayout.interruptStatus)
             & read(DWC2RegisterLayout.interruptMask)
@@ -855,6 +927,102 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
             }
             endpoint += 1
         }
+    }
+
+    /// Requests every active endpoint to stop before the FIFO state is touched.
+    /// The returned bitmap records the endpoints that were enabled when the
+    /// request was made: IN endpoints occupy bits 0...15 and OUT endpoints
+    /// occupy bits 16...31.
+    private mutating func requestAllEndpointDisables() -> UInt32 {
+        var activeEndpoints: UInt32 = 0
+        var endpoint: UInt8 = 0
+        while endpoint < DWC2CompositeFIFOPlan.endpointCount {
+            if let input = DWC2RegisterLayout.inEndpointControl(endpoint) {
+                var control = read(input)
+                if control & DWC2CoreBits.endpointEnable != 0 {
+                    if let interrupt =
+                            DWC2RegisterLayout.inEndpointInterrupt(endpoint) {
+                        write(DWC2CoreBits.endpointDisabled, interrupt)
+                    }
+                    activeEndpoints |= 1 << UInt32(endpoint)
+                    control |= DWC2CoreBits.endpointDisable
+                }
+                control &= ~DWC2CoreBits.clearNAK
+                control |= DWC2CoreBits.setNAK
+                write(control, input)
+            }
+            if endpoint != 1,
+               let output = DWC2RegisterLayout.outEndpointControl(endpoint) {
+                var control = read(output)
+                if control & DWC2CoreBits.endpointEnable != 0 {
+                    if let interrupt =
+                            DWC2RegisterLayout.outEndpointInterrupt(endpoint) {
+                        write(DWC2CoreBits.endpointDisabled, interrupt)
+                    }
+                    activeEndpoints |= 1 << UInt32(endpoint + 16)
+                    control |= DWC2CoreBits.endpointDisable
+                }
+                control &= ~DWC2CoreBits.clearNAK
+                control |= DWC2CoreBits.setNAK
+                write(control, output)
+            }
+            endpoint += 1
+        }
+        return activeEndpoints
+    }
+
+    private mutating func waitForEndpointDisables(
+        _ activeEndpoints: UInt32,
+        maximumPollCount: Int
+    ) -> Bool {
+        var endpoint: UInt8 = 0
+        while endpoint < DWC2CompositeFIFOPlan.endpointCount {
+            if activeEndpoints & (1 << UInt32(endpoint)) != 0 {
+                guard let control =
+                        DWC2RegisterLayout.inEndpointControl(endpoint),
+                      let interrupt =
+                        DWC2RegisterLayout.inEndpointInterrupt(endpoint),
+                      waitForEndpointDisable(
+                          control: control,
+                          interrupt: interrupt,
+                          maximumPollCount: maximumPollCount
+                      )
+                else { return false }
+            }
+            if activeEndpoints & (1 << UInt32(endpoint + 16)) != 0 {
+                guard let control =
+                        DWC2RegisterLayout.outEndpointControl(endpoint),
+                      let interrupt =
+                        DWC2RegisterLayout.outEndpointInterrupt(endpoint),
+                      waitForEndpointDisable(
+                          control: control,
+                          interrupt: interrupt,
+                          maximumPollCount: maximumPollCount
+                      )
+                else { return false }
+            }
+            endpoint += 1
+        }
+        return true
+    }
+
+    /// EPDISBLD is the architectural completion signal. Accepting EPENA clear
+    /// as completion also handles integrations where the raw interrupt is not
+    /// observable after the endpoint state has already settled.
+    private mutating func waitForEndpointDisable(
+        control: UInt,
+        interrupt: UInt,
+        maximumPollCount: Int
+    ) -> Bool {
+        var pollsRemaining = maximumPollCount
+        while pollsRemaining > 0 {
+            if read(control) & DWC2CoreBits.endpointEnable == 0
+                || read(interrupt) & DWC2CoreBits.endpointDisabled != 0 {
+                return true
+            }
+            pollsRemaining -= 1
+        }
+        return false
     }
 
     private mutating func drainReceiveFIFO(

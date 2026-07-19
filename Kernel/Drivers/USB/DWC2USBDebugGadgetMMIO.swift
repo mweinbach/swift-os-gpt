@@ -8,7 +8,9 @@ extension DWC2USBDebugGadget where Registers == DWC2MMIORegisterAccess {
         scratchByteCount: UInt64,
         scanout: ScanoutBuffer,
         viewportScale: UInt16,
-        sessionID: UInt64
+        sessionID: UInt64,
+        updateTargetMachine: USBKernelUpdateTargetMachine = .raspberryPi5,
+        updateStagingRegion: USBKernelUpdateRAMStagingRegion? = nil
     ) {
         guard let registers = DWC2MMIORegisterAccess(
                   baseAddress: resource.baseAddress,
@@ -21,7 +23,9 @@ extension DWC2USBDebugGadget where Registers == DWC2MMIORegisterAccess {
             scratchByteCount: scratchByteCount,
             scanout: scanout,
             viewportScale: viewportScale,
-            sessionID: sessionID
+            sessionID: sessionID,
+            updateTargetMachine: updateTargetMachine,
+            updateStagingRegion: updateStagingRegion
         )
     }
 }

@@ -208,6 +208,8 @@ usb-debug-display-host-test: | $(BUILD_DIR)
 	$(BUILD_DIR)/usb-debug-display-transmitter-host-tests
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Memory/PhysicalMemory.swift \
+		Kernel/Update/KernelUpdateActivation.swift \
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/DisplayMemory.swift \
 		Kernel/Graphics/DamageRectangle.swift \
@@ -218,6 +220,10 @@ usb-debug-display-host-test: | $(BUILD_DIR)
 		Kernel/Drivers/USB/USBControlEndpoint.swift \
 		Kernel/Drivers/USB/USBDebugDisplayProtocol.swift \
 		Kernel/Drivers/USB/USBDebugDisplayTransmitter.swift \
+		Kernel/Drivers/USB/USBKernelUpdateSHA256.swift \
+		Kernel/Drivers/USB/USBKernelUpdateProtocol.swift \
+		Kernel/Drivers/USB/USBKernelUpdateReceiver.swift \
+		Kernel/Drivers/USB/USBKernelUpdateStreamReceiver.swift \
 		Kernel/Drivers/USB/DWC2USBDebugGadget.swift \
 		Tests/Host/DWC2USBDebugGadgetTests.swift \
 		-o $(BUILD_DIR)/dwc2-usb-debug-gadget-host-tests
@@ -265,6 +271,17 @@ usb-kernel-update-guest-host-test: | $(BUILD_DIR)
 		Tests/Host/USBKernelUpdateProtocolTests.swift \
 		-o $(BUILD_DIR)/usb-kernel-update-protocol-host-tests
 	$(BUILD_DIR)/usb-kernel-update-protocol-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Memory/PhysicalMemory.swift \
+		Kernel/Update/KernelUpdateActivation.swift \
+		Kernel/Drivers/USB/USBKernelUpdateSHA256.swift \
+		Kernel/Drivers/USB/USBKernelUpdateProtocol.swift \
+		Kernel/Drivers/USB/USBKernelUpdateReceiver.swift \
+		Kernel/Drivers/USB/USBKernelUpdateStreamReceiver.swift \
+		Tests/Host/USBKernelUpdateStreamReceiverTests.swift \
+		-o $(BUILD_DIR)/usb-kernel-update-stream-host-tests
+	$(BUILD_DIR)/usb-kernel-update-stream-host-tests
 
 kernel-update-activation-host-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache

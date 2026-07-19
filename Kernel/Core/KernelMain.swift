@@ -4,6 +4,8 @@ private nonisolated(unsafe) var activeVirtIOGPU3DSession:
     VirtIOGPU3DSession?
 private nonisolated(unsafe) var activeVirtIOGPU3DAllocation:
     ClassifiedPageAllocationToken?
+private nonisolated(unsafe) var activeKernelUpdateAllocation:
+    ClassifiedPageAllocationToken?
 
 @_cdecl("swiftos_main")
 func swiftOSMain(_ deviceTreeAddress: UInt64) {
@@ -433,16 +435,24 @@ private func runDesktopSession(
     DesktopRenderer.render(on: canvas)
     let display = initialDisplay
     let displayKind = display.kind
+    let kernelUpdateStaging = activateKernelUpdateStaging(
+        console: console,
+        platform: platform,
+        memory: memory
+    )
     let usbDebug = activateUSBDebugGadget(
         console: console,
         platform: platform,
         scanout: scanout,
-        viewport: viewport
+        viewport: viewport,
+        kernelUpdateStaging: kernelUpdateStaging
     )
     var monitor = KernelMonitor(
         canvas: canvas,
         display: display,
-        boardKind: platform.kind,
+        platform: platform,
+        kernelUpdateDestination: memory.kernelUpdateDestination,
+        kernelUpdateStaging: kernelUpdateStaging,
         storageAddress: AArch64.terminalStorageAddress,
         serial: PL011(baseAddress: UInt(platform.serial.baseAddress)),
         usbDebug: usbDebug
@@ -484,7 +494,8 @@ private func activateUSBDebugGadget(
     console: EarlyConsole,
     platform: Platform,
     scanout: ScanoutBuffer,
-    viewport: DisplayViewport
+    viewport: DisplayViewport,
+    kernelUpdateStaging: KernelUpdateStagingLayout?
 ) -> RaspberryPiUSBDebugGadget? {
     guard case .raspberryPi5 = platform.kind,
           case .dwc2(let resource)? = platform.usbDeviceController,
@@ -503,13 +514,29 @@ private func activateUSBDebugGadget(
         return nil
     }
     let sessionID = AArch64.counterValue | 1
+    let updateStagingRegion: USBKernelUpdateRAMStagingRegion?
+    if let kernelUpdateStaging {
+        guard let region = USBKernelUpdateRAMStagingRegion(
+                  baseAddress: kernelUpdateStaging.image.baseAddress,
+                  byteCount: kernelUpdateStaging.image.byteCount
+              )
+        else {
+            console.write("SWIFTOS:USB_UPDATE_STAGING_INVALID\n")
+            return nil
+        }
+        updateStagingRegion = region
+    } else {
+        updateStagingRegion = nil
+    }
     guard let gadget = RaspberryPiUSBDebugGadget(
               resource: resource,
               scratchBaseAddress: scratchAddress,
               scratchByteCount: 4_096,
               scanout: scanout,
               viewportScale: UInt16(viewport.scale),
-              sessionID: sessionID
+              sessionID: sessionID,
+              updateTargetMachine: .raspberryPi5,
+              updateStagingRegion: updateStagingRegion
           )
     else {
         console.write("SWIFTOS:USB_DEBUG_UNAVAILABLE\n")
@@ -518,7 +545,64 @@ private func activateUSBDebugGadget(
     console.write(
         DWC2USBDebugGadget<DWC2MMIORegisterAccess>.readyMarker
     )
+    if updateStagingRegion != nil {
+        console.write("SWIFTOS:USB_UPDATE_READY\n")
+    }
     return gadget
+}
+
+/// Reserves one transport-neutral high-memory update workspace. The running
+/// Pi image destination was excluded earlier during memory bootstrap; this
+/// separate allocation holds only the incoming raw image, copied DTB,
+/// trampoline, and transition stack.
+private func activateKernelUpdateStaging(
+    console: EarlyConsole,
+    platform: Platform,
+    memory: KernelMemoryActivation
+) -> KernelUpdateStagingLayout? {
+    guard platform.kind == .raspberryPi5 else {
+        return nil
+    }
+    guard memory.kernelUpdateDestination
+            == RaspberryPiKernelUpdateContract.destinationWindow,
+          activeKernelUpdateAllocation == nil,
+          KernelUpdateStagingLimits.allocationByteCount
+            % MemoryPageGeometry.pageSize == 0
+    else {
+        console.write("SWIFTOS:USB_UPDATE_STAGING_UNAVAILABLE\n")
+        return nil
+    }
+    let pageCount = KernelUpdateStagingLimits.allocationByteCount
+        / MemoryPageGeometry.pageSize
+    let alignmentInPages = UInt64(2 * 1_024 * 1_024)
+        / MemoryPageGeometry.pageSize
+    let allocationResult = KernelMemoryRuntime.allocateClassifiedPages(
+        ClassifiedPageAllocationConstraints(
+            pageCount: pageCount,
+            alignmentInPages: alignmentInPages,
+            minimumAddress: KernelUpdateStagingLimits.minimumStagingAddress,
+            requiredCapabilities: .cpuAccessible,
+            domainSelection: .preferred(
+                KernelMemoryRuntime.defaultSystemMemoryDomain,
+                fallback: .disallowed
+            )
+        )
+    )
+    guard case .allocated(let allocation) = allocationResult else {
+        console.write("SWIFTOS:USB_UPDATE_STAGING_UNAVAILABLE\n")
+        return nil
+    }
+    guard let layout = KernelUpdateStagingLayout(
+              baseAddress: allocation.range.baseAddress,
+              byteCount: allocation.range.byteCount
+          ) else {
+        _ = KernelMemoryRuntime.releaseClassifiedPages(allocation)
+        console.write("SWIFTOS:USB_UPDATE_STAGING_UNAVAILABLE\n")
+        return nil
+    }
+    activeKernelUpdateAllocation = allocation
+    console.write("SWIFTOS:USB_UPDATE_STAGING_READY\n")
+    return layout
 }
 
 /// Transfers the linker-owned scratch prefix to firmware long enough to power

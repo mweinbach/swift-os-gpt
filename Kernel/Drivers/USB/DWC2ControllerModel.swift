@@ -514,6 +514,7 @@ enum DWC2CoreBits {
     static let endpointTypeInterrupt: UInt32 = 3 << 18
     static let endpointActive: UInt32 = 1 << 15
     static let endpointTransferComplete: UInt32 = 1 << 0
+    static let endpointDisabled: UInt32 = 1 << 1
     static let setupPhaseDone: UInt32 = 1 << 3
 
     static let deviceAddressMask: UInt32 = 0x7f << 4

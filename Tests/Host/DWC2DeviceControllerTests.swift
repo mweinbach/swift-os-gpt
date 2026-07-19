@@ -1,7 +1,28 @@
+private enum DWC2EndpointDisableCompletion {
+    case clearEnable
+    case endpointInterrupt
+    case stalled
+}
+
 private final class DWC2TestTrace {
     var deviceControlWrites = [UInt32]()
     var powerSettleCount = 0
     var powerSettleResult = true
+    var holdAHBNonIdleAfterReceiveFlush = false
+    var endpointDisableCompletion = DWC2EndpointDisableCompletion.clearEnable
+    var endpointDisableRequestCount = 0
+    var endpointDisableCompletionCount = 0
+    var fifoFlushWriteCount = 0
+    var firstFIFOFlushRequestCount: Int?
+    var firstFIFOFlushCompletionCount: Int?
+
+    func resetRestartObservations() {
+        endpointDisableRequestCount = 0
+        endpointDisableCompletionCount = 0
+        fifoFlushWriteCount = 0
+        firstFIFOFlushRequestCount = nil
+        firstFIFOFlushCompletionCount = nil
+    }
 }
 
 private struct DWC2TestRegisters: DWC2RegisterAccess {
@@ -25,6 +46,23 @@ private struct DWC2TestRegisters: DWC2RegisterAccess {
 
     mutating func write32(_ value: UInt32, at offset: UInt) {
         let index = Int(offset / 4)
+        if let interrupt = endpointInterrupt(forControl: offset),
+           value & DWC2CoreBits.endpointDisable != 0,
+           words[index] & DWC2CoreBits.endpointEnable != 0 {
+            trace.endpointDisableRequestCount += 1
+            switch trace.endpointDisableCompletion {
+            case .clearEnable:
+                words[index] = value & ~DWC2CoreBits.endpointEnable
+                trace.endpointDisableCompletionCount += 1
+            case .endpointInterrupt:
+                words[index] = value
+                words[Int(interrupt / 4)] |= DWC2CoreBits.endpointDisabled
+                trace.endpointDisableCompletionCount += 1
+            case .stalled:
+                words[index] = value
+            }
+            return
+        }
         if offset == DWC2RegisterLayout.resetControl,
            emulateHardwareCompletion,
            value & (
@@ -32,7 +70,21 @@ private struct DWC2TestRegisters: DWC2RegisterAccess {
                    | DWC2CoreBits.transmitFIFOFlush
                    | DWC2CoreBits.receiveFIFOFlush
            ) != 0 {
-            words[index] = DWC2CoreBits.ahbIdle
+            if value & (
+                DWC2CoreBits.transmitFIFOFlush
+                    | DWC2CoreBits.receiveFIFOFlush
+            ) != 0 {
+                trace.fifoFlushWriteCount += 1
+                if trace.firstFIFOFlushRequestCount == nil {
+                    trace.firstFIFOFlushRequestCount =
+                        trace.endpointDisableRequestCount
+                    trace.firstFIFOFlushCompletionCount =
+                        trace.endpointDisableCompletionCount
+                }
+            }
+            words[index] = trace.holdAHBNonIdleAfterReceiveFlush
+                && value & DWC2CoreBits.receiveFIFOFlush != 0
+                ? 0 : DWC2CoreBits.ahbIdle
             return
         }
         if offset == DWC2RegisterLayout.deviceControl {
@@ -62,6 +114,15 @@ private struct DWC2TestRegisters: DWC2RegisterAccess {
         let block = offset & 0xf00
         return member == 0x08 && (block == 0x900 || block == 0xb00)
     }
+
+    private func endpointInterrupt(forControl offset: UInt) -> UInt? {
+        guard offset >= 0x900, offset <= 0xcf0,
+              offset & 0x1f == 0
+        else { return nil }
+        let block = offset & 0xf00
+        guard block == 0x900 || block == 0xb00 else { return nil }
+        return offset + 8
+    }
 }
 
 @main
@@ -74,9 +135,10 @@ struct DWC2DeviceControllerTests {
         handlesResetEnumerationAndConfiguration()
         queuesEndpointZeroOnlyWithGlobalCapacity()
         queuesBoundedInAndOutTransfers()
+        quiescesControllerForRestartWithBoundedAHBWait()
         drainsReceivePacketsAndMalformedEntries()
         reportsInterruptSnapshots()
-        print("DWC2 device controller: 9 groups passed")
+        print("DWC2 device controller: 10 groups passed")
     }
 
     private static func initializesADeviceCapableCore() {
@@ -426,6 +488,144 @@ struct DWC2DeviceControllerTests {
         }
     }
 
+    private static func quiescesControllerForRestartWithBoundedAHBWait() {
+        let completionTrace = DWC2TestTrace()
+        withConfiguredController(trace: completionTrace) { controller, words in
+            expect(
+                controller.armOutTransfer(endpoint: 2, byteCount: 512)
+                    == .queued,
+                "restart fixture did not arm endpoint two OUT"
+            )
+            guard let fifoStatus =
+                    DWC2RegisterLayout.inEndpointFIFOStatus(2)
+            else { fail("restart endpoint FIFO status missing") }
+            words[Int(fifoStatus / 4)] = 128
+            var word: UInt32 = 0xa5a5_5a5a
+            withUnsafeBytes(of: &word) { bytes in
+                expect(
+                    controller.queueInTransfer(endpoint: 2, bytes: bytes)
+                        == .queued,
+                    "restart fixture did not queue endpoint two IN"
+                )
+            }
+            completionTrace.resetRestartObservations()
+            expect(
+                controller.quiesceForRestart(maximumPollCount: 4),
+                "restart quiesce failed"
+            )
+            expect(
+                controller.state == .disconnected,
+                "restart quiesce did not disconnect"
+            )
+            expect(
+                words[Int(DWC2RegisterLayout.deviceControl / 4)]
+                    & DWC2CoreBits.softDisconnect != 0,
+                "restart quiesce did not assert soft disconnect"
+            )
+            expect(
+                words[Int(DWC2RegisterLayout.interruptMask / 4)] == 0
+                    && words[Int(
+                        DWC2RegisterLayout.allEndpointInterruptMask / 4
+                    )] == 0,
+                "restart quiesce left interrupts enabled"
+            )
+            guard let endpointTwoIn =
+                    DWC2RegisterLayout.inEndpointControl(2),
+                  let endpointTwoOut =
+                    DWC2RegisterLayout.outEndpointControl(2)
+            else { fail("restart endpoint registers missing") }
+            let quiesceBits = DWC2CoreBits.endpointDisable
+                | DWC2CoreBits.setNAK
+            expect(
+                words[Int(endpointTwoIn / 4)] & quiesceBits == quiesceBits
+                    && words[Int(endpointTwoOut / 4)] & quiesceBits
+                        == quiesceBits,
+                "restart quiesce left endpoint two active"
+            )
+            expect(
+                words[Int(endpointTwoIn / 4)]
+                    & DWC2CoreBits.endpointEnable == 0
+                    && words[Int(endpointTwoOut / 4)]
+                        & DWC2CoreBits.endpointEnable == 0,
+                "restart quiesce did not observe endpoint disable completion"
+            )
+            expect(
+                completionTrace.endpointDisableRequestCount >= 3,
+                "restart quiesce did not command every active endpoint"
+            )
+            expect(
+                completionTrace.firstFIFOFlushRequestCount
+                    == completionTrace.endpointDisableRequestCount
+                    && completionTrace.firstFIFOFlushCompletionCount
+                        == completionTrace.endpointDisableCompletionCount
+                    && completionTrace.endpointDisableCompletionCount
+                        == completionTrace.endpointDisableRequestCount,
+                "restart quiesce flushed before endpoint disable completion"
+            )
+        }
+
+        let interruptTrace = DWC2TestTrace()
+        interruptTrace.endpointDisableCompletion = .endpointInterrupt
+        withConfiguredController(trace: interruptTrace) { controller, _ in
+            expect(
+                controller.armOutTransfer(endpoint: 2, byteCount: 512)
+                    == .queued,
+                "endpoint interrupt fixture did not arm endpoint two"
+            )
+            interruptTrace.resetRestartObservations()
+            expect(
+                controller.quiesceForRestart(maximumPollCount: 4),
+                "restart quiesce ignored endpoint-disabled interrupts"
+            )
+            expect(
+                interruptTrace.endpointDisableCompletionCount
+                    == interruptTrace.endpointDisableRequestCount,
+                "endpoint-disabled interrupt fixture did not complete"
+            )
+        }
+
+        let endpointTimeoutTrace = DWC2TestTrace()
+        withConfiguredController(trace: endpointTimeoutTrace) {
+            controller, _ in
+            expect(
+                controller.armOutTransfer(endpoint: 2, byteCount: 512)
+                    == .queued,
+                "endpoint timeout fixture did not arm endpoint two"
+            )
+            endpointTimeoutTrace.endpointDisableCompletion = .stalled
+            endpointTimeoutTrace.resetRestartObservations()
+            expect(
+                !controller.quiesceForRestart(maximumPollCount: 2),
+                "restart quiesce ignored endpoint disable timeout"
+            )
+            expect(
+                endpointTimeoutTrace.endpointDisableRequestCount >= 2
+                    && endpointTimeoutTrace.endpointDisableCompletionCount == 0,
+                "endpoint timeout fixture did not retain active endpoints"
+            )
+            expect(
+                endpointTimeoutTrace.fifoFlushWriteCount == 0,
+                "restart quiesce flushed FIFOs after endpoint timeout"
+            )
+        }
+
+        withRegisters { words in
+            configureCapableCore(words)
+            let trace = DWC2TestTrace()
+            var controller = DWC2Controller(
+                registers: DWC2TestRegisters(words: words, trace: trace)
+            )
+            guard case .ready = controller.initialize(maximumPollCount: 4),
+                  controller.connect()
+            else { fail("AHB timeout fixture did not initialize") }
+            trace.holdAHBNonIdleAfterReceiveFlush = true
+            expect(
+                !controller.quiesceForRestart(maximumPollCount: 2),
+                "restart quiesce ignored final AHB non-idle state"
+            )
+        }
+    }
+
     private static func drainsReceivePacketsAndMalformedEntries() {
         withReadyController { controller, words in
             expect(controller.connect(), "controller did not connect")
@@ -516,6 +716,7 @@ struct DWC2DeviceControllerTests {
     }
 
     private static func withReadyController(
+        trace: DWC2TestTrace = DWC2TestTrace(),
         _ body: (
             inout DWC2Controller<DWC2TestRegisters>,
             UnsafeMutableBufferPointer<UInt32>
@@ -524,7 +725,7 @@ struct DWC2DeviceControllerTests {
         withRegisters { words in
             configureCapableCore(words)
             var controller = DWC2Controller(
-                registers: DWC2TestRegisters(words: words)
+                registers: DWC2TestRegisters(words: words, trace: trace)
             )
             guard case .ready = controller.initialize(maximumPollCount: 4) else {
                 fail("test controller initialization failed")
@@ -534,12 +735,13 @@ struct DWC2DeviceControllerTests {
     }
 
     private static func withConfiguredController(
+        trace: DWC2TestTrace = DWC2TestTrace(),
         _ body: (
             inout DWC2Controller<DWC2TestRegisters>,
             UnsafeMutableBufferPointer<UInt32>
         ) -> Void
     ) {
-        withReadyController { controller, words in
+        withReadyController(trace: trace) { controller, words in
             expect(controller.connect(), "test controller did not connect")
             expect(controller.handleBusReset(), "test reset failed")
             words[Int(DWC2RegisterLayout.deviceStatus / 4)] = 0

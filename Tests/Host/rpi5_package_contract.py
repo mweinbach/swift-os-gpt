@@ -97,6 +97,10 @@ def validate_successful_package(
     config = (output / "config.txt").read_text()
     require("dtoverlay=dwc2,dr_mode=peripheral\n" in config,
             "config does not force DWC2 peripheral mode")
+    require("device_tree_address=0x03000000\n" in config,
+            "config does not pin the DTB above the restart destination")
+    require("device_tree_end=0x03200000\n" in config,
+            "config does not bound the pinned DTB window")
     manifest = (output / "BOOT-MANIFEST.txt").read_text()
     require("overlays/dwc2.dtbo" in manifest,
             "human-readable manifest omits the DWC2 overlay")

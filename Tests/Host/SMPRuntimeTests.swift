@@ -14,6 +14,8 @@ private nonisolated(unsafe) var hvcCallCount = 0
 private nonisolated(unsafe) var smcCallCount = 0
 private nonisolated(unsafe) var relaxCount: UInt64 = 0
 private nonisolated(unsafe) var eventCount: UInt64 = 0
+private nonisolated(unsafe) var prepareCPUOffCount: UInt64 = 0
+private nonisolated(unsafe) var cpuOffCallCount: UInt64 = 0
 
 @main
 struct SMPRuntimeTests {
@@ -21,7 +23,8 @@ struct SMPRuntimeTests {
         startsAndClassifiesFourProcessorsThroughHVC()
         reportsBoundedTimeoutAndSelectsSMC()
         rejectsInvalidRuntimeConfiguration()
-        print("SMP runtime host tests: 3 passed")
+        coordinatesRestartAcrossManagedSecondaries()
+        print("SMP runtime host tests: 4 passed")
     }
 
     private static func startsAndClassifiesFourProcessorsThroughHVC() {
@@ -103,6 +106,103 @@ struct SMPRuntimeTests {
                    "invalid configuration reached firmware")
         }
     }
+
+    private static func coordinatesRestartAcrossManagedSecondaries() {
+        mockBehaviors = (.publishOnline, .publishOnline, .publishOnline)
+        resetMockCounters()
+        withRuntime(processorCount: 3, conduit: .hypervisorCall) { runtime in
+            expect(runtime.startSecondaryProcessors(
+                secondaryEntryPhysicalAddress: 0x80000,
+                pollLimit: 8
+            ) == .completed(SMPStartupSummary(
+                selectedProcessorCount: 3,
+                onlineProcessorCount: 3,
+                firmwareAlreadyOnCount: 0,
+                timedOutCount: 0,
+                rejectedCount: 0
+            )), "restart startup summary")
+
+            expect(
+                SMPKernelRestartRendezvous.request()
+                    == .requested(epoch: 1, managedSecondaryCount: 2),
+                "restart request did not publish first epoch"
+            )
+            var cpuOneEpoch: UInt64 = 0
+            var cpuTwoEpoch: UInt64 = 0
+            expect(
+                SMPKernelRestartRendezvous.checkpoint(
+                    logicalProcessorID: 1,
+                    observedEpoch: &cpuOneEpoch
+                ) == .shutdownReturned(.notSupported),
+                "CPU1 did not classify returned CPU_OFF"
+            )
+            expect(
+                SMPKernelRestartRendezvous.checkpoint(
+                    logicalProcessorID: 2,
+                    observedEpoch: &cpuTwoEpoch
+                ) == .shutdownReturned(.notSupported),
+                "CPU2 did not classify returned CPU_OFF"
+            )
+            expect(
+                runtime.processorState(logicalProcessorID: 1)
+                    == .shutdownFailed
+                    && runtime.processorState(logicalProcessorID: 2)
+                        == .shutdownFailed,
+                "returned CPU_OFF did not publish failure state"
+            )
+            expect(
+                SMPKernelRestartRendezvous.checkpoint(
+                    logicalProcessorID: 1,
+                    observedEpoch: &cpuOneEpoch
+                ) == .idle,
+                "one request epoch was serviced more than once"
+            )
+            expect(
+                SMPKernelRestartRendezvous.request()
+                    == .requested(epoch: 2, managedSecondaryCount: 2),
+                "restart retry did not advance epoch"
+            )
+            expect(
+                SMPKernelRestartRendezvous.checkpoint(
+                    logicalProcessorID: 1,
+                    observedEpoch: &cpuOneEpoch
+                ) == .shutdownReturned(.notSupported),
+                "new restart epoch did not retry a failed CPU"
+            )
+            expect(cpuOneEpoch == 2 && cpuTwoEpoch == 1,
+                   "secondary epoch tracking was not independent")
+            expect(prepareCPUOffCount == 3,
+                   "CPU_OFF preparation count")
+            expect(cpuOffCallCount == 3,
+                   "PSCI CPU_OFF call count")
+            expect(hvcCallCount == 5 && smcCallCount == 0,
+                   "restart used the wrong published PSCI conduit")
+            // Two online publications, two restart requests, and three
+            // returned CPU_OFF notifications each send one event.
+            expect(eventCount == 7, "restart rendezvous event count")
+        }
+
+        resetMockCounters()
+        withRuntime(processorCount: 1, conduit: .secureMonitorCall) { runtime in
+            expect(runtime.startSecondaryProcessors(
+                secondaryEntryPhysicalAddress: 0x80000,
+                pollLimit: 1
+            ) == .completed(SMPStartupSummary(
+                selectedProcessorCount: 1,
+                onlineProcessorCount: 1,
+                firmwareAlreadyOnCount: 0,
+                timedOutCount: 0,
+                rejectedCount: 0
+            )), "single processor startup summary")
+            expect(
+                SMPKernelRestartRendezvous.request()
+                    == .noManagedSecondaries,
+                "single processor requested a rendezvous"
+            )
+            expect(cpuOffCallCount == 0 && prepareCPUOffCount == 0,
+                   "single processor attempted CPU_OFF")
+        }
+    }
 }
 
 private func withRuntime(
@@ -161,6 +261,8 @@ private func resetMockCounters() {
     smcCallCount = 0
     relaxCount = 0
     eventCount = 0
+    prepareCPUOffCount = 0
+    cpuOffCallCount = 0
 }
 
 private func behavior(for contextID: UInt64) -> MockCPUOnBehavior {
@@ -200,6 +302,10 @@ func mockPSCIHVC(
     _ contextID: UInt64
 ) -> UInt64 {
     hvcCallCount += 1
+    if functionID == PSCIFunctionID.cpuOff {
+        cpuOffCallCount += 1
+        return UInt64(bitPattern: Int64(-1))
+    }
     return mockCPUOn(functionID: functionID, contextID: contextID)
 }
 
@@ -211,6 +317,10 @@ func mockPSCISMC(
     _ contextID: UInt64
 ) -> UInt64 {
     smcCallCount += 1
+    if functionID == PSCIFunctionID.cpuOff {
+        cpuOffCallCount += 1
+        return UInt64(bitPattern: Int64(-1))
+    }
     return mockCPUOn(functionID: functionID, contextID: contextID)
 }
 
@@ -237,6 +347,11 @@ func mockRelax() {
 @_cdecl("arch_smp_send_event")
 func mockSendEvent() {
     eventCount += 1
+}
+
+@_cdecl("arch_smp_prepare_cpu_off")
+func mockPrepareCPUOff() {
+    prepareCPUOffCount += 1
 }
 
 private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {

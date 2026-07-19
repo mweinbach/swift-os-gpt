@@ -1042,3 +1042,12 @@ arch_smp_relax:
 arch_smp_send_event:
     sev
     ret
+
+.global arch_smp_prepare_cpu_off
+.type arch_smp_prepare_cpu_off, %function
+arch_smp_prepare_cpu_off:
+    msr     daifset, #0xf
+    msr     cntp_ctl_el0, xzr
+    dsb     sy
+    isb
+    ret

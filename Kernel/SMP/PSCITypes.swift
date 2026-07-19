@@ -6,6 +6,8 @@ enum PSCIConduit: UInt8, Equatable {
 }
 
 enum PSCIFunctionID {
+    /// PSCI v0.2+ CPU_OFF. A successful call does not return.
+    static let cpuOff: UInt64 = 0x8400_0002
     /// PSCI v0.2+ CPU_ON using the SMCCC 64-bit calling convention.
     static let cpuOn64: UInt64 = 0xc400_0003
     /// PSCI v0.2+ AFFINITY_INFO for a 64-bit target affinity argument.
@@ -70,6 +72,10 @@ enum ProcessorBootState: UInt64, Equatable {
     case failed = 4
     /// Firmware reported ALREADY_ON, but our secondary entry did not run.
     case firmwareAlreadyOn = 5
+    /// The processor observed a no-return kernel-restart rendezvous request.
+    case stopping = 6
+    /// PSCI CPU_OFF returned instead of removing the processor from affinity.
+    case shutdownFailed = 7
 }
 
 /// Single-writer state logic for topology setup and host tests. Concurrent
