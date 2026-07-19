@@ -150,15 +150,41 @@ def test_mbr_and_partition_refusals() -> None:
     expect_media_error(lambda: inspect_bytes(outside), "invalid MBR partition")
 
 
-def test_superblocks_are_both_signed_and_identical() -> None:
-    corrupt = fixture_bytes()
-    corrupt[17 * 512] ^= 0xFF
-    expect_media_error(lambda: inspect_bytes(corrupt), "backup SwiftOS data superblock")
+def test_single_valid_superblock_recovers_both_sides() -> None:
+    corrupt_backup = fixture_bytes()
+    corrupt_backup[17 * 512] ^= 0xFF
+    recovered, _ = inspect_bytes(corrupt_backup)
+    require(recovered["data_superblock_status"] == "degraded-primary-only",
+            "valid primary superblock did not authorize recovery")
+    require(recovered["persistent_record_count"] == 1,
+            "primary-only recovery did not read the bounded log")
 
+    corrupt_primary = fixture_bytes()
+    corrupt_primary[16 * 512] ^= 0xFF
+    recovered, _ = inspect_bytes(corrupt_primary)
+    require(recovered["data_superblock_status"] == "degraded-backup-only",
+            "valid backup superblock did not authorize recovery")
+    require(recovered["persistent_record_count"] == 1,
+            "backup-only recovery did not read the bounded log")
+
+    corrupt_both = fixture_bytes()
+    corrupt_both[16 * 512] ^= 0xFF
+    corrupt_both[17 * 512] ^= 0xFF
+    expect_media_error(lambda: inspect_bytes(corrupt_both),
+                       "both SwiftOS data superblocks are invalid")
+
+    padding_differs = fixture_bytes()
+    padding_differs[17 * 512 + 100] ^= 0xFF
+    recovered, _ = inspect_bytes(padding_differs)
+    require(recovered["data_superblock_status"] == "healthy",
+            "matching decoded layouts were compared as raw blocks")
+
+
+def test_valid_superblock_disagreement_is_rejected() -> None:
     disagreeing = fixture_bytes()
     different = media.data_superblock(32, 3)
     disagreeing[17 * 512:18 * 512] = different
-    expect_media_error(lambda: inspect_bytes(disagreeing), "are not duplicates")
+    expect_media_error(lambda: inspect_bytes(disagreeing), "superblocks disagree")
 
 
 def test_unbounded_log_layout_is_rejected_before_arena_scan() -> None:
@@ -178,7 +204,7 @@ def test_unbounded_log_layout_is_rejected_before_arena_scan() -> None:
             geometry(len(value)),
             source_path="unbounded.img",
         ),
-        "superblock fields",
+        "both SwiftOS data superblocks are invalid",
     )
     require(len(source.read_extents) == 3,
             "invalid layout caused a persistent-arena scan")
@@ -249,7 +275,7 @@ def test_cli_outputs_json_for_explicit_regular_image() -> None:
         report = json.loads(result.stdout)
         require(report["source"]["path"] == str(image),
                 "CLI did not preserve the explicit source path")
-        require(report["superblocks"] == "healthy-identical",
+        require(report["data_superblock_status"] == "healthy",
                 "CLI did not validate duplicate signed superblocks")
 
 
@@ -257,7 +283,8 @@ def main() -> int:
     tests = [
         test_valid_capture_is_partition_bounded,
         test_mbr_and_partition_refusals,
-        test_superblocks_are_both_signed_and_identical,
+        test_single_valid_superblock_recovers_both_sides,
+        test_valid_superblock_disagreement_is_rejected,
         test_unbounded_log_layout_is_rejected_before_arena_scan,
         test_source_open_is_read_only_and_refuses_symlinks,
         test_geometry_and_whole_device_contracts,

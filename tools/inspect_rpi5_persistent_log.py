@@ -339,19 +339,24 @@ def inspect_stream(
         LOGICAL_BLOCK_BYTES,
         "backup SwiftOS data superblock",
     )
-    try:
-        primary_layout = media.decode_data_layout(primary, data_count)
-    except media.MediaError as error:
-        raise media.MediaError(f"primary SwiftOS data superblock: {error}") from error
-    try:
-        backup_layout = media.decode_data_layout(backup, data_count)
-    except media.MediaError as error:
-        raise media.MediaError(f"backup SwiftOS data superblock: {error}") from error
-    if primary != backup or primary_layout != backup_layout:
-        raise media.MediaError("signed SwiftOS data superblocks are not duplicates")
+    decoded: list[tuple[str, dict[str, int]]] = []
+    for name, block in (("primary", primary), ("backup", backup)):
+        try:
+            decoded.append((name, media.decode_data_layout(block, data_count)))
+        except media.MediaError:
+            pass
+    if not decoded:
+        raise media.MediaError("both SwiftOS data superblocks are invalid")
+    if len(decoded) == 2 and decoded[0][1] != decoded[1][1]:
+        raise media.MediaError("valid SwiftOS data superblocks disagree")
+    layout = decoded[0][1]
+    superblock_status = (
+        "healthy" if len(decoded) == 2
+        else f"degraded-{decoded[0][0]}-only"
+    )
 
-    log_start = int(primary_layout["kernel_log_start_block"])
-    log_count = int(primary_layout["kernel_log_block_count"])
+    log_start = int(layout["kernel_log_start_block"])
+    log_count = int(layout["kernel_log_block_count"])
     log_end = log_start + log_count
     if (
         log_start < 2
@@ -362,7 +367,7 @@ def inspect_stream(
     ):
         raise media.MediaError("persistent log arena exceeds its bounded partition")
 
-    records = media.persistent_records(image, data, primary_layout)
+    records = media.persistent_records(image, data, layout)
     return {
         "format": "swiftos-persistent-log-capture-v1",
         "source": {
@@ -375,8 +380,8 @@ def inspect_stream(
         },
         "partitions": entries,
         "swiftos_data_partition": data,
-        "data_volume": primary_layout,
-        "superblocks": "healthy-identical",
+        "data_volume": layout,
+        "data_superblock_status": superblock_status,
         "persistent_record_count": len(records),
         "persistent_records": records,
     }
