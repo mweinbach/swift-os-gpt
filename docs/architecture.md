@@ -214,8 +214,11 @@ cursor into ordered chrome and glyph command buffers. The QEMU wrapper allocates
 stable records, installs the synchronous canonical-input handler, and batches
 both passes into one VirGL submission plus one damage flush. One owner must drain
 input before rendering; the current SMP path does not service graphical input.
-This file-manager path is host/source tested and its combined boot integration
-is underway, but it has not produced local GL-backed VirGL pixels.
+`KernelMain` now loads the mounted provider, transfers unique ownership of the
+GPU session, presents the first file-manager frame, completes the opening
+transition, and in the single-CPU loop drains input before each input-driven
+redraw. The path is compiled, host-tested, and source-audited, but it has not
+produced locally exercised GL-backed VirGL pixels.
 
 The existing end-to-end QEMU smoke still exercises a separate host 2D resource
 with CPU-generated diagnostic backing, transfer, flush, and scanout. It is

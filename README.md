@@ -90,8 +90,11 @@ The verified QEMU path now includes:
    handles bounded directory loading, focus, pointer capture, scrolling, US-key
    composition, type-ahead, selection, scaling, and paced animation. A GPU-only
    file-manager scene compiler and QEMU VirtIO 3D runtime batch chrome and text
-   through the retained GPU session. Those file-manager layers are host- and
-   source-tested; their combined accelerated boot integration is still underway.
+   through the retained GPU session. The live guest path loads the mounted
+   provider, presents the first frame, completes the opening transition, and in
+   single-CPU mode serializes input draining with GPU redraws. This path is
+   compiled, host-tested, and source-audited, but it has not been exercised
+   locally through a GL-backed VirGL device or captured as accelerated pixels.
 
 The production graphics invariant is now strict: CPUs may update retained scene
 state, compute animation and damage, and compile backend-neutral command buffers,
@@ -167,6 +170,22 @@ and `SWIFTOS:GPU_FRAME_READY` only after the GPU command stream has completed
 and the target has been scanned out and flushed. The currently installed QEMU
 does not expose the required GL-backed VirtIO-GPU device, so those accelerated
 markers and pixels are not part of the local smoke evidence yet.
+
+On a host whose QEMU exposes a GL-backed `virtio-gpu-gl-device`, the strict
+opt-in acceptance gate is:
+
+```sh
+make virtio-gpu-3d-acceptance
+```
+
+It requires a mounted SwiftFS provider; ordered accelerator, file-manager
+ready, first-frame, and steady-frame markers; a valid nonuniform 800 x 600 GPU
+screenshot; exact injected relative pointer motion; an interaction-frame
+marker; and at least 16 changed pixels in a second screenshot. Capability
+absence makes the underlying probe exit with status 77; `make` reports that as
+a failed target. The installed macOS QEMU takes that unavailable path because
+it lacks `virtio-gpu-gl-device`; this hardware-dependent gate is intentionally
+outside `make test` and its absence must not count as rendered evidence.
 
 `make animation-smoke` captures two paced guest frames and proves that a
 retained rounded layer is alpha-composited while presentation remains confined
@@ -283,7 +302,10 @@ and the current Pi pixels are still produced by the diagnostic CPU compositor.
 The QEMU session builds and uploads a fixed built-in 5 x 7 ASCII mask atlas. Its
 new kernel-side file-manager runtime can compile provider-backed rows, window
 chrome, selection/hover animation, and the routed pointer into GPU-only command
-passes, but local GL-backed VirGL pixels are still unproven and boot integration
-is underway. There is no dynamic font loader/shaper/atlas, native Pi GPU font
-path, EL0 surface protocol, or user window server. Each milestone must leave
-behind a repeatable boot or unit test rather than a mock UI.
+passes. `KernelMain` now loads the mounted provider, presents the first frame,
+drives the opening transition to its terminal frame, and serializes input-driven
+redraw in the single-CPU loop. That path is compiled and host/source validated,
+but local GL-backed VirGL pixels remain unexercised. There is no dynamic font
+loader/shaper/atlas, native Pi GPU font path, EL0 surface protocol, or user
+window server. Each milestone must leave behind a repeatable boot or unit test
+rather than a mock UI.

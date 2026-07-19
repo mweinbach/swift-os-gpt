@@ -102,10 +102,14 @@ dependencies across the full runtime. Focused host tests cover input routing,
 pointer scaling, keyboard navigation/type-ahead, animation retirement,
 provider-cookie restart, copied names, and capacity truncation.
 
-This is still an integration boundary, not visual proof. The combined QEMU boot
-loop is being wired and the installed QEMU cannot expose a GL-backed VirGL
-device, so no local accelerated file-manager pixels or interaction capture
-exist. The runtime is kernel bootstrap infrastructure, not an EL0 window server.
+`KernelMain` now owns the complete accelerated bootstrap loop: it loads the
+mounted provider, transfers the retained GPU session to one mutable owner,
+presents the first file-manager frame, completes the opening transition, and in
+single-CPU mode drains input before servicing input-driven redraws. This path is
+compiled, host-tested, and source-audited, but it remains a visual-verification
+boundary: the installed QEMU cannot expose a GL-backed VirGL device, so no local
+accelerated file-manager pixels or interaction capture exist. The runtime is
+kernel bootstrap infrastructure, not an EL0 window server.
 
 ## Explicit diagnostic frame path
 
@@ -204,13 +208,23 @@ scheduler. The installed QEMU cannot run the VirGL GL route, and the Pi image
 has not run on physical hardware, so neither accelerated QEMU pixels nor
 physical Pi output are hardware-verified.
 
+`make virtio-gpu-3d-acceptance` is the strict opt-in live gate. It starts a
+GL-backed `virtio-gpu-gl-device` with SwiftFS, keyboard, and relative-pointer
+devices; requires accelerator, mounted-provider, ready, first-frame, and
+steady-frame markers; validates a nonuniform 800 x 600 GPU screendump; injects
+exact `+37/-19` pointer motion; requires the guest input and interaction-frame
+markers; and accepts only a second screendump with at least 16 changed pixels.
+QEMU capability absence makes the underlying probe exit 77, which `make`
+reports as a failed target. This gate is intentionally outside `make test`, and
+the installed macOS QEMU currently takes the unavailable path.
+
 ## Next renderer increments
 
-- Exercise the checked-in session on a GL-backed VirGL QEMU configuration and
-  retain accelerated serial, fence, and captured-frame evidence.
-- Route ongoing retained-scene updates through the reusable GPU submission API,
-  finish the file-manager boot loop, then execute the frame scheduler and
-  graphics mailbox as a dedicated service.
+- Exercise the fully wired provider-backed file-manager boot and interaction
+  loop on a GL-backed VirGL QEMU configuration, retaining serial, fence, and
+  captured-pixel evidence.
+- Move ongoing retained-scene updates from the single-owner bootstrap loop into
+  the frame scheduler and graphics mailbox as a dedicated service.
 - Add retained image, glyph-run, border, gradient, shadow, and transform content
   while preserving old/new damage reporting and GPU-only pixel production.
 - Grow the fixed boot mask into bounded font loading, layout and shaping,

@@ -174,9 +174,11 @@ state in allocator-backed stable memory and presents both buffers with one
 software framebuffer or rasterizer dependency. Focused tests cover routing,
 scaled pointer remainders, keyboard type-ahead, animation retirement,
 stale-cookie restart, copied provider names, and bounded directory truncation.
-The source audit extends the GPU-only rule through this runtime. Combined guest
-boot-loop integration is underway, so this is not yet local VirGL pixel or
-interactive-desktop evidence.
+The source audit extends the GPU-only rule through this runtime. `KernelMain`
+now loads the mounted provider, presents the first frame, drives the opening
+transition to steady state, and serializes single-CPU input delivery with GPU
+redraw. This is compiled and host/source validated, but it is not yet local
+VirGL pixel or interactive-desktop evidence.
 
 ## Operating modes
 
@@ -186,8 +188,9 @@ production VirGL route first and, when no compatible device is present, marks
 and publishes the explicit ramfb diagnostic before entering user scheduling.
 The polling input runtime is deliberately inactive in this SMP mode until a
 kernel service thread or IRQ-dispatch path exists. There is not yet an EL0
-window system or live SMP graphical-input service; the bounded kernel-side
-file-manager routing model is only host-tested in this mode.
+window system or live SMP graphical-input service. On the compiled accelerated
+branch, the mounted-provider file manager reaches its first and terminal
+opening frames before CPU0 enters EL0; it receives no later input in this mode.
 
 Use `QEMU_CPUS=1 make run` for monitor mode. The single-CPU boot retains the
 interactive EL1 monitor after the same memory, exception, GIC, timer, and ramfb
@@ -211,11 +214,11 @@ guest has consumed eventq DMA, translated evdev codes, encoded the canonical
 record, and dequeued it again. It does not prove focus, text composition, a
 visible cursor, SMP delivery, USB-host input, or Raspberry Pi hardware.
 
-The accelerated file-manager integration targets the same single-owner loop:
+The accelerated file-manager integration now implements that single-owner loop:
 one CPU drains VirtIO input, synchronously routes canonical events, updates UI
 state, and then services the GPU session. It is intentionally inactive as an
 input path once the SMP/EL0 scheduler owns CPU0. No cross-CPU UI mutation is
-claimed.
+claimed, and the installed local QEMU cannot exercise the GL-backed branch.
 
 ## Verification gates
 
@@ -252,6 +255,17 @@ claimed.
    descriptor, architecture, and unresolved-symbol contract;
 9. an alternate two-Cortex-A76 CPU configuration reaching the same secondary-
    startup and EL0-preemption acceptance markers.
+
+`make virtio-gpu-3d-acceptance` is a separate strict gate for a host with a
+GL-backed `virtio-gpu-gl-device`. It requires mounted SwiftFS plus ordered
+accelerator, file-manager ready, first-frame, and steady-frame markers; captures
+and validates an 800 x 600 GPU screenshot; injects exact `+37/-19` relative
+pointer motion; waits for the guest input and interaction-frame markers; then
+requires at least 16 pixels to change in a second capture. Missing QEMU GL
+capability makes the underlying probe exit 77, which `make` reports as a failed
+target. The installed macOS QEMU lacks the device, so this gate is deliberately
+outside `make test` and currently reports unavailable rather than manufacturing
+accelerated evidence.
 
 The visual artifacts include `.build/swiftos-frame.ppm`, the low/peak
 `.build/swiftos-animation*.ppm` pair, and `.build/swiftos-virtio-gpu.ppm`. They
@@ -360,8 +374,8 @@ recovery, Ethernet link, GICv2 timer delivery, PSCI startup, firmware-patched
 
 ## Next coherent milestone
 
-The next QEMU graphics milestone is to finish the combined file-manager boot
-integration, exercise it on a GL-backed VirGL device, and retain accelerated
+The next QEMU graphics milestone is to exercise the fully wired file-manager
+boot and interaction loop on a GL-backed VirGL device and retain accelerated
 frame and interaction evidence. Ongoing frames then need the reusable session,
 frame scheduler, and graphics-worker mailbox. The fixed boot atlas must grow
 into bounded font loading,

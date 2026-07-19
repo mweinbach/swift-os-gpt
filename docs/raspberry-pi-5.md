@@ -402,8 +402,10 @@ compiler now feeds the QEMU VirGL boot session; a future native Pi V3D VII
 backend must consume the same commands without duplicating UI policy. The shared
 policy now also includes a bounded provider-backed file-manager state machine,
 keyboard/pointer routing, animation invalidation, and a GPU file-manager scene
-compiler. Its QEMU runtime is host/source tested and boot integration is
-underway; the native Pi GPU route does not exist yet.
+compiler. Its QEMU boot loop is wired through provider load, first frame,
+terminal transition, and serialized single-CPU input redraw; it is compiled and
+host/source validated but has not produced local GL-backed VirGL pixels. The
+native Pi GPU route does not exist yet.
 
 QEMU can boot without ramfb through a Swift modern VirtIO-MMIO GPU 2D driver;
 that smoke remains CPU-rasterized diagnostic evidence. A separate production

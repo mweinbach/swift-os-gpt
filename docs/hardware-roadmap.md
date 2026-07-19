@@ -18,10 +18,12 @@ damage result after 18 fenced transactions. The CPU prepares immutable geometry
 and coverage assets but no color or scanout pixels. The session is retained for
 reusable render-IR submission and damage flush. The installed local QEMU cannot
 instantiate a GL-backed VirGL device, so this crossing has source, protocol, and
-host-test coverage rather than local hardware exercise. The next graphics gate
-is to finish the provider-backed file-manager boot integration and capture its
-accelerated output on a capable QEMU build, followed by sustained frame
-scheduling, richer lowering, dynamic fonts, and vblank-capable presentation.
+host-test coverage rather than local hardware exercise. The provider-backed
+file-manager boot loop is now fully wired through provider load, first frame,
+terminal transition, and serialized single-CPU input redraw. The next graphics
+gate is to capture that loop's accelerated output and visible interaction on a
+capable QEMU build, followed by sustained frame scheduling, richer lowering,
+dynamic fonts, and vblank-capable presentation.
 A backend-neutral file-manager state machine already supplies bounded provider
 loading, pointer/focus/capture routing, keyboard navigation/type-ahead, and
 animation invalidation; its QEMU wrapper compiles chrome and glyph passes and
@@ -30,8 +32,9 @@ locally exercised interactive desktop.
 A polling modern VirtIO-input path now pre-posts bounded device-writable buffers
 for QEMU keyboard and relative-pointer devices and translates evdev records into
 the transport-neutral input ABI. QMP injection proves that crossing in the
-single-CPU monitor; the UI routing model is host-tested, while combined GPU/input
-boot proof, SMP service-thread/IRQ delivery, and Pi USB-host input remain open.
+single-CPU monitor; the UI routing model is host-tested, while live GL-backed
+GPU/input pixel proof, SMP service-thread/IRQ delivery, and Pi USB-host input
+remain open.
 QEMU now has a native VirtIO block path, crash-consistent SwiftFS mount, bounded
 EL0 file operations, and a multi-boot remount/durable-write smoke. Entropy and
 broader networking remain parallel device work. The Pi target has a host-tested,

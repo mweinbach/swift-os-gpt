@@ -123,9 +123,13 @@ the canonical queue ABI, and dequeues those events. Default SMP boots do not
 poll input yet; they need a kernel service thread or registered VirtIO IRQ path.
 The accelerated file-manager runtime installs a synchronous handler and is
 designed so one owner drains input before mutating the same UI state for a GPU
-frame. Its routing and GPU-only source boundaries are host-tested, while the
-combined accelerated boot loop is still being integrated. The existing QMP
-smoke remains transport evidence, not proof of rendered interaction.
+frame. `KernelMain` now loads the mounted provider, presents the first frame,
+completes the opening transition, and serializes the single-CPU polling and
+input-driven redraw loop. Its routing and GPU-only boundaries are compiled and
+host/source validated. The existing QMP smoke remains transport evidence, not
+proof of rendered interaction; that proof requires the separate GL-backed
+`make virtio-gpu-3d-acceptance` gate, which is unavailable on the installed
+macOS QEMU.
 
 On Raspberry Pi 5, the same event service will sit above a USB host-controller
 and HID transport. The current DWC2 implementation is a USB-C device-mode debug
