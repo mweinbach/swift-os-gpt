@@ -941,6 +941,10 @@ def persistent_records(image, data_partition, layout) -> list[dict[str, object]]
 
 def inspect_image(path: Path) -> dict[str, object]:
     with path.open("rb") as image:
+        image_size = path.stat().st_size
+        if image_size < SECTOR_SIZE or image_size % SECTOR_SIZE:
+            raise MediaError("image size is not a whole number of logical blocks")
+        image_blocks = image_size // SECTOR_SIZE
         entries = read_partition_entries(image)
         if len(entries) != 2:
             raise MediaError("SwiftOS media must have exactly two MBR partitions")
@@ -997,6 +1001,8 @@ def inspect_image(path: Path) -> dict[str, object]:
         records = persistent_records(image, data, layout)
         return {
             "format": "swiftos-rpi5-media-v1",
+            "logical_block_bytes": SECTOR_SIZE,
+            "logical_block_count": image_blocks,
             "partitions": entries,
             "boot_files": {
                 name: {"byte_count": len(value), "sha256": sha256(value)}

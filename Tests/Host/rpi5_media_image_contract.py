@@ -71,6 +71,28 @@ def build(package: Path, image: Path) -> None:
     require(result.returncode == 0, f"media build failed: {result.stdout}")
 
 
+def build_with_block_count(
+    package: Path,
+    image: Path,
+    block_count: int,
+) -> None:
+    result = run(
+        sys.executable,
+        str(MEDIA_TOOL),
+        "build",
+        str(package),
+        str(image),
+        "--total-block-count",
+        str(block_count),
+        "--boot-size-mib",
+        "64",
+        "--kernel-log-block-count",
+        "64",
+    )
+    require(result.returncode == 0,
+            f"exact-block media build failed: {result.stdout}")
+
+
 def inspect(image: Path, should_succeed: bool = True) -> dict[str, object] | str:
     result = run(sys.executable, str(MEDIA_TOOL), "inspect", str(image))
     if should_succeed:
@@ -179,8 +201,11 @@ def main() -> int:
         package = package_fixture(root)
         first = root / "first.img"
         second = root / "second.img"
+        exact = root / "exact-block-count.img"
         build(package, first)
         build(package, second)
+        exact_block_count = 196_641
+        build_with_block_count(package, exact, exact_block_count)
 
         require(first.stat().st_size == 96 * 1_024 * 1_024,
                 "media logical size changed")
@@ -188,6 +213,17 @@ def main() -> int:
                 "media image is not sparse")
         require(digest(first) == digest(second),
                 "identical media builds are not byte-deterministic")
+
+        require(exact.stat().st_size == exact_block_count * 512,
+                "explicit block-count image size changed")
+        _, exact_boot, exact_data = read_mbr(exact)
+        require(exact_boot == (2_048, 131_072),
+                "explicit block-count boot extent changed")
+        require(exact_data[0] + exact_data[1] == exact_block_count,
+                "data partition does not end at exact media geometry")
+        exact_report = inspect(exact)
+        require(exact_report["logical_block_count"] == exact_block_count,
+                "inspector lost the explicit media geometry")
 
         _, boot, data = read_mbr(first)
         require(boot == (2_048, 131_072), "boot partition LBA extent changed")
