@@ -33,11 +33,12 @@ diagnostic framebuffer setup. On a compatible VirGL2 device, the guest:
    GPU;
 3. creates and attaches a GPU vertex buffer, then uploads six unit-quad
    `R32G32_FLOAT` vertices without creating any pixel backing store;
-4. creates the color surface, framebuffer, shaders, vertex elements,
-   rasterizer, depth/stencil/alpha state, and copy/source-over blend state;
+4. creates the color surface, framebuffer, solid and analytic-rounded shader
+   pairs, vertex elements, rasterizer, depth/stencil/alpha state, and
+   copy/source-over blend state;
 5. builds the first desktop as five retained logical layers, then uses
    `GPURetainedSceneCompiler` to lower full logical damage into one attachment
-   clear and five source-over solid quads; and
+   clear, one solid top bar, and four source-over analytic rounded quads; and
 6. sets scanout and flushes the compiler-provided presentation damage only
    after all dependent queue work completes.
 
@@ -144,10 +145,11 @@ compositor repaint.
 The accelerated session and IR lowering have deterministic host tests for exact
 packet order, fence progression, format/capability rejection, unit-quad upload,
 pipeline state, retained boot-scene construction, 1080p and 4K integer viewport
-scaling, full-clear presentation damage, initial quad draws, reusable
+scaling, full-clear presentation damage, per-corner analytic coverage,
+transformed padded bounds, shader switching, exact initial quad draws, reusable
 submission, and damage flush. The GPU-only source audit separately requires the
-retained scene crossing and prevents software rasterizer or framebuffer types
-from entering accelerated activation and execution.
+retained scene and rounded-shader crossings and prevents software rasterizer or
+framebuffer types from entering accelerated activation and execution.
 
 The live animation loop currently belongs to the single-CPU EL1 diagnostic
 monitor. The Pi image and diagnostic multicore QEMU path rasterize the same
@@ -162,7 +164,7 @@ physical Pi output are hardware-verified.
   retain accelerated serial, fence, and captured-frame evidence.
 - Route ongoing retained-scene updates through the reusable GPU submission API,
   then execute the frame scheduler and graphics mailbox in the live boot path.
-- Lower rounded-corner and glyph-atlas commands to VirGL; solid quads, affine
+- Lower glyph-atlas commands to VirGL; solid and analytic rounded quads, affine
   transforms, clear/load/store, clipping, and copy/source-over blending already
   have bounded lowering.
 - Add retained image, glyph-run, border, gradient, shadow, and transform content
@@ -182,6 +184,6 @@ physical Pi output are hardware-verified.
 This is the base of a modern UI renderer, not yet a window server. The QEMU
 accelerated branch currently produces a static retained-scene bootstrap frame
 (one attachment clear plus five quads);
-there are no EL0 surfaces, textures, paths, rounded GPU coverage, live font
-atlas, input routing, or sustained compositor loop yet, and the checked-in GPU
-frame has not been exercised by the installed local QEMU.
+there are no EL0 surfaces, textures, paths, live font atlas, input routing, or
+sustained compositor loop yet, and the checked-in GPU frame—including analytic
+rounded coverage—has not been exercised by the installed local QEMU.

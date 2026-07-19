@@ -239,7 +239,8 @@ that smoke remains CPU-rasterized diagnostic evidence. A separate production
 QEMU branch now creates a format-100 sRGB VirGL target and GPU unit quad,
 installs its pipeline, builds its first desktop through the shared retained-scene
 compiler, renders the resulting clear and five quads on the GPU, and retains a
-reusable GPU-only IR submission/damage-flush session. The installed local QEMU
+reusable GPU-only IR submission/damage-flush session. Four of those layers use
+the dedicated analytic rounded-coverage shader pair. The installed local QEMU
 lacks a GL-backed VirGL device, so this route is source/protocol/host-tested but
 not locally hardware-exercised. None of it implements or validates Raspberry Pi
 5's V3D VII GPU, HVS, HDMI controllers, firmware interfaces, or display clocks.

@@ -187,11 +187,13 @@ uploaded by the CPU. The session creates and uploads an immutable GPU unit quad
 and installs its shaders and fixed pipeline. `GPUDesktopScene` builds a
 five-layer 800 x 600 retained tree and full damage;
 `GPURetainedSceneCompiler` applies the centered integer viewport and emits the
-attachment clear, scissor, and five source-over GPU quads. The returned full
-presentation damage is carried into the fenced flush, with the lifecycle still
-totaling 13 ordered transactions. The retained context/compiler can lower later
-immutable IR frames into the same target and issue a fenced flush for checked
-damage.
+attachment clear, scissor, one solid top bar, and four source-over rounded GPU
+quads. A dedicated analytic shader pair evaluates per-corner signed distance
+and derivative-based coverage over conservative transformed bounds. The
+returned full presentation damage is carried into the fenced flush, with the
+lifecycle still totaling 13 ordered transactions. The retained context/compiler
+can lower later immutable IR frames into the same target and issue a fenced
+flush for checked damage.
 
 The existing end-to-end QEMU smoke still exercises a separate host 2D resource
 with CPU-generated diagnostic backing, transfer, flush, and scanout. It is
@@ -220,12 +222,12 @@ driver. The implementation remains hardware-unverified.
 The production QEMU branch draws its initial retained scene's attachment clear,
 top bar, panel, sidebar, accent card, and dock on the GPU. Its bounded lowering
 supports solid quads, affine Q16 transforms, clear/load/store, clipping, and
-copy/source-over blend.
-Terminal glyphs, rounded coverage, and the continuous retained status animation
-still run only in the explicit diagnostic CPU path. There are no textures,
-paths, shadows, live font atlas, window/surface protocol, graphical input path,
-or EL0 application surface yet, and the local QEMU build cannot exercise the
-accelerated branch.
+copy/source-over blend, plus analytic rounded coverage that rejects singular or
+ill-conditioned inverse transforms. Terminal glyphs and the continuous retained
+status animation still run only in the explicit diagnostic CPU path. There are
+no textures, paths, shadows, live font atlas, window/surface protocol,
+graphical input path, or EL0 application surface yet, and the local QEMU build
+cannot exercise the accelerated branch.
 
 With four CPUs, `make run` publishes the ramfb frame and then follows the SMP/EL0
 path. `QEMU_CPUS=1 make run` retains the interactive EL1 kernel monitor after

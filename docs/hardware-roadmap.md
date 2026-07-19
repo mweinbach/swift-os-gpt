@@ -11,7 +11,8 @@ still presents CPU-rasterized diagnostic pixels. Separately, the production
 boot branch now creates a fenced VirGL context, a format-100 sRGB GPU-only
 target, unit-quad geometry and pipeline state, builds the first 800 x 600
 desktop through the shared retained-scene compiler into one GPU clear and five
-quads, and scans out its full-damage result after 13 fenced transactions. The
+quads, including four analytic antialiased rounded layers, and scans out its
+full-damage result after 13 fenced transactions. The
 session is retained for reusable render-IR submission and damage flush. The
 installed local QEMU cannot instantiate a GL-backed VirGL device, so this
 crossing is source/protocol/host-tested rather than locally hardware-exercised.
