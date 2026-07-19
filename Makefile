@@ -51,7 +51,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test usb-gadget-host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -149,7 +149,18 @@ source-check:
 	$(PYTHON) tools/validate_source_boundary.py
 	$(PYTHON) tools/validate_gpu_only_path.py Kernel/Core/KernelMain.swift
 
-host-test:
+usb-gadget-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Drivers/USB/USBSetupPacket.swift \
+		Kernel/Drivers/USB/USBDebugDescriptors.swift \
+		Kernel/Drivers/USB/USBControlEndpoint.swift \
+		Tests/Host/USBGadgetProtocolTests.swift \
+		-o $(BUILD_DIR)/usb-gadget-protocol-host-tests
+	$(BUILD_DIR)/usb-gadget-protocol-host-tests
+
+host-test: usb-gadget-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
