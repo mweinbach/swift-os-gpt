@@ -19,6 +19,7 @@ enum MMIO {
 }
 
 enum AArch64 {
+    static var counterValue: UInt64 { 0 }
     static func spinHint() {}
     static func synchronizeData() {}
     static func cleanDataCache(address: UInt64, byteCount: UInt64) -> Bool {
@@ -72,6 +73,10 @@ private final class TestHardware {
     var transmitDescriptorCount: UInt16 = 2
     var transmitCompletionIndex: UInt16 = 0
     var spinCount = 0
+    var counter = UInt64(0)
+    var ticksPerSpin = UInt64(0)
+    var basicStatusReadyAfterSpinCount: Int?
+    var transmitUsedAfterSpinCount: Int?
 
     func read32(at offset: UInt) -> UInt32 {
         if offset == CadenceGEMRegisterLayout.networkStatus && mdioStuck {
@@ -92,8 +97,16 @@ private final class TestHardware {
             let operation = UInt8(truncatingIfNeeded: value >> 28) & 3
             let register = UInt8(truncatingIfNeeded: value >> 18) & 0x1f
             if operation == 2 {
+                let phyValue: UInt16
+                if register == 1,
+                   let readyAfter = basicStatusReadyAfterSpinCount,
+                   spinCount >= readyAfter {
+                    phyValue = (1 << 5) | (1 << 2)
+                } else {
+                    phyValue = phyRegisters[register, default: UInt16.max]
+                }
                 registerValues[offset] = value & 0xffff_0000
-                    | UInt32(phyRegisters[register, default: UInt16.max])
+                    | UInt32(phyValue)
             } else if operation == 1 {
                 phyRegisters[register] = UInt16(truncatingIfNeeded: value)
             }
@@ -130,8 +143,13 @@ private struct TestRegisters: CadenceGEMRegisterAccess {
         hardware.write32(value, at: offset)
     }
 
+    func counterValue() -> UInt64 {
+        hardware.counter
+    }
+
     func spinWaitHint() {
         hardware.spinCount += 1
+        hardware.counter &+= hardware.ticksPerSpin
     }
 }
 
@@ -148,7 +166,16 @@ private final class TestDMA: CadenceGEMDMAAccess {
     }
 
     func loadDescriptorWord(at cpuAddress: UInt64) -> UInt32 {
-        UnsafeRawPointer(bitPattern: UInt(cpuAddress))!.load(as: UInt32.self)
+        let pointer = UnsafeMutableRawPointer(bitPattern: UInt(cpuAddress))!
+        var value = pointer.load(as: UInt32.self)
+        if cpuAddress == hardware.transmitDescriptorCPUAddress + 4,
+           hardware.events.contains("startTransmit"),
+           let readyAfter = hardware.transmitUsedAfterSpinCount,
+           hardware.spinCount >= readyAfter {
+            value |= 1 << 31
+            pointer.storeBytes(of: value, as: UInt32.self)
+        }
+        return value
     }
 
     func storeDescriptorWord(_ value: UInt32, at cpuAddress: UInt64) {
@@ -253,7 +280,10 @@ private final class GEMFixture {
     let storage: CadenceGEMDMAStorage
     let configuration: CadenceGEMDeviceConfiguration
 
-    init(maximumPollCount: UInt64 = 8) {
+    init(
+        maximumPollCount: UInt64 = 8,
+        maximumWaitTicks: UInt64 = 8
+    ) {
         dma = TestDMA(hardware: hardware)
         guard let receiveDescriptorRegion = Self.region(
                   receiveDescriptors,
@@ -287,7 +317,8 @@ private final class GEMFixture {
                   macAddress: MACAddress(0x02, 0x53, 0x57, 0x49, 0x46, 0x54),
                   phyAddress: 1,
                   mdcClockDividerEncoding: 5,
-                  maximumPollCount: maximumPollCount
+                  maximumPollCount: maximumPollCount,
+                  maximumWaitTicks: maximumWaitTicks
               )
         else {
             fatalError("valid GEM fixture rejected")
@@ -349,7 +380,8 @@ struct CadenceGEMDeviceTests {
                 macAddress: .zero,
                 phyAddress: 1,
                 mdcClockDividerEncoding: 5,
-                maximumPollCount: 8
+                maximumPollCount: 8,
+                maximumWaitTicks: 8
             ) == nil,
             "zero MAC address accepted"
         )
@@ -358,9 +390,20 @@ struct CadenceGEMDeviceTests {
                 macAddress: MACAddress(2, 1, 2, 3, 4, 5),
                 phyAddress: 32,
                 mdcClockDividerEncoding: 5,
-                maximumPollCount: 8
+                maximumPollCount: 8,
+                maximumWaitTicks: 8
             ) == nil,
             "out-of-range Clause 22 PHY address accepted"
+        )
+        expect(
+            CadenceGEMDeviceConfiguration(
+                macAddress: MACAddress(2, 1, 2, 3, 4, 5),
+                phyAddress: 1,
+                mdcClockDividerEncoding: 5,
+                maximumPollCount: 8,
+                maximumWaitTicks: 0
+            ) == nil,
+            "zero elapsed-time limit was accepted"
         )
         expect(
             GEMFixture.region(
@@ -506,6 +549,25 @@ struct CadenceGEMDeviceTests {
             expect(fixture.hardware.spinCount == 4, "MDIO polling was not bounded")
         }
         do {
+            let fixture = GEMFixture(
+                maximumPollCount: 100,
+                maximumWaitTicks: 3
+            )
+            fixture.hardware.counter = UInt64.max - 1
+            fixture.hardware.ticksPerSpin = 1
+            fixture.hardware.mdioStuck = true
+            var device = fixture.makeDevice()
+            expect(
+                device.initialize() == .mdioTimedOut,
+                "elapsed MDIO deadline was hidden"
+            )
+            expect(
+                fixture.hardware.spinCount == 3
+                    && fixture.hardware.counter == 1,
+                "MDIO elapsed deadline was not wrap-safe"
+            )
+        }
+        do {
             let fixture = GEMFixture(maximumPollCount: 4)
             fixture.hardware.phyRegisters[2] = 0
             fixture.hardware.phyRegisters[3] = 0
@@ -524,6 +586,41 @@ struct CadenceGEMDeviceTests {
                 "incomplete autonegotiation was accepted"
             )
             expect(fixture.hardware.spinCount == 4, "link polling was not bounded")
+        }
+        do {
+            let fixture = GEMFixture(
+                maximumPollCount: 100,
+                maximumWaitTicks: 3
+            )
+            fixture.hardware.ticksPerSpin = 1
+            fixture.hardware.phyRegisters[1] = 0
+            var device = fixture.makeDevice()
+            expect(
+                device.initialize() == .phyAutonegotiationTimedOut,
+                "elapsed PHY-autonegotiation deadline was hidden"
+            )
+            expect(
+                fixture.hardware.spinCount == 3,
+                "PHY autonegotiation exceeded its elapsed deadline"
+            )
+        }
+        do {
+            let fixture = GEMFixture(
+                maximumPollCount: 100,
+                maximumWaitTicks: 3
+            )
+            fixture.hardware.ticksPerSpin = 1
+            fixture.hardware.phyRegisters[1] = 0
+            fixture.hardware.basicStatusReadyAfterSpinCount = 2
+            var device = fixture.makeDevice()
+            expect(
+                device.initialize() == .ready,
+                "link mode observed on the final permitted poll was rejected"
+            )
+            expect(
+                fixture.hardware.spinCount == 2,
+                "final permitted link poll used an unexpected wait count"
+            )
         }
         do {
             let fixture = GEMFixture(maximumPollCount: 4)
@@ -639,6 +736,79 @@ struct CadenceGEMDeviceTests {
                 "TX completion timeout was hidden"
             )
             expect(device.linkState == .faulted, "timed-out DMA stayed reusable")
+        }
+        do {
+            let fixture = GEMFixture(
+                maximumPollCount: 100,
+                maximumWaitTicks: 3
+            )
+            var device = fixture.makeDevice()
+            expect(
+                device.initialize() == .ready,
+                "TX availability-deadline fixture init failed"
+            )
+            fixture.hardware.counter = 0
+            fixture.hardware.spinCount = 0
+            fixture.hardware.ticksPerSpin = 1
+            write32(0, to: fixture.transmitDescriptors.pointer + 4)
+            let frame = [UInt8](repeating: 0x5a, count: 60)
+            expect(
+                frame.withUnsafeBytes { device.transmit($0) } == .timedOut,
+                "elapsed TX-descriptor deadline was hidden"
+            )
+            expect(
+                fixture.hardware.spinCount == 3,
+                "TX descriptor wait exceeded its elapsed deadline"
+            )
+        }
+        do {
+            let fixture = GEMFixture(
+                maximumPollCount: 100,
+                maximumWaitTicks: 3
+            )
+            fixture.hardware.completeTransmit = false
+            var device = fixture.makeDevice()
+            expect(
+                device.initialize() == .ready,
+                "TX completion-deadline fixture init failed"
+            )
+            fixture.hardware.counter = 0
+            fixture.hardware.spinCount = 0
+            fixture.hardware.ticksPerSpin = 1
+            let frame = [UInt8](repeating: 0x5a, count: 60)
+            expect(
+                frame.withUnsafeBytes { device.transmit($0) } == .timedOut,
+                "elapsed TX-completion deadline was hidden"
+            )
+            expect(
+                fixture.hardware.spinCount == 3,
+                "TX completion wait exceeded its elapsed deadline"
+            )
+        }
+        do {
+            let fixture = GEMFixture(
+                maximumPollCount: 100,
+                maximumWaitTicks: 3
+            )
+            fixture.hardware.completeTransmit = false
+            var device = fixture.makeDevice()
+            expect(
+                device.initialize() == .ready,
+                "final TX-completion fixture init failed"
+            )
+            fixture.hardware.counter = 0
+            fixture.hardware.spinCount = 0
+            fixture.hardware.ticksPerSpin = 1
+            fixture.hardware.transmitUsedAfterSpinCount = 2
+            let frame = [UInt8](repeating: 0x5a, count: 60)
+            expect(
+                frame.withUnsafeBytes { device.transmit($0) } == .sent,
+                "TX completion on the final permitted poll was rejected"
+            )
+            expect(
+                fixture.hardware.spinCount == 2,
+                "final permitted TX completion used an unexpected wait count"
+            )
         }
         do {
             let fixture = GEMFixture()

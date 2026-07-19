@@ -96,6 +96,11 @@ struct RP1GEMMMIORegisterAccess: CadenceGEMRegisterAccess {
     }
 
     @inline(__always)
+    func counterValue() -> UInt64 {
+        AArch64.counterValue
+    }
+
+    @inline(__always)
     func spinWaitHint() {
         AArch64.spinHint()
     }

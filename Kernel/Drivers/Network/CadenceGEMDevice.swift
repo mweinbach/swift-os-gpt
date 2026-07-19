@@ -7,6 +7,9 @@
 protocol CadenceGEMRegisterAccess {
     func read32(at offset: UInt) -> UInt32
     mutating func write32(_ value: UInt32, at offset: UInt)
+    /// Monotonic free-running counter used to enforce elapsed-time deadlines.
+    /// Unsigned subtraction keeps deadline checks correct across one wrap.
+    func counterValue() -> UInt64
     func spinWaitHint()
 }
 
@@ -229,17 +232,21 @@ struct CadenceGEMDeviceConfiguration: Equatable {
     /// selects it from the actual GEM peripheral clock; the core never guesses.
     let mdcClockDividerEncoding: UInt8
     let maximumPollCount: UInt64
+    /// Maximum elapsed monotonic-counter ticks for any one hardware wait.
+    let maximumWaitTicks: UInt64
 
     init?(
         macAddress: MACAddress,
         phyAddress: UInt8,
         mdcClockDividerEncoding: UInt8,
-        maximumPollCount: UInt64
+        maximumPollCount: UInt64,
+        maximumWaitTicks: UInt64
     ) {
         guard macAddress.isUnicast,
               phyAddress < 32,
               mdcClockDividerEncoding < 8,
-              maximumPollCount > 0
+              maximumPollCount > 0,
+              maximumWaitTicks > 0
         else {
             return nil
         }
@@ -247,6 +254,7 @@ struct CadenceGEMDeviceConfiguration: Equatable {
         self.phyAddress = phyAddress
         self.mdcClockDividerEncoding = mdcClockDividerEncoding
         self.maximumPollCount = maximumPollCount
+        self.maximumWaitTicks = maximumWaitTicks
     }
 }
 
@@ -498,7 +506,11 @@ struct CadenceGEMNetworkDevice<
 
         var resolvedMode: CadenceGEMLinkMode?
         var pollCount: UInt64 = 0
-        while pollCount < configuration.maximumPollCount {
+        let autonegotiationStartedAt = registers.counterValue()
+        while waitIsPermitted(
+            startedAt: autonegotiationStartedAt,
+            pollCount: pollCount
+        ) {
             // BMSR link is latch-low, so use the second of two reads.
             guard readClause22(Clause22.basicStatus) != nil,
                   let status = readClause22(Clause22.basicStatus)
@@ -514,11 +526,8 @@ struct CadenceGEMNetworkDevice<
             pollCount += 1
             registers.spinWaitHint()
         }
-        guard pollCount < configuration.maximumPollCount else {
-            return failInitialization(.phyAutonegotiationTimedOut)
-        }
         guard let resolvedMode else {
-            return failInitialization(.linkModeUnavailable)
+            return failInitialization(.phyAutonegotiationTimedOut)
         }
 
         configureNetwork(linkMode: resolvedMode)
@@ -625,13 +634,17 @@ struct CadenceGEMNetworkDevice<
         let descriptorAddress = transmitDescriptorCPUAddress(at: transmitIndex)
         var descriptorStatus = dma.loadDescriptorWord(at: descriptorAddress + 4)
         var availabilityPoll: UInt64 = 0
+        let availabilityStartedAt = registers.counterValue()
         while descriptorStatus & TransmitDescriptor.used == 0,
-              availabilityPoll < configuration.maximumPollCount {
+              waitIsPermitted(
+                  startedAt: availabilityStartedAt,
+                  pollCount: availabilityPoll
+              ) {
             availabilityPoll += 1
             registers.spinWaitHint()
             descriptorStatus = dma.loadDescriptorWord(at: descriptorAddress + 4)
         }
-        guard availabilityPoll < configuration.maximumPollCount else {
+        guard descriptorStatus & TransmitDescriptor.used != 0 else {
             faultDevice()
             return .timedOut
         }
@@ -664,7 +677,11 @@ struct CadenceGEMNetworkDevice<
         )
 
         var completionPoll: UInt64 = 0
-        while completionPoll < configuration.maximumPollCount {
+        let completionStartedAt = registers.counterValue()
+        while waitIsPermitted(
+            startedAt: completionStartedAt,
+            pollCount: completionPoll
+        ) {
             descriptorStatus = dma.loadDescriptorWord(at: descriptorAddress + 4)
             if descriptorStatus & TransmitDescriptor.used != 0 {
                 dma.synchronizeOwnership()
@@ -673,7 +690,7 @@ struct CadenceGEMNetworkDevice<
             completionPoll += 1
             registers.spinWaitHint()
         }
-        guard completionPoll < configuration.maximumPollCount else {
+        guard descriptorStatus & TransmitDescriptor.used != 0 else {
             faultDevice()
             return .timedOut
         }
@@ -861,7 +878,8 @@ struct CadenceGEMNetworkDevice<
 
     private func waitForMDIOIdle() -> Bool {
         var pollCount: UInt64 = 0
-        while pollCount < configuration.maximumPollCount {
+        let startedAt = registers.counterValue()
+        while waitIsPermitted(startedAt: startedAt, pollCount: pollCount) {
             if registers.read32(at: CadenceGEMRegisterLayout.networkStatus)
                 & Clause22.managementIdle != 0 {
                 return true
@@ -870,6 +888,16 @@ struct CadenceGEMNetworkDevice<
             registers.spinWaitHint()
         }
         return false
+    }
+
+    @inline(__always)
+    private func waitIsPermitted(
+        startedAt: UInt64,
+        pollCount: UInt64
+    ) -> Bool {
+        pollCount < configuration.maximumPollCount
+            && registers.counterValue() &- startedAt
+                < configuration.maximumWaitTicks
     }
 
     private mutating func disableController() {

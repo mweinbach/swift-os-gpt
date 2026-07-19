@@ -34,6 +34,8 @@ private final class MACSelectionRegisters: CadenceGEMRegisterAccess {
         words[offset] = value
     }
 
+    func counterValue() -> UInt64 { 0 }
+
     func spinWaitHint() {}
 }
 
