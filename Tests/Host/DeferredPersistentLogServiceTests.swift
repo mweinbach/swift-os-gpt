@@ -100,6 +100,14 @@ struct DeferredPersistentLogServiceTests {
             )
             expect(device.readCount == 1, "partition stage read beyond the MBR")
             expect(
+                service.selectedDataPartitionRange == BlockDeviceRange(
+                    startBlock: 8,
+                    blockCount: 24,
+                    within: device.geometry.logicalBlockCount
+                ),
+                "selected data range was not retained for sibling services"
+            )
+            expect(
                 service.serviceOnce(
                     allowRecovery: false,
                     maximumRecoveryBlockCount: 1,
@@ -108,6 +116,16 @@ struct DeferredPersistentLogServiceTests {
                 "signed superblocks did not validate separately"
             )
             expect(service.signedVolumeBootstrapResolved, "bootstrap boundary missing")
+            expect(
+                service.signedDataVolumeLayout == SwiftOSDataVolumeLayout(
+                    geometry: BlockDeviceGeometry(
+                        logicalBlockByteCount: 512,
+                        logicalBlockCount: 24
+                    )!,
+                    kernelLogBlockCount: 4
+                ),
+                "signed data layout was not retained for sibling services"
+            )
             expect(device.readCount == 3, "superblock stage read the log arena")
             expect(
                 service.serviceOnce(

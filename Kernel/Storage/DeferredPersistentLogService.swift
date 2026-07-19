@@ -56,6 +56,12 @@ struct DeferredPersistentLogService<
     private var nextVolatileSequence: UInt64?
     private var volatileSequenceSpaceConsumed = false
 
+    /// The media ranges selected by the validated bootstrap stages. These are
+    /// observations only: callers gain no storage authority from the values
+    /// and must still create their own bounded `BlockDevice` view.
+    private(set) var selectedDataPartitionRange: BlockDeviceRange?
+    private(set) var signedDataVolumeLayout: SwiftOSDataVolumeLayout?
+
     init?(
         device: Device,
         source: Source,
@@ -128,6 +134,7 @@ struct DeferredPersistentLogService<
         else { return disable(.partitionBounds) }
         rawDevice = nil
         partitionDevice = partition
+        selectedDataPartitionRange = media.data.range
         stage = .signedVolume
         return .partitionReady(
             startBlock: media.data.range.startBlock,
@@ -147,6 +154,7 @@ struct DeferredPersistentLogService<
         case .recovery(let value):
             partitionDevice = nil
             recovery = value
+            signedDataVolumeLayout = value.volumeLayout
             stage = .recovery
             return .superblockReady(
                 kernelLogBlockCount: value.volumeLayout.kernelLogBlockCount
@@ -249,6 +257,8 @@ struct DeferredPersistentLogService<
         partitionDevice = nil
         recovery = nil
         store = nil
+        selectedDataPartitionRange = nil
+        signedDataVolumeLayout = nil
         stage = .disabled
         return .disabled(failure)
     }

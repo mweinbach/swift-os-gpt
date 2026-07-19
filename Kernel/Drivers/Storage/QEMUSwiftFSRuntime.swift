@@ -22,11 +22,11 @@ private nonisolated(unsafe) var qemuUserFileSystemProvider:
 /// partition; the physical Pi path reaches the same layers after MBR selection.
 /// No filesystem code depends on VirtIO or a QEMU address.
 enum QEMUSwiftFSRuntime {
-    static let userVolumeIdentifier = VFSVolumeIdentifier(
-        rawValue: 0x5357_4653_5553_4552
-    )!
+    static let userVolumeIdentifier =
+        SwiftOSUserFileSystemConfiguration.volumeIdentifier
     static let kernelLogBlockCount: UInt64 = 8
-    static let nodeCapacity: UInt32 = 32
+    static let nodeCapacity =
+        SwiftOSUserFileSystemConfiguration.initialNodeCapacity
 
     static var mountedProvider:
         UnsafeMutablePointer<QEMUUserFileSystemProvider>? {
