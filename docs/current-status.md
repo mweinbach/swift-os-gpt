@@ -68,7 +68,18 @@ unless a guest implementation and a repeatable test sit behind it.
   gated `/Devices`, and `/Volumes/<name>`. Kernel-only log/raw-media volumes
   cannot mount; exact unmount revokes generation-tagged handles before provider
   teardown. Stable metadata, directory-cookie, and provider I/O contracts are
-  host-tested, but no concrete user filesystem is mounted.
+  host-tested.
+- A native modern VirtIO-MMIO block driver and crash-consistent SwiftFS user
+  volume on QEMU. The runtime initializes or opens the signed data volume,
+  isolates the kernel-log and user ranges, formats or remounts alternating
+  copy-on-write SwiftFS banks, seeds `Welcome.txt`, and publishes the concrete
+  provider from stable allocator-owned storage.
+- A checked EL0 file-service crossing for the mounted `/Users` provider. Its
+  versioned request/result records, whole-range user-copy validation, bounded
+  per-process handle table, and policy checks support `open`, `read`, `write`,
+  `stat`, `readdir`, and `close`. Host tests cover the complete operation set;
+  the four-boot QEMU smoke proves format/seed, remount, live EL0
+  open/read/write/close under preemption, and post-write remount durability.
 - A versioned 40-byte input record, fixed-capacity FIFO with sequence gaps and
   saturating loss/corruption accounting, and allocation-free USB HID boot
   keyboard/mouse decoders. Malformed, duplicate, reserved, and rollover reports
@@ -79,6 +90,12 @@ unless a guest implementation and a repeatable test sit behind it.
   and `SYN_REPORT` boundaries. In single-CPU monitor mode, QEMU keyboard and
   mouse devices feed the canonical queue; QMP proves A down/up, relative
   `+37/-19` motion, and left-button down/up after guest DMA decoding.
+- Backend-neutral accelerated file-manager state with fixed-capacity provider
+  loading, stable copied names, stale-cookie restart, bounded truncation,
+  pointer scaling and capture, focus/hit testing, scrolling, US keyboard
+  navigation/type-ahead, and deterministic animation invalidation. A
+  synchronous canonical-event dispatcher keeps transport decoding separate
+  from this UI policy.
 
 The QEMU SMP proof means that four processors reached Swift kernel code. It does
 not mean user work is balanced across them: the three secondary CPUs publish
@@ -149,6 +166,18 @@ local QEMU build does not expose a GL-backed VirGL device, however, so the
 accelerated markers and pixels have not been observed on a locally exercised
 hardware backend and there is no accelerated screenshot evidence yet.
 
+The GPU-only file-manager layer now compiles mounted-provider rows, window
+chrome, selection/hover state, text, and the routed cursor into two immutable
+ordered command buffers. The QEMU runtime owns its browser/router/animation
+state in allocator-backed stable memory and presents both buffers with one
+`VirtIOGPU3DSession.renderBatch` submission and one damage flush; it has no
+software framebuffer or rasterizer dependency. Focused tests cover routing,
+scaled pointer remainders, keyboard type-ahead, animation retirement,
+stale-cookie restart, copied provider names, and bounded directory truncation.
+The source audit extends the GPU-only rule through this runtime. Combined guest
+boot-loop integration is underway, so this is not yet local VirGL pixel or
+interactive-desktop evidence.
+
 ## Operating modes
 
 `make run` uses four CPUs by default and proceeds through memory activation,
@@ -157,7 +186,8 @@ production VirGL route first and, when no compatible device is present, marks
 and publishes the explicit ramfb diagnostic before entering user scheduling.
 The polling input runtime is deliberately inactive in this SMP mode until a
 kernel service thread or IRQ-dispatch path exists. There is not yet an EL0
-window system or graphical input routing.
+window system or live SMP graphical-input service; the bounded kernel-side
+file-manager routing model is only host-tested in this mode.
 
 Use `QEMU_CPUS=1 make run` for monitor mode. The single-CPU boot retains the
 interactive EL1 monitor after the same memory, exception, GIC, timer, and ramfb
@@ -181,6 +211,12 @@ guest has consumed eventq DMA, translated evdev codes, encoded the canonical
 record, and dequeued it again. It does not prove focus, text composition, a
 visible cursor, SMP delivery, USB-host input, or Raspberry Pi hardware.
 
+The accelerated file-manager integration targets the same single-owner loop:
+one CPU drains VirtIO input, synchronously routes canonical events, updates UI
+state, and then services the GPU session. It is intentionally inactive as an
+input path once the SMP/EL0 scheduler owns CPU0. No cross-CPU UI mutation is
+claimed.
+
 ## Verification gates
 
 `make test` requires all of the following:
@@ -194,7 +230,9 @@ visible cursor, SMP delivery, USB-host input, or Raspberry Pi hardware.
    GPU command compilation/policy/frame scheduling/worker publication,
    VirtIO-GPU 2D/3D protocol layouts, VirGL encoding/capability validation,
    device-neutral-to-VirGL IR lowering, GPU-only session lifecycle/damage flush,
-   VFS path/mount/access/handle invariants, input ABI/queue/HID state machines,
+   accelerated file-manager scene/state/input routing, VFS path/mount/access/
+   handle invariants, SwiftFS format/provider/crash recovery, EL0 file-service
+   dispatch, input ABI/queue/HID state machines,
    VirtIO-input queue/configuration/translation, preemptive EL0 scheduling,
    PSCI topology, and SMP publication/runtime logic;
 3. separate user-image compilation/link inspection and a parser probe against a
@@ -204,8 +242,8 @@ visible cursor, SMP delivery, USB-host input, or Raspberry Pi hardware.
 5. three ordered EL1 cold boots plus an EL2-to-EL1 boot in single-CPU mode,
    including final paging, exception/GIC setup, ramfb publication, and timer IRQs;
 6. interactive single-CPU monitor, exact ramfb rendering, bounded retained
-   animation, modern VirtIO-MMIO GPU scanout/update, and QMP-to-guest VirtIO
-   keyboard/pointer smoke tests;
+   animation, modern VirtIO-MMIO GPU scanout/update, QMP-to-guest VirtIO
+   keyboard/pointer, and persistent VirtIO-block/SwiftFS remount smoke tests;
 7. four-CPU SMP/EL0 boots from both EL1 and EL2, requiring ordered evidence for
    owned memory, final tables, three online secondaries, both user threads, SVC
    reporting, context switches, and timer-driven preemption;
@@ -219,7 +257,7 @@ The visual artifacts include `.build/swiftos-frame.ppm`, the low/peak
 `.build/swiftos-animation*.ppm` pair, and `.build/swiftos-virtio-gpu.ppm`. They
 prove guest CPU-rendered diagnostic frames, a bounded retained compositor
 update, and two presentation backends; they do not prove an EL0 window system,
-graphical input routing, or GPU rasterization.
+routed file-manager interaction, or GPU rasterization.
 
 ## Implemented but hardware-unverified Raspberry Pi display path
 
@@ -250,12 +288,18 @@ to the shared synchronous block contract. After the local HDMI/USB observation
 window, it initializes the card in bounded PIO mode, accepts only an
 unambiguous MBR plus signed `SWOSDATA` volume, incrementally recovers the 2 MiB
 log arena, and durably appends at most one retained 48-byte kernel event per
-cooperative pass. It never formats returned media and drops write authority on
-any discovery, signature, bounds, or transport failure. This path is host- and
-link-tested but has not written or recovered a record on physical Pi hardware.
-The remaining data-partition arena is reserved for user files. VFS contracts
-now exist, but there is no on-disk provider, mounted user volume, VFS syscall,
-or EL0 block API.
+cooperative pass. It never rewrites an ambiguous MBR or signed data-volume
+layout; once those validate, the disjoint user subrange may be opened or
+formatted as blank SwiftFS. Discovery, signature, bounds, or transport failure
+drops the relevant write authority. This path is host- and link-tested but has
+not written or recovered a record on physical Pi hardware.
+The SD controller record, SwiftFS scratch, and provider record use stable
+classified allocations. A host-tested policy derives disjoint absolute log and
+user-filesystem ranges. A resumable bootstrap performs at most one block
+operation, synchronization, or CPU-only validation phase per cooperative pass,
+never concurrently with log work, and publishes the same SwiftFS provider seam
+as QEMU. No Pi filesystem or raw block mapping is exposed directly to EL0, and
+the Pi provider has not mounted on physical hardware.
 
 This is a diagnostic firmware-configured scanout handoff, not a production
 graphics path, a native BCM2712 HVS/HDMI modesetting driver, or V3D VII
@@ -272,9 +316,9 @@ GPU text support. None of this path has executed on physical Pi hardware yet.
   interrupt/timer scheduling, migration, load balancing, and scheduler locking;
 - an executable loader, process creation/destruction, demand paging, copy-on-
   write, signals, or a stable user system library and syscall ABI;
-- general persistent block services, a QEMU VirtIO block transport, an on-disk
-  user filesystem/provider, process-credential permissions, VFS syscalls, or
-  user-data recovery;
+- filesystem growth beyond the bounded whole-snapshot SwiftFS design, EL0
+  create/remove/rename operations, process-credential permissions, dynamic
+  mounts, a general system library, or broader user-data recovery tooling;
 - SMP/IRQ-driven VirtIO input service, RP1 PCIe/xHCI and USB-host HID input,
   entropy, and additional network drivers;
 - hardware execution and captured-pixel validation of the VirtIO/VirGL path,
@@ -282,15 +326,15 @@ GPU text support. None of this path has executed on physical Pi hardware yet.
   MMU/command submission, HVS display lists and IOMMU integration,
   HDMI modesetting/clock/PHY control, live HPD/DDC/EDID ownership, vblank, and
   refresh/PPI-aware output policy;
-- a user-facing compositor service, window/surface protocol, graphical
-  applications, textures/transforms/paths, or graphical input routing;
+- an EL0 compositor service, window/surface protocol, graphical applications,
+  general textures/paths, or user-process graphical input delivery;
 - physical Raspberry Pi 5 execution and a Raspberry Pi 5 GUI;
 - an Apple Silicon board port or its machine-specific drivers.
 
-The only current SVC contract is the proof-oriented user-thread report call. It
-must not be described as a general syscall layer. The retained scene foundation
-and diagnostic compositor are kernel bootstrap infrastructure, not a compositor
-service or user desktop.
+The current SVC contracts are the proof-oriented user-thread report and the
+bounded file-service request. They must not be described as a general stable
+syscall layer. The retained scene and file-manager foundations remain kernel
+bootstrap infrastructure, not an EL0 compositor service or user desktop.
 
 ## Raspberry Pi 5 boundary
 
@@ -308,23 +352,25 @@ the USB domain, initializes the controller in polled PIO device mode, and can
 export the completed diagnostic desktop through the host-tested CDC/SDDP path.
 The kernel also contains a host-tested driver for the runtime-patched firmware
 simple framebuffer, a headless USB surface fallback, and a removable-SD binding
-that can persist the retained kernel log only after signed-volume validation.
+that can persist the retained kernel log and bootstrap a disjoint SwiftFS user
+range only after signed-volume validation, using stable allocator-owned records.
 No physical Raspberry Pi 5 boot, UART, USB enumeration/frame, SD transfer/log
 recovery, Ethernet link, GICv2 timer delivery, PSCI startup, firmware-patched
 8 GB allocator exercise, HDMI frame, input, or GUI path has been verified.
 
 ## Next coherent milestone
 
-The next QEMU graphics milestone is to exercise the checked-in VirGL route on a
-GL-backed device, retain accelerated frame evidence, and feed ongoing retained
-updates through its reusable submission API, frame scheduler, and graphics-
-worker mailbox. The fixed boot atlas must grow into bounded font loading,
+The next QEMU graphics milestone is to finish the combined file-manager boot
+integration, exercise it on a GL-backed VirGL device, and retain accelerated
+frame and interaction evidence. Ongoing frames then need the reusable session,
+frame scheduler, and graphics-worker mailbox. The fixed boot atlas must grow
+into bounded font loading,
 layout/shaping, dynamic atlas management, and batched glyph runs. The Pi backend
 independently needs native V3D VII command submission and address translation
 plus HVS, vblank, HDMI, HPD/DDC/EDID, clock, PHY, and GPU font paths behind the
 same contracts; simplefb remains only a bring-up diagnostic. Pi USB-host input,
-a QEMU VirtIO block transport, general filesystems, entropy, and broader
-networking remain parallel work. The proof
+richer filesystem policy, entropy, and broader networking remain parallel work.
+The proof
 scheduler still needs per-CPU state and interrupt interfaces, runnable work on
-secondaries, a versioned syscall ABI, executable loading, and a concrete VFS
-service crossing before the renderer can become a user-facing compositor.
+secondaries, a broader versioned syscall ABI, and executable loading before the
+renderer can become a user-facing compositor.

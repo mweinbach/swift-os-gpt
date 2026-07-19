@@ -160,22 +160,31 @@ The second MBR entry uses type `0xda` and is accepted only when its `SWOSDATA`
 v1 superblock validates. Blocks zero and one are duplicate immutable headers.
 The next 4,096 512-byte blocks form the default 2 MiB kernel-log arena; CRCs and
 deterministic sequence-to-slot placement permit bounded recovery after a torn
-write. The remainder is reserved for a future user filesystem. The generic
-kernel layer exposes synchronous logical-block I/O and a partition-bounded
-view, but never maps that view into EL0. Bounded VFS namespace and handle
-contracts now exist; a concrete on-disk provider and checked syscall boundary
-are still required before this arena can hold user files.
+write. The remaining user-data arena now has a host-tested SwiftFS layout and
+provider. A pure range policy converts both relative arenas into disjoint,
+bounded absolute SD ranges before either service receives authority. The
+generic kernel exposes synchronous logical-block I/O and partition-bounded
+views, but never maps raw media into EL0.
 
 On Pi, the runtime binds the boot DT's removable `brcm,bcm2712-sdhci` node to a
-bounded, default-speed 3.3 V PIO transport. It waits for the local USB/HDMI
-observation window, initializes the card, requires an unambiguous MBR and at
-least one valid signed superblock, then scans one log block and appends at most
-one retained 48-byte kernel event per cooperative pass. No boot path formats
-media. Any discovery, signature, bounds, or transport failure permanently drops
-that runtime's write authority and lets Ethernet troubleshooting continue. The
-shared partition/log service is board-neutral; only the SDHCI board handoff is
-Pi-specific. The binding is host- and static-DTB-tested but has not transferred
-a block on a physical Pi, and QEMU has no VirtIO block backend yet.
+bounded, default-speed 3.3 V PIO transport. The live SD device, SwiftFS scratch,
+and provider records use stable classified allocations so borrowed block views
+cannot outlive movable stack state. After the local USB/HDMI observation window,
+the runtime initializes the card, requires an unambiguous MBR and at least one
+valid signed superblock, then serializes one cooperative owner across log
+recovery/appends and SwiftFS bootstrap. The resumable filesystem state machine
+performs at most one block read, write, synchronize, or CPU-only validation
+phase per pass. Returned media is never implicitly reformatted at the data-
+volume layer; the SwiftFS subrange may be formatted only through the same blank-
+volume policy used by QEMU. Any discovery,
+signature, bounds, or transport failure drops the relevant write authority and
+lets Ethernet troubleshooting continue. The published Pi provider has the same
+board-neutral identity and seam as the QEMU VirtIO-backed provider.
+
+These are source, host-policy, and link guarantees only. No block has been
+transferred, no log has been recovered, and no SwiftFS provider has mounted on a
+physical Pi. QEMU now has its own native VirtIO-block/SwiftFS path and multi-boot
+durability smoke; that evidence does not validate Pi SDHCI.
 
 ## AArch64 Image contract
 
@@ -390,8 +399,11 @@ The generic graphics contracts are no longer tied to ramfb, VirtIO, or Pi. They
 separate a GPU rasterizer, display presenter, image-memory domain, command queue,
 fences, frame-slot lifetime, and scene publication. The shared retained-scene
 compiler now feeds the QEMU VirGL boot session; a future native Pi V3D VII
-backend must consume the same commands without duplicating UI policy. The Pi
-route does not exist yet.
+backend must consume the same commands without duplicating UI policy. The shared
+policy now also includes a bounded provider-backed file-manager state machine,
+keyboard/pointer routing, animation invalidation, and a GPU file-manager scene
+compiler. Its QEMU runtime is host/source tested and boot integration is
+underway; the native Pi GPU route does not exist yet.
 
 QEMU can boot without ramfb through a Swift modern VirtIO-MMIO GPU 2D driver;
 that smoke remains CPU-rasterized diagnostic evidence. A separate production
@@ -449,7 +461,8 @@ GPU upload/sampling path, or live font selection. QEMU's fixed VirGL mask atlas
 does not constitute Pi support. When no supported diagnostic framebuffer is
 present, the Pi can render the same diagnostic desktop into its kernel-owned
 USB surface; if USB activation also fails, current boot remains serial-only.
-Physical execution, USB enumeration, and HDMI output remain unverified.
+There is no dynamic font loader/shaper/atlas, EL0 window server, or Pi GPU text
+path. Physical execution, USB enumeration, and HDMI output remain unverified.
 
 ## Hardware validation gate
 
@@ -486,14 +499,18 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
   link/DHCP outcome; after power-off, the read-only host inspector reconstructs
   those same markers from CRC-valid persistent records without reading outside
   the declared log arena.
+- The same card preserves the disjoint log and SwiftFS ranges, emits a bounded
+  `SWIFTOS:SWIFTFS_FORMATTED` or `SWIFTOS:SWIFTFS_REMOUNTED` result followed by
+  `SWIFTOS:SWIFTFS_READY`, and survives a power-cycle remount without modifying
+  the kernel-log arena.
 - At least three power-cycle boots and three warm resets produce the same staged
   serial protocol.
 - ELF inspection confirms AArch64, no Darwin load commands or framework symbols,
   and only reviewed freestanding unresolved symbols.
 
-Native display modesetting, vblank-driven animation, USB input, general
-filesystems, full RP1 ownership, networking, and native GPU rendering are later
-gates that must pass before a production GUI claim. A firmware-framebuffer image
+Native display modesetting, vblank-driven animation, USB input, richer
+filesystem/userland policy, full RP1 ownership, networking, and native GPU
+rendering are later gates that must pass before a production GUI claim. A firmware-framebuffer image
 establishes early diagnostic display output and can run the software oracle; it
 is not a user window system or GPU-capable Raspberry Pi release. The production
 GPU gate must add retained serial/fence evidence for V3D VII rendering,

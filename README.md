@@ -78,10 +78,20 @@ The verified QEMU path now includes:
    retained-scene compilation, frame-slot/fence scheduling, a graphics-worker
    mailbox, strict production execution policy, and Pi V3D/HVS resource
    discovery and mapping; and
-8. bounded VFS/file-manager contracts for immutable system, mutable user,
-   temporary, device, and additional-volume namespaces, plus a versioned input
-   ABI, loss-aware queue, USB HID boot decoders, and a real single-CPU QEMU
-   VirtIO keyboard/pointer path exercised through QMP and guest-owned DMA.
+8. a crash-consistent SwiftFS provider over a native Swift VirtIO block driver.
+   QEMU formats or remounts a signed data volume, publishes the provider through
+   a stable allocator-owned record, mounts it at `/Users`, and exposes checked
+   EL0 `open`, `read`, `write`, `stat`, `readdir`, and `close` operations. The
+   block smoke proves blank-media format and seed, remount, EL0 read/write while
+   preemption continues, and another remount that observes the EL0 write; and
+9. a versioned input ABI, loss-aware queue, USB HID boot decoders, and a real
+   single-CPU QEMU VirtIO keyboard/pointer path exercised through QMP and guest-
+   owned DMA. Above that transport, backend-neutral file-browser state now
+   handles bounded directory loading, focus, pointer capture, scrolling, US-key
+   composition, type-ahead, selection, scaling, and paced animation. A GPU-only
+   file-manager scene compiler and QEMU VirtIO 3D runtime batch chrome and text
+   through the retained GPU session. Those file-manager layers are host- and
+   source-tested; their combined accelerated boot integration is still underway.
 
 The production graphics invariant is now strict: CPUs may update retained scene
 state, compute animation and damage, and compile backend-neutral command buffers,
@@ -99,12 +109,12 @@ on a hardware-accelerated QEMU backend. The statically inspected Pi image has
 not crossed the boundary: Pi simplefb is diagnostic only, and V3D VII/HVS/HDMI
 support remains discovery, mapping, and roadmap work.
 
-This is not yet a general-purpose OS. The next layers include sustained
-GPU-frame scheduling and richer GPU primitives, accelerated QEMU execution
-evidence, a native Pi V3D/HVS/HDMI path, multicore task scheduling, an
-executable loader, on-disk user filesystem and VFS syscalls, Pi USB-host input,
-a user-facing surface/window protocol, networking, and a stable system library
-and syscall ABI.
+This is not yet a general-purpose OS. The next layers include accelerated QEMU
+pixel evidence, richer GPU primitives and font loading, a native Pi
+V3D/HVS/HDMI path, multicore task scheduling, an executable loader, broader
+filesystem mutation and credential policy, Pi USB-host input, a user-facing
+surface/window protocol, networking, and a stable system library and syscall
+ABI.
 
 See [Architecture](docs/architecture.md), [Renderer foundation](docs/renderer.md),
 [Files and input](docs/files-and-input.md), and
@@ -134,6 +144,8 @@ make monitor-smoke
 make frame-smoke
 make animation-smoke
 make virtio-gpu-smoke
+make virtio-input-smoke
+make virtio-block-swiftfs-smoke
 make smp-el0-smoke
 make cpu-config-smoke
 make test
@@ -243,31 +255,35 @@ quads—including four shader-antialiased rounded layers—and seven GPU-sampled
 color or scanout pixels. The local QEMU build cannot hardware-exercise that
 accelerated route.
 The scheduler currently runs both user threads only on CPU0; secondary CPUs
-publish online state and park. Bounded VFS paths, namespace roles, provider
-metadata, mounts, rights, and generation-tagged handles now exist, but there is
-no loader, mounted user filesystem, VFS syscall surface, graphical input
-routing, user compositor/window protocol, or stable application ABI.
+publish online state and park. QEMU now mounts a concrete crash-consistent
+SwiftFS provider at `/Users` over VirtIO block. Its checked EL0 file service
+implements `open`, `read`, `write`, `stat`, `readdir`, and `close`; host tests
+cover the complete operation surface, while the multi-boot smoke proves live
+open/read/write/close and remount durability. This is still a bounded first
+service, not an executable loader, general POSIX layer, process-credential
+model, stable application ABI, or EL0 file-manager application.
 The input core now has a fixed-width ABI, a loss-aware queue, and USB HID boot
 keyboard/mouse decoders. In single-CPU monitor mode, modern VirtIO-MMIO keyboard
 and mouse devices feed that same queue; a QMP smoke proves A down/up, relative
 motion, and left-button transitions after guest DMA decoding. This polling path
 does not run in the default SMP/EL0 mode yet and is not Raspberry Pi input.
-The board-neutral block, MBR, signed data-volume, and bounded persistent-log
-formats are host-tested. The Pi target now binds them to the removable,
-DT-discovered BCM2712 SDHCI controller and incrementally drains the retained
-kernel log into the signed `0xda` partition. That binding and its PIO transport
-remain physical-hardware-unverified, and QEMU has no VirtIO block binding yet.
-The remainder of the data partition is reserved for a user filesystem, but no
-on-disk provider is mounted and raw data blocks are never exposed to EL0.
+The board-neutral block, MBR, signed data-volume, bounded persistent-log, and
+SwiftFS formats are host-tested. The Pi target now retains its removable,
+DT-discovered BCM2712 SDHCI controller in allocator-owned stable memory,
+derives disjoint kernel-log and user-filesystem ranges from the signed `0xda`
+layout, and can publish the same SwiftFS provider seam used by QEMU. The log
+service and filesystem share one serialized SD owner; raw blocks are never
+exposed to EL0. This Pi PIO/SwiftFS path remains physical-hardware-unverified.
 Physical Raspberry Pi 5 execution remains unverified. The Pi path currently
 consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
 modesetting or V3D VII rendering. It can also export that completed diagnostic
 surface, or a headless kernel-owned surface, over its USB-C device controller to
 the host viewer. USB-C carries a versioned pixel stream here, not DisplayPort,
 and the current Pi pixels are still produced by the diagnostic CPU compositor.
-The QEMU session builds and uploads a fixed built-in 5 x 7 ASCII mask atlas for
-its `SWIFTOS` boot label, but there is no PSF2 asset loader, shaping/layout
-stack, dynamic atlas, or Pi GPU font path. The retained scene and diagnostic
-compositor remain kernel-side bootstrap infrastructure, not an EL0 window
-system. Each milestone must leave behind a repeatable boot or unit test rather
-than a mock UI.
+The QEMU session builds and uploads a fixed built-in 5 x 7 ASCII mask atlas. Its
+new kernel-side file-manager runtime can compile provider-backed rows, window
+chrome, selection/hover animation, and the routed pointer into GPU-only command
+passes, but local GL-backed VirGL pixels are still unproven and boot integration
+is underway. There is no dynamic font loader/shaper/atlas, native Pi GPU font
+path, EL0 surface protocol, or user window server. Each milestone must leave
+behind a repeatable boot or unit test rather than a mock UI.

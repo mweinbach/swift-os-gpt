@@ -20,11 +20,12 @@ Swift applications
                         -> MMIO and privileged instruction veneers
 ```
 
-No layer points upward. Not every box exists: the current EL0 image has one
-proof-oriented report syscall. Bounded VFS namespace/handle contracts and a
-transport-neutral input service now exist inside the kernel, but the loader,
-VFS syscall crossing, concrete user filesystem, system library, compositor,
-and general user-facing driver ABI remain future layers.
+No layer points upward. Not every box exists: the current EL0 image has a
+proof-oriented report call and a bounded file-service call. A concrete SwiftFS
+provider is mounted at `/Users` on the QEMU VirtIO-block path, and a
+transport-neutral input/file-manager state machine exists inside the kernel.
+The executable loader, system library, EL0 compositor/window protocol, and
+general user-facing driver ABI remain future layers.
 
 ## Boot and board contract
 
@@ -143,7 +144,8 @@ The current scheduler is an intentionally narrow first isolation milestone:
 - two independent guarded EL0 stacks and thread-pointer values;
 - round-robin switching on physical timer IRQs; and
 - SVC report number 1, used only to prove each identity ran and resumed after a
-  preemption.
+  preemption, plus a separately dispatched bounded file-service request used by
+  the first process.
 
 Before `eret` to EL0, the kernel scrubs both NOLOAD user-stack regions and the
 entry veneer scrubs registers and FP/SIMD state that must not leak privileged
@@ -203,6 +205,18 @@ carried into the fenced flush, with the lifecycle totaling 18 ordered
 transactions. The retained context/compiler can lower later immutable IR frames
 into the same target and issue a fenced flush for checked damage.
 
+Above that reusable session, the accelerated file-manager policy is also
+backend-neutral. It owns a fixed-capacity browser, provider-name arena, window
+input router, US keyboard composer, logical pointer scaling, and deterministic
+animation invalidation in caller-owned memory. `GPUFileManagerSceneCompiler`
+lowers provider-backed rows, window chrome, selection/hover state, text, and the
+cursor into ordered chrome and glyph command buffers. The QEMU wrapper allocates
+stable records, installs the synchronous canonical-input handler, and batches
+both passes into one VirGL submission plus one damage flush. One owner must drain
+input before rendering; the current SMP path does not service graphical input.
+This file-manager path is host/source tested and its combined boot integration
+is underway, but it has not produced local GL-backed VirGL pixels.
+
 The existing end-to-end QEMU smoke still exercises a separate host 2D resource
 with CPU-generated diagnostic backing, transfer, flush, and scanout. It is
 presentation evidence, not GPU-rasterization evidence. The installed local QEMU
@@ -234,12 +248,12 @@ clear/load/store, clipping, copy/source-over blend, analytic rounded coverage
 that rejects singular or ill-conditioned inverse transforms, and sampling from
 one immutable R8 mask atlas. The full diagnostic terminal text and continuous
 retained status animation still run only in the explicit diagnostic CPU path.
-There are no general image textures, dynamic font loading or shaping, mutable
-atlas lifecycle, paths, shadows, window/surface protocol, graphical input
-routing, or EL0 application surface yet, and the local QEMU build cannot
-exercise the accelerated branch. A separate single-CPU diagnostic path does
-poll modern VirtIO keyboard/pointer queues into the canonical input ABI; it is
-transport evidence, not compositor focus or hit testing.
+The new kernel file-manager state supplies bounded focus, hit testing, pointer
+capture, scrolling, keyboard navigation/type-ahead, and GPU scene compilation,
+but there are no general image textures, dynamic font loading or shaping,
+mutable atlas lifecycle, paths, shadows, EL0 window/surface protocol, or EL0
+application surface. The local QEMU build still cannot exercise the accelerated
+branch.
 
 With four CPUs, `make run` publishes the ramfb frame and then follows the SMP/EL0
 path. `QEMU_CPUS=1 make run` retains the interactive EL1 kernel monitor after
@@ -253,17 +267,30 @@ will implement the same command, memory-domain, synchronization, and
 presentation contracts with separate hardware backends; retained scene and
 animation policy remain shared.
 
-## User ABI direction
+## Storage and user ABI direction
+
+SwiftFS sits above the synchronous `BlockDevice` contract rather than VirtIO or
+SDHCI directly. It alternates complete metadata/data banks and publishes a
+CRC-protected superblock only after the inactive snapshot synchronizes. QEMU
+reaches it through a VirtIO-backed signed data volume; the Pi runtime derives a
+disjoint SwiftFS range beside the private log arena and exposes the same mounted-
+provider seam through stable classified allocations. The Pi transport and mount
+remain physical-hardware-unverified.
+
+The first file-service SVC uses fixed-width request/result records, validates
+whole EL0 ranges before copying, and confines each process to bounded generation-
+tagged handles. Its operation vocabulary is `open`, `read`, `write`, `stat`,
+`readdir`, and `close`. It is a real checked crossing, but not a POSIX ABI or a
+general system library.
 
 The eventual kernel ABI will cover process/thread control, virtual memory,
 channels, object handles, clocks, files, sockets, windows, and debug output.
 Records will use fixed-width explicit layouts; Swift implementation types will
 not cross the boundary directly.
 
-Today only the minimal SVC report call exists. There is no executable loader,
-dynamic process creation, checked general user-copy layer, VFS syscall surface,
-or stable system library. The kernel-internal VFS uses bounded paths, role-based
-mounts, provider metadata, attenuated rights, and generation-tagged handles;
-the explicit 40-byte input record similarly avoids exposing Swift layout. These
-contracts still need checked user-copy and versioned syscalls before the linked
-proof image can be described as a general Swift userland.
+There is still no executable loader, dynamic process creation, general user-copy
+facility outside the bounded file service, or stable system library. The VFS
+uses bounded paths, role-based mounts, provider metadata, attenuated rights, and
+generation-tagged handles; the explicit 40-byte input record similarly avoids
+exposing Swift layout. These narrow crossings do not yet make the linked proof
+image a general Swift userland.

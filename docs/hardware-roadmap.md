@@ -19,16 +19,26 @@ and coverage assets but no color or scanout pixels. The session is retained for
 reusable render-IR submission and damage flush. The installed local QEMU cannot
 instantiate a GL-backed VirGL device, so this crossing has source, protocol, and
 host-test coverage rather than local hardware exercise. The next graphics gate
-is captured accelerated evidence on a capable QEMU build, followed by
-sustained frame scheduling, richer lowering, and vblank-capable presentation.
+is to finish the provider-backed file-manager boot integration and capture its
+accelerated output on a capable QEMU build, followed by sustained frame
+scheduling, richer lowering, dynamic fonts, and vblank-capable presentation.
+A backend-neutral file-manager state machine already supplies bounded provider
+loading, pointer/focus/capture routing, keyboard navigation/type-ahead, and
+animation invalidation; its QEMU wrapper compiles chrome and glyph passes and
+batches them through the GPU-only session. This is host/source evidence, not a
+locally exercised interactive desktop.
 A polling modern VirtIO-input path now pre-posts bounded device-writable buffers
 for QEMU keyboard and relative-pointer devices and translates evdev records into
 the transport-neutral input ABI. QMP injection proves that crossing in the
-single-CPU monitor; SMP service-thread/IRQ delivery, UI routing, and Pi USB-host
-input remain open. QEMU block storage, entropy, and broader networking remain
-parallel device work. The Pi target has a host-tested, DT-discovered SDHCI
-binding for its signed persistent-log arena, but it still needs physical
-power-loss and returned-card evidence before counting as hardware support.
+single-CPU monitor; the UI routing model is host-tested, while combined GPU/input
+boot proof, SMP service-thread/IRQ delivery, and Pi USB-host input remain open.
+QEMU now has a native VirtIO block path, crash-consistent SwiftFS mount, bounded
+EL0 file operations, and a multi-boot remount/durable-write smoke. Entropy and
+broader networking remain parallel device work. The Pi target has a host-tested,
+DT-discovered SDHCI binding with stable allocator-owned records, disjoint
+persistent-log/SwiftFS regions, and the same provider seam, but it still needs
+physical transfer, power-loss, mount, and returned-card evidence before counting
+as hardware support.
 
 ## Stage 2: documented physical ARM64 board
 
@@ -51,6 +61,11 @@ hardware. Production pixels require native V3D VII rendering plus HVS/IOMMU,
 vblank, HDMI modesetting, hotplug/DDC/EDID, clocks, and PHY drivers. The QEMU
 backend and planned Pi backend share retained scene, command, memory-domain,
 fence, and presentation contracts without sharing device code.
+
+The Pi storage port follows the same rule: its board-specific SDHCI transport
+feeds board-neutral partition, log, SwiftFS, and mounted-provider contracts.
+Static/host tests establish range separation and stable ownership only; no
+physical Pi SD read, write, mount, or recovery is claimed.
 
 ## Stage 3: Apple Silicon research port
 

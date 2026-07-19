@@ -74,6 +74,39 @@ device, so this accelerated pixel path is source-, protocol-, and host-tested
 but has not produced locally hardware-exercised pixels or a captured
 accelerated frame.
 
+## Accelerated file-manager runtime
+
+The reusable GPU session now has a bounded file-manager consumer rather than
+only static boot-scene builders. `AcceleratedFileManagerInteractionState` is
+backend-neutral and owns caller-supplied storage for directory entries and
+names, window records, type-ahead text, cursor/focus/capture state, and
+deterministic animation. It loads a mounted `VFSNodeProvider`, copies borrowed
+names immediately, restarts once after a stale directory cookie, and reports a
+bounded truncated page instead of reading past capacity.
+
+Canonical pointer and keyboard events enter through a synchronous dispatcher.
+The state converts physical relative motion into logical coordinates while
+retaining subpixel remainders, performs shared-layout hit testing, scrolls and
+selects visible rows, composes a bounded US-keyboard type-ahead prefix, and
+marks frames dirty only while input or a transition changes visible state. The
+single-owner contract requires input polling and rendering to occur serially;
+SMP input remains inactive until an IRQ/service-thread design supplies that
+ownership.
+
+`GPUFileManagerSceneCompiler` emits one chrome pass and one text pass for the
+window, rows, hover/selection state, and cursor. The QEMU wrapper keeps the UI
+state in stable allocator-backed pages and calls `VirtIOGPU3DSession.renderBatch`
+so both passes become one ordered GPU submission followed by one damage flush.
+The GPU-only source audit rejects software-framebuffer and CPU-rasterizer
+dependencies across the full runtime. Focused host tests cover input routing,
+pointer scaling, keyboard navigation/type-ahead, animation retirement,
+provider-cookie restart, copied names, and capacity truncation.
+
+This is still an integration boundary, not visual proof. The combined QEMU boot
+loop is being wired and the installed QEMU cannot expose a GL-backed VirGL
+device, so no local accelerated file-manager pixels or interaction capture
+exist. The runtime is kernel bootstrap infrastructure, not an EL0 window server.
+
 ## Explicit diagnostic frame path
 
 QEMU ramfb, QEMU VirtIO-GPU 2D, and the statically inspected Pi simplefb path
@@ -176,7 +209,8 @@ physical Pi output are hardware-verified.
 - Exercise the checked-in session on a GL-backed VirGL QEMU configuration and
   retain accelerated serial, fence, and captured-frame evidence.
 - Route ongoing retained-scene updates through the reusable GPU submission API,
-  then execute the frame scheduler and graphics mailbox in the live boot path.
+  finish the file-manager boot loop, then execute the frame scheduler and
+  graphics mailbox as a dedicated service.
 - Add retained image, glyph-run, border, gradient, shadow, and transform content
   while preserving old/new damage reporting and GPU-only pixel production.
 - Grow the fixed boot mask into bounded font loading, layout and shaping,
@@ -189,14 +223,13 @@ physical Pi output are hardware-verified.
 - Implement native Pi V3D VII command submission, graphics address translation,
   HVS display lists, vblank, HDMI hotplug/DDC/EDID, clocking, and PHY control
   behind the same contracts.
-- Add input hit testing, focus, window lifetime, and surface synchronization only
-  after object handles and checked user-copy exist.
+- Move the existing bounded input hit testing/focus model behind an EL0 window
+  and surface service only after object handles and checked user-copy exist.
 
 This is the base of a modern UI renderer, not yet a window server. The QEMU
-accelerated branch currently produces a static retained-scene bootstrap frame:
-one attachment clear, five quads, and seven mask-glyph draws. It has one
-immutable R8 boot atlas, but no EL0 surfaces, general image textures, dynamic
-font loading or shaping, mutable atlas lifecycle, paths, input routing, or
-sustained compositor loop yet. The checked-in GPU frame—including analytic
-rounded coverage and glyph sampling—has not been exercised by the installed
-local QEMU.
+accelerated branch has both the static retained bootstrap scene and a bounded
+provider-backed file-manager compiler/runtime with kernel-side input routing.
+It still has one immutable R8 boot atlas, no EL0 surfaces, general image
+textures, dynamic font loading or shaping, mutable atlas lifecycle, paths, or
+vblank-driven compositor service. Neither the checked-in GPU bootstrap frame
+nor the file-manager frame has been exercised by the installed local QEMU.
