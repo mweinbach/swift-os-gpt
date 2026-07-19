@@ -16,6 +16,7 @@ RPI5_HEADER_OBJECT := $(RPI5_BUILD_DIR)/image-header.o
 RPI5_KERNEL_ELF := $(RPI5_BUILD_DIR)/swiftos-rpi5.elf
 RPI5_KERNEL_IMAGE := $(RPI5_BUILD_DIR)/kernel8.img
 USB_DISPLAY_VIEWER := $(BUILD_DIR)/swiftos-usb-display
+USB_UPDATE := $(BUILD_DIR)/swiftos-usb-update
 
 SWIFTC ?= swiftc
 MACOS_SWIFTC ?= xcrun swiftc
@@ -53,7 +54,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test usb-display-viewer userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -245,7 +246,28 @@ $(USB_DISPLAY_VIEWER): \
 
 usb-display-viewer: $(USB_DISPLAY_VIEWER)
 
-host-test: firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test
+usb-update-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		tools/USBUpdate/USBUpdateProtocol.swift \
+		Tests/Host/USBUpdateHostTests.swift \
+		-o $(BUILD_DIR)/usb-update-host-tests
+	$(BUILD_DIR)/usb-update-host-tests
+
+$(USB_UPDATE): \
+		tools/USBUpdate/USBUpdateProtocol.swift \
+		tools/USBUpdate/USBUpdateSerialTransport.swift \
+		tools/USBUpdate/USBUpdateCLI.swift | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/usb-update-module-cache
+	$(MACOS_SWIFTC) -parse-as-library -whole-module-optimization \
+		-swift-version 5 -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/usb-update-module-cache \
+		$^ -o $@
+
+usb-update: $(USB_UPDATE)
+
+host-test: firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test usb-update-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
