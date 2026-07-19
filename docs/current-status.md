@@ -63,6 +63,22 @@ unless a guest implementation and a repeatable test sit behind it.
 - A fixed-capacity interactive EL1 kernel monitor in single-CPU mode. `help`,
   `uname`, `status`, `clear`, `about`, and `uptime` use PL011 input/output while
   updating the rendered terminal.
+- Bounded, case-sensitive UTF-8 VFS paths and a synthetic root namespace for
+  immutable `/System`, mutable `/Users`, ephemeral `/Temporary`, capability-
+  gated `/Devices`, and `/Volumes/<name>`. Kernel-only log/raw-media volumes
+  cannot mount; exact unmount revokes generation-tagged handles before provider
+  teardown. Stable metadata, directory-cookie, and provider I/O contracts are
+  host-tested, but no concrete user filesystem is mounted.
+- A versioned 40-byte input record, fixed-capacity FIFO with sequence gaps and
+  saturating loss/corruption accounting, and allocation-free USB HID boot
+  keyboard/mouse decoders. Malformed, duplicate, reserved, and rollover reports
+  leave the last good device state unchanged.
+- A modern VirtIO-MMIO input transport with one shared split-ring geometry,
+  64 pre-posted device-writable eight-byte buffers, generation-stable capability
+  discovery, descriptor ownership tracking, evdev-to-HID/pointer translation,
+  and `SYN_REPORT` boundaries. In single-CPU monitor mode, QEMU keyboard and
+  mouse devices feed the canonical queue; QMP proves A down/up, relative
+  `+37/-19` motion, and left-button down/up after guest DMA decoding.
 
 The QEMU SMP proof means that four processors reached Swift kernel code. It does
 not mean user work is balanced across them: the three secondary CPUs publish
@@ -139,13 +155,16 @@ hardware backend and there is no accelerated screenshot evidence yet.
 timer IRQ proof, PSCI startup, and the EL0 preemption proof. It attempts the
 production VirGL route first and, when no compatible device is present, marks
 and publishes the explicit ramfb diagnostic before entering user scheduling.
-There is not yet an EL0 window system or graphical input path.
+The polling input runtime is deliberately inactive in this SMP mode until a
+kernel service thread or IRQ-dispatch path exists. There is not yet an EL0
+window system or graphical input routing.
 
 Use `QEMU_CPUS=1 make run` for monitor mode. The single-CPU boot retains the
 interactive EL1 monitor after the same memory, exception, GIC, timer, and ramfb
 stages. Its architectural-counter-driven status indicator is the current live
-retained-compositor proof. This mode intentionally does not enter the
-multicore/EL0 acceptance path.
+retained-compositor proof. When modern VirtIO input devices are present, this
+mode also owns their bounded cooperative polling. It intentionally does not
+enter the multicore/EL0 acceptance path.
 
 `make virtio-gpu-smoke` runs single-CPU monitor mode without a ramfb device. It
 requires the modern VirtIO transport and GPU markers, validates the initial
@@ -154,6 +173,13 @@ marker, and verifies that the updated scanout differs. The device presents a
 CPU-rasterized diagnostic surface. This is QEMU 2D-device evidence only; it is
 not a Raspberry Pi or accelerated 3D graphics claim. The installed QEMU lacks
 the GL-backed device needed to add the VirGL production branch to this smoke.
+
+`make virtio-input-smoke` adds modern QEMU VirtIO keyboard and mouse devices in
+single-CPU monitor mode. QMP injects one A press/release, exact relative motion,
+and a left-button press/release. The test accepts only markers emitted after the
+guest has consumed eventq DMA, translated evdev codes, encoded the canonical
+record, and dequeued it again. It does not prove focus, text composition, a
+visible cursor, SMP delivery, USB-host input, or Raspberry Pi hardware.
 
 ## Verification gates
 
@@ -168,7 +194,9 @@ the GL-backed device needed to add the VirGL production branch to this smoke.
    GPU command compilation/policy/frame scheduling/worker publication,
    VirtIO-GPU 2D/3D protocol layouts, VirGL encoding/capability validation,
    device-neutral-to-VirGL IR lowering, GPU-only session lifecycle/damage flush,
-   preemptive EL0 scheduling, PSCI topology, and SMP publication/runtime logic;
+   VFS path/mount/access/handle invariants, input ABI/queue/HID state machines,
+   VirtIO-input queue/configuration/translation, preemptive EL0 scheduling,
+   PSCI topology, and SMP publication/runtime logic;
 3. separate user-image compilation/link inspection and a parser probe against a
    DTB emitted by the installed QEMU;
 4. static ELF inspection proving AArch64 architecture, the expected entry/link
@@ -176,7 +204,8 @@ the GL-backed device needed to add the VirGL production branch to this smoke.
 5. three ordered EL1 cold boots plus an EL2-to-EL1 boot in single-CPU mode,
    including final paging, exception/GIC setup, ramfb publication, and timer IRQs;
 6. interactive single-CPU monitor, exact ramfb rendering, bounded retained
-   animation, and modern VirtIO-MMIO GPU scanout/update smoke tests;
+   animation, modern VirtIO-MMIO GPU scanout/update, and QMP-to-guest VirtIO
+   keyboard/pointer smoke tests;
 7. four-CPU SMP/EL0 boots from both EL1 and EL2, requiring ordered evidence for
    owned memory, final tables, three online secondaries, both user threads, SVC
    reporting, context switches, and timer-driven preemption;
@@ -190,7 +219,7 @@ The visual artifacts include `.build/swiftos-frame.ppm`, the low/peak
 `.build/swiftos-animation*.ppm` pair, and `.build/swiftos-virtio-gpu.ppm`. They
 prove guest CPU-rendered diagnostic frames, a bounded retained compositor
 update, and two presentation backends; they do not prove an EL0 window system,
-graphical input, or GPU rasterization.
+graphical input routing, or GPU rasterization.
 
 ## Implemented but hardware-unverified Raspberry Pi display path
 
@@ -224,8 +253,9 @@ log arena, and durably appends at most one retained 48-byte kernel event per
 cooperative pass. It never formats returned media and drops write authority on
 any discovery, signature, bounds, or transport failure. This path is host- and
 link-tested but has not written or recovered a record on physical Pi hardware.
-The remaining data-partition arena is reserved for user files; there is no VFS,
-filesystem, or EL0 block API.
+The remaining data-partition arena is reserved for user files. VFS contracts
+now exist, but there is no on-disk provider, mounted user volume, VFS syscall,
+or EL0 block API.
 
 This is a diagnostic firmware-configured scanout handoff, not a production
 graphics path, a native BCM2712 HVS/HDMI modesetting driver, or V3D VII
@@ -242,10 +272,11 @@ GPU text support. None of this path has executed on physical Pi hardware yet.
   interrupt/timer scheduling, migration, load balancing, and scheduler locking;
 - an executable loader, process creation/destruction, demand paging, copy-on-
   write, signals, or a stable user system library and syscall ABI;
-- general persistent block services, a QEMU VirtIO block transport, VFS,
-  filesystem, permissions, or user-data recovery;
-- virtio/RP1 keyboard, pointer, entropy, USB host/input, and additional network
-  drivers;
+- general persistent block services, a QEMU VirtIO block transport, an on-disk
+  user filesystem/provider, process-credential permissions, VFS syscalls, or
+  user-data recovery;
+- SMP/IRQ-driven VirtIO input service, RP1 PCIe/xHCI and USB-host HID input,
+  entropy, and additional network drivers;
 - hardware execution and captured-pixel validation of the VirtIO/VirGL path,
   sustained frame-scheduler/graphics-worker integration, native BCM2712 V3D VII
   MMU/command submission, HVS display lists and IOMMU integration,
@@ -291,9 +322,9 @@ worker mailbox. The fixed boot atlas must grow into bounded font loading,
 layout/shaping, dynamic atlas management, and batched glyph runs. The Pi backend
 independently needs native V3D VII command submission and address translation
 plus HVS, vblank, HDMI, HPD/DDC/EDID, clock, PHY, and GPU font paths behind the
-same contracts; simplefb remains only a bring-up diagnostic. Input, a QEMU
-VirtIO block transport, general filesystems, entropy, and broader networking
-remain parallel work. The proof
+same contracts; simplefb remains only a bring-up diagnostic. Pi USB-host input,
+a QEMU VirtIO block transport, general filesystems, entropy, and broader
+networking remain parallel work. The proof
 scheduler still needs per-CPU state and interrupt interfaces, runnable work on
-secondaries, a versioned syscall ABI, executable loading, and a minimal VFS
-before the renderer can become a user-facing compositor service.
+secondaries, a versioned syscall ABI, executable loading, and a concrete VFS
+service crossing before the renderer can become a user-facing compositor.

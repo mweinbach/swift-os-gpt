@@ -21,8 +21,10 @@ Swift applications
 ```
 
 No layer points upward. Not every box exists: the current EL0 image has one
-proof-oriented report syscall, while the loader, VFS, system library,
-networking, compositor, and general driver stack remain future layers.
+proof-oriented report syscall. Bounded VFS namespace/handle contracts and a
+transport-neutral input service now exist inside the kernel, but the loader,
+VFS syscall crossing, concrete user filesystem, system library, compositor,
+and general user-facing driver ABI remain future layers.
 
 ## Boot and board contract
 
@@ -233,9 +235,11 @@ that rejects singular or ill-conditioned inverse transforms, and sampling from
 one immutable R8 mask atlas. The full diagnostic terminal text and continuous
 retained status animation still run only in the explicit diagnostic CPU path.
 There are no general image textures, dynamic font loading or shaping, mutable
-atlas lifecycle, paths, shadows, window/surface protocol, graphical input path,
-or EL0 application surface yet, and the local QEMU build cannot exercise the
-accelerated branch.
+atlas lifecycle, paths, shadows, window/surface protocol, graphical input
+routing, or EL0 application surface yet, and the local QEMU build cannot
+exercise the accelerated branch. A separate single-CPU diagnostic path does
+poll modern VirtIO keyboard/pointer queues into the canonical input ABI; it is
+transport evidence, not compositor focus or hit testing.
 
 With four CPUs, `make run` publishes the ramfb frame and then follows the SMP/EL0
 path. `QEMU_CPUS=1 make run` retains the interactive EL1 kernel monitor after
@@ -257,6 +261,9 @@ Records will use fixed-width explicit layouts; Swift implementation types will
 not cross the boundary directly.
 
 Today only the minimal SVC report call exists. There is no executable loader,
-dynamic process creation, checked general user-copy layer, VFS handle namespace,
-or stable system library. Those contracts must be designed and tested before the
-linked proof image can be described as a general Swift userland.
+dynamic process creation, checked general user-copy layer, VFS syscall surface,
+or stable system library. The kernel-internal VFS uses bounded paths, role-based
+mounts, provider metadata, attenuated rights, and generation-tagged handles;
+the explicit 40-byte input record similarly avoids exposing Swift layout. These
+contracts still need checked user-copy and versioned syscalls before the linked
+proof image can be described as a general Swift userland.

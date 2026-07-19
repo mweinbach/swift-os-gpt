@@ -21,10 +21,14 @@ instantiate a GL-backed VirGL device, so this crossing has source, protocol, and
 host-test coverage rather than local hardware exercise. The next graphics gate
 is captured accelerated evidence on a capable QEMU build, followed by
 sustained frame scheduling, richer lowering, and vblank-capable presentation.
-Input, QEMU block storage, entropy, and broader networking remain parallel
-device work. The Pi target has a host-tested, DT-discovered SDHCI binding for
-its signed persistent-log arena, but it still needs physical power-loss and
-returned-card evidence before counting as hardware support.
+A polling modern VirtIO-input path now pre-posts bounded device-writable buffers
+for QEMU keyboard and relative-pointer devices and translates evdev records into
+the transport-neutral input ABI. QMP injection proves that crossing in the
+single-CPU monitor; SMP service-thread/IRQ delivery, UI routing, and Pi USB-host
+input remain open. QEMU block storage, entropy, and broader networking remain
+parallel device work. The Pi target has a host-tested, DT-discovered SDHCI
+binding for its signed persistent-log arena, but it still needs physical
+power-loss and returned-card evidence before counting as hardware support.
 
 ## Stage 2: documented physical ARM64 board
 
@@ -72,5 +76,7 @@ Driver discovery reserves memory and MMIO before the allocator and final page
 tables activate; each backend then implements the same presentation contract.
 Graphics backends additionally implement the same render-command, image-domain,
 queue, and fence contracts. Scene construction never depends on VirtIO, V3D, or
-a particular CPU/memory topology. This keeps the Pi, QEMU, and future Mac ports
-from forking the kernel.
+a particular CPU/memory topology. Input transports likewise terminate at the
+same device IDs, fixed-width events, synchronization records, and bounded queue;
+evdev and USB HID codes do not escape their drivers. This keeps the Pi, QEMU,
+and future Mac ports from forking the kernel.

@@ -161,9 +161,10 @@ v1 superblock validates. Blocks zero and one are duplicate immutable headers.
 The next 4,096 512-byte blocks form the default 2 MiB kernel-log arena; CRCs and
 deterministic sequence-to-slot placement permit bounded recovery after a torn
 write. The remainder is reserved for a future user filesystem. The generic
-kernel layer exposes synchronous logical-block I/O and a partition-bounded view,
-but never maps that view into EL0. Files and mounts require a future VFS/syscall
-boundary.
+kernel layer exposes synchronous logical-block I/O and a partition-bounded
+view, but never maps that view into EL0. Bounded VFS namespace and handle
+contracts now exist; a concrete on-disk provider and checked syscall boundary
+are still required before this arena can hold user files.
 
 On Pi, the runtime binds the boot DT's removable `brcm,bcm2712-sdhci` node to a
 bounded, default-speed 3.3 V PIO transport. It waits for the local USB/HDMI

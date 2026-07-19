@@ -77,7 +77,11 @@ The verified QEMU path now includes:
 7. shared GPU foundations around that path: bounded render commands and
    retained-scene compilation, frame-slot/fence scheduling, a graphics-worker
    mailbox, strict production execution policy, and Pi V3D/HVS resource
-   discovery and mapping.
+   discovery and mapping; and
+8. bounded VFS/file-manager contracts for immutable system, mutable user,
+   temporary, device, and additional-volume namespaces, plus a versioned input
+   ABI, loss-aware queue, USB HID boot decoders, and a real single-CPU QEMU
+   VirtIO keyboard/pointer path exercised through QMP and guest-owned DMA.
 
 The production graphics invariant is now strict: CPUs may update retained scene
 state, compute animation and damage, and compile backend-neutral command buffers,
@@ -98,13 +102,15 @@ support remains discovery, mapping, and roadmap work.
 This is not yet a general-purpose OS. The next layers include sustained
 GPU-frame scheduling and richer GPU primitives, accelerated QEMU execution
 evidence, a native Pi V3D/HVS/HDMI path, multicore task scheduling, an
-executable loader, VFS/storage, input drivers, a user-facing surface/window
-protocol, networking, and a stable system library and syscall ABI.
+executable loader, on-disk user filesystem and VFS syscalls, Pi USB-host input,
+a user-facing surface/window protocol, networking, and a stable system library
+and syscall ABI.
 
 See [Architecture](docs/architecture.md), [Renderer foundation](docs/renderer.md),
-and [Hardware roadmap](docs/hardware-roadmap.md) for the contracts behind those
-milestones. [Current status](docs/current-status.md) separates working guest code
-from the next kernel frontiers.
+[Files and input](docs/files-and-input.md), and
+[Hardware roadmap](docs/hardware-roadmap.md) for the contracts behind those
+milestones. [Current status](docs/current-status.md) separates working guest
+code from the next kernel frontiers.
 
 ## Prerequisites
 
@@ -237,15 +243,22 @@ quads—including four shader-antialiased rounded layers—and seven GPU-sampled
 color or scanout pixels. The local QEMU build cannot hardware-exercise that
 accelerated route.
 The scheduler currently runs both user threads only on CPU0; secondary CPUs
-publish online state and park. There is no loader, VFS, mounted user filesystem,
-graphical input, user compositor/window protocol, or stable application ABI.
+publish online state and park. Bounded VFS paths, namespace roles, provider
+metadata, mounts, rights, and generation-tagged handles now exist, but there is
+no loader, mounted user filesystem, VFS syscall surface, graphical input
+routing, user compositor/window protocol, or stable application ABI.
+The input core now has a fixed-width ABI, a loss-aware queue, and USB HID boot
+keyboard/mouse decoders. In single-CPU monitor mode, modern VirtIO-MMIO keyboard
+and mouse devices feed that same queue; a QMP smoke proves A down/up, relative
+motion, and left-button transitions after guest DMA decoding. This polling path
+does not run in the default SMP/EL0 mode yet and is not Raspberry Pi input.
 The board-neutral block, MBR, signed data-volume, and bounded persistent-log
 formats are host-tested. The Pi target now binds them to the removable,
 DT-discovered BCM2712 SDHCI controller and incrementally drains the retained
 kernel log into the signed `0xda` partition. That binding and its PIO transport
 remain physical-hardware-unverified, and QEMU has no VirtIO block binding yet.
 The remainder of the data partition is reserved for a user filesystem, but no
-VFS or filesystem exists and raw data blocks are never exposed to EL0.
+on-disk provider is mounted and raw data blocks are never exposed to EL0.
 Physical Raspberry Pi 5 execution remains unverified. The Pi path currently
 consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
 modesetting or V3D VII rendering. It can also export that completed diagnostic
