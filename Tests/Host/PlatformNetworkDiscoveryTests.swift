@@ -87,6 +87,14 @@ struct PlatformNetworkDiscoveryTests {
                 description.boardResources == nil,
                 "QEMU candidate inherited board-specific resources"
             )
+            var bootResources = BootDriverResourceSet()
+            expect(
+                PlatformNetworkBootResources.append(
+                    description: description,
+                    to: &bootResources
+                ) && bootResources.mmioResourceCount == 0,
+                "QEMU candidate duplicated its aggregate VirtIO mapping"
+            )
             expect(
                 PlatformNetworkDeviceDiscovery.candidate(
                     in: tree,
@@ -218,6 +226,30 @@ struct PlatformNetworkDiscoveryTests {
             expect(
                 rp1.localMACAddress?.isUsableUnicast == true,
                 "RP1 valid local MAC was not marked usable"
+            )
+            var bootResources = BootDriverResourceSet()
+            expect(
+                PlatformNetworkBootResources.append(
+                    description: description,
+                    to: &bootResources
+                ),
+                "RP1 network resources did not fit the boot contract"
+            )
+            expect(
+                bootResources.mmioResourceCount == 6
+                    && bootResources.mmioResource(at: 0)
+                        == rp1.gemRegisters
+                    && bootResources.mmioResource(at: 1)
+                        == rp1.ethernetConfigurationRegisters
+                    && bootResources.mmioResource(at: 2)
+                        == rp1.clocks.controllerRegisters
+                    && bootResources.mmioResource(at: 3)
+                        == rp1.phyReset?.gpioRegisters.ioBank
+                    && bootResources.mmioResource(at: 4)
+                        == rp1.phyReset?.gpioRegisters.rio
+                    && bootResources.mmioResource(at: 5)
+                        == rp1.phyReset?.gpioRegisters.padsBank,
+                "RP1 network MMIO retention order changed"
             )
             expect(
                 PlatformNetworkDeviceDiscovery.candidate(

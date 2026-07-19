@@ -527,6 +527,10 @@ platform-network-discovery-host-test: | $(BUILD_DIR)
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Memory/PhysicalMemory.swift \
+		Kernel/Memory/PageTables.swift \
+		Kernel/Drivers/BootDriverResources.swift \
+		Kernel/Drivers/Network/PlatformNetworkBootResources.swift \
 		Kernel/Platform/FlattenedDeviceTree.swift \
 		Kernel/Platform/Platform.swift \
 		Kernel/Platform/PlatformNetworkResources.swift \

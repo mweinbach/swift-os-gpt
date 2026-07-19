@@ -42,7 +42,7 @@ struct DriverMemoryResource: Equatable {
 /// or changes the page-table layout after the MMU switches.
 struct BootDriverResourceSet {
     static let maximumMemoryResourceCount = 8
-    static let maximumMMIOResourceCount = 8
+    static let maximumMMIOResourceCount = 12
 
     private var memory0: DriverMemoryResource?
     private var memory1: DriverMemoryResource?
@@ -61,6 +61,10 @@ struct BootDriverResourceSet {
     private var mmio5: DeviceResource?
     private var mmio6: DeviceResource?
     private var mmio7: DeviceResource?
+    private var mmio8: DeviceResource?
+    private var mmio9: DeviceResource?
+    private var mmio10: DeviceResource?
+    private var mmio11: DeviceResource?
 
     private(set) var memoryResourceCount = 0
     private(set) var mmioResourceCount = 0
@@ -137,7 +141,11 @@ struct BootDriverResourceSet {
         case 4: mmio4 = resource
         case 5: mmio5 = resource
         case 6: mmio6 = resource
-        default: mmio7 = resource
+        case 7: mmio7 = resource
+        case 8: mmio8 = resource
+        case 9: mmio9 = resource
+        case 10: mmio10 = resource
+        default: mmio11 = resource
         }
         mmioResourceCount += 1
         return true
@@ -167,7 +175,11 @@ struct BootDriverResourceSet {
         case 4: return mmio4
         case 5: return mmio5
         case 6: return mmio6
-        default: return mmio7
+        case 7: return mmio7
+        case 8: return mmio8
+        case 9: return mmio9
+        case 10: return mmio10
+        default: return mmio11
         }
     }
 

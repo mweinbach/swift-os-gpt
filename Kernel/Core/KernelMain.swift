@@ -93,10 +93,20 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
         park()
     }
 
+    var retainedDriverResources = drivers.resources
+    guard PlatformNetworkBootResources.appendDiscoveredResources(
+              platform: platform,
+              to: &retainedDriverResources
+          )
+    else {
+        console.write("SWIFTOS:PANIC:NETWORK_RESOURCES\n")
+        park()
+    }
+
     guard let memory = KernelMemoryRuntime.activate(
         platform: platform,
         console: console,
-        driverResources: drivers.resources
+        driverResources: retainedDriverResources
     ) else {
         console.write("SWIFTOS:PANIC:MEMORY\n")
         park()
