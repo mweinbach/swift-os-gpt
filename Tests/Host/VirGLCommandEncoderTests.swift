@@ -4,6 +4,7 @@ struct VirGLCommandEncoderTests {
         testPacketHeadersAndArenaBoundaries()
         testGenericObjectLifecycle()
         testSurfaceAndFramebufferPackets()
+        testSamplerPackets()
         testViewportAndScissorPackets()
         testResourceCopyRegionPackets()
         testClearPackets()
@@ -13,7 +14,7 @@ struct VirGLCommandEncoderTests {
         testShaderObjectFragments()
         testShaderBindAndLinkPackets()
         testDrawPacketAndAtomicRejections()
-        print("VirGL command encoder host tests: 12 groups passed")
+        print("VirGL command encoder host tests: 13 groups passed")
     }
 
     private static func testPacketHeadersAndArenaBoundaries() {
@@ -209,6 +210,292 @@ struct VirGLCommandEncoderTests {
                     "too many color surfaces"
                 )
             }
+        }
+    }
+
+    private static func testSamplerPackets() {
+        withArena(capacity: 64) { arena, _ in
+            let view = requireSamplerView(
+                firstLayer: 2,
+                lastLayer: 5,
+                firstLevel: 1,
+                lastLevel: 3
+            )
+            let nearest = VirGLSamplerState.clampToEdgeNoMip(
+                filter: .nearest
+            )
+            let linear = VirGLSamplerState.clampToEdgeNoMip(filter: .linear)
+
+            expectEncoded(
+                arena.encodeCreateSamplerView(
+                    handle: 0x501,
+                    resourceHandle: 0x601,
+                    view: view
+                ),
+                start: 0,
+                count: 7,
+                "R8 sampler view"
+            )
+            expectEncoded(
+                arena.encodeCreateSamplerState(handle: 0x701, state: nearest),
+                start: 7,
+                count: 10,
+                "nearest mask sampler"
+            )
+            expectEncoded(
+                arena.encodeCreateSamplerState(handle: 0x702, state: linear),
+                start: 17,
+                count: 10,
+                "linear mask sampler"
+            )
+            let viewHandles: [UInt32] = [0x501, 0]
+            viewHandles.withUnsafeBufferPointer { handles in
+                expectEncoded(
+                    arena.encodeSetSamplerViews(
+                        stage: .fragment,
+                        startSlot: 3,
+                        viewHandles: handles
+                    ),
+                    start: 27,
+                    count: 5,
+                    "set sampler views"
+                )
+            }
+            let stateHandles: [UInt32] = [0x701, 0x702]
+            stateHandles.withUnsafeBufferPointer { handles in
+                expectEncoded(
+                    arena.encodeBindSamplerStates(
+                        stage: .fragment,
+                        startSlot: 3,
+                        stateHandles: handles
+                    ),
+                    start: 32,
+                    count: 5,
+                    "bind sampler states"
+                )
+            }
+
+            expectDWords(
+                arena,
+                [
+                    0x0006_0601,
+                    0x501, 0x601, 64, 0x0005_0002, 0x0000_0301, 0,
+                    0x0009_0701,
+                    0x701, 0x0000_1092, 0, 0, 0, 0, 0, 0, 0,
+                    0x0009_0701,
+                    0x702, 0x0000_3292, 0, 0, 0, 0, 0, 0, 0,
+                    0x0004_000a, 1, 3, 0x501, 0,
+                    0x0004_0012, 1, 3, 0x701, 0x702,
+                ],
+                "sampler object and binding layouts"
+            )
+            expect(
+                VirGLSamplerViewSwizzle.identity.packedDWord == 0x688,
+                "identity sampler swizzle"
+            )
+
+            let before = arena.dwordCount
+            let prefix = (0..<before).map { requireDWord(arena, $0) }
+            expectRejected(
+                arena.encodeCreateSamplerView(
+                    handle: 0,
+                    resourceHandle: 1,
+                    view: view
+                ),
+                .invalidObjectHandle,
+                "zero sampler-view handle"
+            )
+            expectRejected(
+                arena.encodeCreateSamplerView(
+                    handle: 1,
+                    resourceHandle: 0,
+                    view: view
+                ),
+                .invalidResourceHandle,
+                "zero sampler-view resource"
+            )
+            expectRejected(
+                arena.encodeCreateSamplerState(handle: 0, state: nearest),
+                .invalidObjectHandle,
+                "zero sampler-state handle"
+            )
+
+            let empty: [UInt32] = []
+            empty.withUnsafeBufferPointer { handles in
+                expectRejected(
+                    arena.encodeSetSamplerViews(
+                        stage: .fragment,
+                        startSlot: 0,
+                        viewHandles: handles
+                    ),
+                    .invalidCount,
+                    "empty sampler views"
+                )
+                expectRejected(
+                    arena.encodeBindSamplerStates(
+                        stage: .fragment,
+                        startSlot: 0,
+                        stateHandles: handles
+                    ),
+                    .invalidCount,
+                    "empty sampler states"
+                )
+            }
+            let one: [UInt32] = [1]
+            one.withUnsafeBufferPointer { handles in
+                expectRejected(
+                    arena.encodeSetSamplerViews(
+                        stage: .fragment,
+                        startSlot: 128,
+                        viewHandles: handles
+                    ),
+                    .invalidCount,
+                    "sampler-view slot overflow"
+                )
+                expectRejected(
+                    arena.encodeBindSamplerStates(
+                        stage: .fragment,
+                        startSlot: 32,
+                        stateHandles: handles
+                    ),
+                    .invalidCount,
+                    "sampler-state slot overflow"
+                )
+            }
+            let tooManyViews = Array(repeating: UInt32(1), count: 129)
+            tooManyViews.withUnsafeBufferPointer { handles in
+                expectRejected(
+                    arena.encodeSetSamplerViews(
+                        stage: .fragment,
+                        startSlot: 0,
+                        viewHandles: handles
+                    ),
+                    .invalidCount,
+                    "too many sampler views"
+                )
+            }
+            let tooManyStates = Array(repeating: UInt32(1), count: 33)
+            tooManyStates.withUnsafeBufferPointer { handles in
+                expectRejected(
+                    arena.encodeBindSamplerStates(
+                        stage: .fragment,
+                        startSlot: 0,
+                        stateHandles: handles
+                    ),
+                    .invalidCount,
+                    "too many sampler states"
+                )
+            }
+            expect(arena.dwordCount == before, "invalid sampler changed cursor")
+            expect(
+                (0..<before).map { requireDWord(arena, $0) } == prefix,
+                "invalid sampler changed published prefix"
+            )
+        }
+
+        expect(
+            VirGLTextureSamplerView(firstLayer: 2, lastLayer: 1) == nil,
+            "reversed sampler-view layers"
+        )
+        expect(
+            VirGLTextureSamplerView(firstLevel: 0, lastLevel: 16) == nil,
+            "out-of-range sampler-view level"
+        )
+
+        withArena(capacity: 6) { arena, storage in
+            expectRejected(
+                arena.encodeCreateSamplerView(
+                    handle: 1,
+                    resourceHandle: 2,
+                    view: requireSamplerView()
+                ),
+                .capacityExhausted,
+                "short sampler-view arena"
+            )
+            expect(arena.dwordCount == 0, "short sampler view changed cursor")
+            expect(
+                UInt32(littleEndian: storage[0]) == 0xa5a5_a5a5,
+                "short sampler view touched storage"
+            )
+        }
+
+        withArena(capacity: 9) { arena, storage in
+            expectRejected(
+                arena.encodeCreateSamplerState(
+                    handle: 1,
+                    state: .clampToEdgeNoMip(filter: .linear)
+                ),
+                .capacityExhausted,
+                "short sampler-state arena"
+            )
+            expect(arena.dwordCount == 0, "short sampler state changed cursor")
+            expect(
+                UInt32(littleEndian: storage[0]) == 0xa5a5_a5a5,
+                "short sampler state touched storage"
+            )
+        }
+
+        withArena(capacity: 8) { arena, _ in
+            let one: [UInt32] = [1]
+            one.withUnsafeBufferPointer { handles in
+                expectEncoded(
+                    arena.encodeSetSamplerViews(
+                        stage: .fragment,
+                        startSlot: 127,
+                        viewHandles: handles
+                    ),
+                    start: 0,
+                    count: 4,
+                    "last sampler-view slot"
+                )
+                expectEncoded(
+                    arena.encodeBindSamplerStates(
+                        stage: .fragment,
+                        startSlot: 31,
+                        stateHandles: handles
+                    ),
+                    start: 4,
+                    count: 4,
+                    "last sampler-state slot"
+                )
+            }
+            expectDWords(
+                arena,
+                [
+                    0x0003_000a, 1, 127, 1,
+                    0x0003_0012, 1, 31, 1,
+                ],
+                "last sampler slots"
+            )
+        }
+
+        withArena(capacity: 4) { arena, storage in
+            let two: [UInt32] = [1, 2]
+            two.withUnsafeBufferPointer { handles in
+                expectRejected(
+                    arena.encodeSetSamplerViews(
+                        stage: .fragment,
+                        startSlot: 0,
+                        viewHandles: handles
+                    ),
+                    .capacityExhausted,
+                    "short set-sampler-views arena"
+                )
+                expectRejected(
+                    arena.encodeBindSamplerStates(
+                        stage: .fragment,
+                        startSlot: 0,
+                        stateHandles: handles
+                    ),
+                    .capacityExhausted,
+                    "short bind-sampler-states arena"
+                )
+            }
+            expect(arena.dwordCount == 0, "short sampler bind changed cursor")
+            expect(
+                UInt32(littleEndian: storage[0]) == 0xa5a5_a5a5,
+                "short sampler bind touched storage"
+            )
         }
     }
 
@@ -1032,6 +1319,25 @@ struct VirGLCommandEncoderTests {
         return result
     }
 
+    private static func requireSamplerView(
+        firstLayer: UInt32 = 0,
+        lastLayer: UInt32 = 0,
+        firstLevel: UInt32 = 0,
+        lastLevel: UInt32 = 0,
+        swizzle: VirGLSamplerViewSwizzle = .maskCoverage
+    ) -> VirGLTextureSamplerView {
+        guard let result = VirGLTextureSamplerView(
+            firstLayer: firstLayer,
+            lastLayer: lastLayer,
+            firstLevel: firstLevel,
+            lastLevel: lastLevel,
+            swizzle: swizzle
+        ) else {
+            fatalError("valid sampler view rejected")
+        }
+        return result
+    }
+
     private static func requireTextureBox(
         x: UInt32,
         y: UInt32,
@@ -1182,6 +1488,16 @@ struct VirGLCommandEncoderTests {
             )
             index += 1
         }
+    }
+
+    private static func requireDWord(
+        _ arena: VirGLDWordArena,
+        _ index: Int
+    ) -> UInt32 {
+        guard let value = arena.dword(at: index) else {
+            fatalError("missing dword \(index)")
+        }
+        return value
     }
 
     private static func expect(_ condition: Bool, _ message: String) {

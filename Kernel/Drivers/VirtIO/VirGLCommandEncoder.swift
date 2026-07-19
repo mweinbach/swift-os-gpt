@@ -27,6 +27,7 @@ enum VirGLCommand: UInt8 {
     case setBlendColor = 14
     case setScissorState = 15
     case resourceCopyRegion = 17
+    case bindSamplerStates = 18
     case bindShader = 31
     case clearTexture = 47
     case linkShader = 52
@@ -129,6 +130,9 @@ enum VirGLEncodeResult: Equatable {
 enum VirGLWire {
     static let maximumPayloadDWordCount = Int(UInt16.max)
     static let maximumColorAttachmentCount = 8
+    static let maximumSamplerViewCount = 128
+    static let maximumSamplerStateCount = 32
+    static let maximumTextureLevel: UInt32 = 15
     static let maximumShaderByteCount: UInt32 = 0x7fff_ffff
 
     static func packetHeader(
@@ -193,6 +197,125 @@ struct VirGLScissorRectangle: Equatable {
 enum VirGLSurfaceView: Equatable {
     case buffer(firstElement: UInt32, lastElement: UInt32)
     case texture(level: UInt32, firstLayer: UInt32, lastLayer: UInt32)
+}
+
+/// Sampler-view formats intentionally start with the single-channel mask
+/// format used by the glyph atlas. Additional formats must be added from the
+/// same pinned VirGL format table rather than accepted as unchecked integers.
+enum VirGLSamplerViewFormat: UInt32 {
+    case r8UNorm = 64
+}
+
+/// Gallium `pipe_swizzle` values carried by VIRGL_OBJECT_SAMPLER_VIEW.
+enum VirGLSamplerSwizzle: UInt32 {
+    case red = 0
+    case green = 1
+    case blue = 2
+    case alpha = 3
+    case zero = 4
+    case one = 5
+}
+
+struct VirGLSamplerViewSwizzle: Equatable {
+    let red: VirGLSamplerSwizzle
+    let green: VirGLSamplerSwizzle
+    let blue: VirGLSamplerSwizzle
+    let alpha: VirGLSamplerSwizzle
+
+    static let identity = VirGLSamplerViewSwizzle(
+        red: .red,
+        green: .green,
+        blue: .blue,
+        alpha: .alpha
+    )
+
+    /// Replicating R lets a mask shader multiply a complete premultiplied
+    /// color by sampled coverage without depending on unused R8 channels.
+    static let maskCoverage = VirGLSamplerViewSwizzle(
+        red: .red,
+        green: .red,
+        blue: .red,
+        alpha: .red
+    )
+
+    var packedDWord: UInt32 {
+        red.rawValue
+            | (green.rawValue << 3)
+            | (blue.rawValue << 6)
+            | (alpha.rawValue << 9)
+    }
+}
+
+/// A texture sampler view encoded as packed first/last layer and mip ranges.
+/// The pinned Gallium contract exposes 16 texture levels, numbered 0...15.
+struct VirGLTextureSamplerView: Equatable {
+    let format: VirGLSamplerViewFormat
+    let firstLayer: UInt16
+    let lastLayer: UInt16
+    let firstLevel: UInt8
+    let lastLevel: UInt8
+    let swizzle: VirGLSamplerViewSwizzle
+
+    init?(
+        format: VirGLSamplerViewFormat = .r8UNorm,
+        firstLayer: UInt32 = 0,
+        lastLayer: UInt32 = 0,
+        firstLevel: UInt32 = 0,
+        lastLevel: UInt32 = 0,
+        swizzle: VirGLSamplerViewSwizzle = .maskCoverage
+    ) {
+        guard firstLayer <= lastLayer,
+              lastLayer <= UInt32(UInt16.max),
+              firstLevel <= lastLevel,
+              lastLevel <= VirGLWire.maximumTextureLevel
+        else {
+            return nil
+        }
+        self.format = format
+        self.firstLayer = UInt16(firstLayer)
+        self.lastLayer = UInt16(lastLayer)
+        self.firstLevel = UInt8(firstLevel)
+        self.lastLevel = UInt8(lastLevel)
+        self.swizzle = swizzle
+    }
+
+    var packedLayers: UInt32 {
+        UInt32(firstLayer) | (UInt32(lastLayer) << 16)
+    }
+
+    var packedLevels: UInt32 {
+        UInt32(firstLevel) | (UInt32(lastLevel) << 8)
+    }
+}
+
+enum VirGLSamplerImageFilter: UInt32 {
+    case nearest = 0
+    case linear = 1
+}
+
+/// The deliberately narrow mask-atlas sampler profile: clamp-to-edge on all
+/// axes, no mip selection, no comparison, no anisotropy, and zero LOD/border.
+/// Keeping unsupported state unrepresentable prevents reserved wire bits from
+/// leaking into the guest command stream.
+struct VirGLSamplerState: Equatable {
+    let imageFilter: VirGLSamplerImageFilter
+
+    static func clampToEdgeNoMip(
+        filter: VirGLSamplerImageFilter
+    ) -> VirGLSamplerState {
+        VirGLSamplerState(imageFilter: filter)
+    }
+
+    var packedDWord: UInt32 {
+        let clampToEdge: UInt32 = 2
+        let noMip: UInt32 = 2
+        return clampToEdge
+            | (clampToEdge << 3)
+            | (clampToEdge << 6)
+            | (imageFilter.rawValue << 9)
+            | (noMip << 11)
+            | (imageFilter.rawValue << 13)
+    }
 }
 
 struct VirGLBlendGlobalState: Equatable {
@@ -624,6 +747,129 @@ struct VirGLDWordArena {
         appendUnchecked(word3)
         appendUnchecked(word4)
         return .encoded(startDWord: start, dwordCount: 6)
+    }
+
+    mutating func encodeCreateSamplerView(
+        handle: UInt32,
+        resourceHandle: UInt32,
+        view: VirGLTextureSamplerView
+    ) -> VirGLEncodeResult {
+        guard handle != 0 else {
+            return .rejected(.invalidObjectHandle)
+        }
+        guard resourceHandle != 0 else {
+            return .rejected(.invalidResourceHandle)
+        }
+        let reservation = reservePacket(
+            command: .createObject,
+            objectType: .samplerView,
+            payloadDWordCount: 6
+        )
+        guard case .ready(let start) = reservation else {
+            return Self.rejectionResult(reservation)
+        }
+        appendUnchecked(handle)
+        appendUnchecked(resourceHandle)
+        appendUnchecked(view.format.rawValue)
+        appendUnchecked(view.packedLayers)
+        appendUnchecked(view.packedLevels)
+        appendUnchecked(view.swizzle.packedDWord)
+        return .encoded(startDWord: start, dwordCount: 7)
+    }
+
+    mutating func encodeCreateSamplerState(
+        handle: UInt32,
+        state: VirGLSamplerState
+    ) -> VirGLEncodeResult {
+        guard handle != 0 else {
+            return .rejected(.invalidObjectHandle)
+        }
+        let reservation = reservePacket(
+            command: .createObject,
+            objectType: .samplerState,
+            payloadDWordCount: 9
+        )
+        guard case .ready(let start) = reservation else {
+            return Self.rejectionResult(reservation)
+        }
+        appendUnchecked(handle)
+        appendUnchecked(state.packedDWord)
+        // LOD bias, minimum/maximum LOD, then four border-color channels.
+        // The no-mip clamp-edge profile fixes every one of these to +0.0.
+        appendUnchecked(0)
+        appendUnchecked(0)
+        appendUnchecked(0)
+        appendUnchecked(0)
+        appendUnchecked(0)
+        appendUnchecked(0)
+        appendUnchecked(0)
+        return .encoded(startDWord: start, dwordCount: 10)
+    }
+
+    /// Zero view handles are explicit unbinds for their corresponding slots.
+    mutating func encodeSetSamplerViews(
+        stage: VirGLShaderStage,
+        startSlot: UInt32,
+        viewHandles: UnsafeBufferPointer<UInt32>
+    ) -> VirGLEncodeResult {
+        guard viewHandles.count > 0,
+              viewHandles.count <= VirGLWire.maximumSamplerViewCount,
+              startSlot <= UInt32(
+                  VirGLWire.maximumSamplerViewCount - viewHandles.count
+              )
+        else {
+            return .rejected(.invalidCount)
+        }
+        let payloadCount = 2 + viewHandles.count
+        let reservation = reservePacket(
+            command: .setSamplerViews,
+            objectType: .null,
+            payloadDWordCount: payloadCount
+        )
+        guard case .ready(let start) = reservation else {
+            return Self.rejectionResult(reservation)
+        }
+        appendUnchecked(stage.rawValue)
+        appendUnchecked(startSlot)
+        var index = 0
+        while index < viewHandles.count {
+            appendUnchecked(viewHandles[index])
+            index += 1
+        }
+        return .encoded(startDWord: start, dwordCount: payloadCount + 1)
+    }
+
+    /// Zero state handles are explicit unbinds for their corresponding slots.
+    mutating func encodeBindSamplerStates(
+        stage: VirGLShaderStage,
+        startSlot: UInt32,
+        stateHandles: UnsafeBufferPointer<UInt32>
+    ) -> VirGLEncodeResult {
+        guard stateHandles.count > 0,
+              stateHandles.count <= VirGLWire.maximumSamplerStateCount,
+              startSlot <= UInt32(
+                  VirGLWire.maximumSamplerStateCount - stateHandles.count
+              )
+        else {
+            return .rejected(.invalidCount)
+        }
+        let payloadCount = 2 + stateHandles.count
+        let reservation = reservePacket(
+            command: .bindSamplerStates,
+            objectType: .null,
+            payloadDWordCount: payloadCount
+        )
+        guard case .ready(let start) = reservation else {
+            return Self.rejectionResult(reservation)
+        }
+        appendUnchecked(stage.rawValue)
+        appendUnchecked(startSlot)
+        var index = 0
+        while index < stateHandles.count {
+            appendUnchecked(stateHandles[index])
+            index += 1
+        }
+        return .encoded(startDWord: start, dwordCount: payloadCount + 1)
     }
 
     mutating func encodeSetFramebuffer(
