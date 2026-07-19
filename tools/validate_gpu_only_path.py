@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail the build if the accelerated boot crossing gains a CPU pixel path."""
+"""Reject CPU-rasterized color or scanout work in the accelerated crossing."""
 
 from __future__ import annotations
 
@@ -41,13 +41,26 @@ def main() -> int:
         / "VirtIO"
         / "VirtIOGPU3DSession.swift"
     )
+    compiler_path = (
+        path.parents[1]
+        / "Drivers"
+        / "VirtIO"
+        / "VirGLIRCompiler.swift"
+    )
     if not session_path.is_file():
         print(
             f"gpu-only path: missing accelerated session {session_path}",
             file=sys.stderr,
         )
         return 1
+    if not compiler_path.is_file():
+        print(
+            f"gpu-only path: missing IR compiler {compiler_path}",
+            file=sys.stderr,
+        )
+        return 1
     session = session_path.read_text(encoding="utf-8")
+    compiler = compiler_path.read_text(encoding="utf-8")
     try:
         activation = function_source(source, "activateVirtIOGPU3D")
         accelerated = function_source(source, "runQEMUAcceleratedDesktop")
@@ -62,6 +75,8 @@ def main() -> int:
         "DesktopRenderer",
         "SoftwareRasterizer",
         "SoftwareLayerCompositor",
+        "PSF2GlyphRenderer",
+        ".drawText(",
         "ScanoutBuffer",
         "resourceAttachBacking",
         "transferToHost2D",
@@ -89,6 +104,19 @@ def main() -> int:
         "unitQuadResourceID",
         "roundedVertexShaderHandle",
         "roundedFragmentShaderHandle",
+        "supportsR8UNormSampler",
+        "r8UNorm",
+        "samplerViewBind",
+        "glyphAtlasResourceID",
+        "encodeAndSubmitGlyphAtlas",
+        "GPUMaskFontAtlasWriter.writeUpload",
+        "VirGLIRGlyphPipeline",
+        "GPUBootTextScene.makeFrame",
+        "glyphVertexShaderHandle",
+        "glyphFragmentShaderHandle",
+        "glyphSamplerViewHandle",
+        "glyphNearestSamplerHandle",
+        "glyphLinearSamplerHandle",
         "mutating func render(",
     )
     missing = [token for token in required if token not in combined]
@@ -100,7 +128,28 @@ def main() -> int:
         )
         return 1
 
-    print("gpu-only path: accelerated boot has no CPU pixel dependencies")
+    compiler_required = (
+        "glyphFragmentShaderText",
+        "TEX TEMP[0]",
+        "MUL OUT[0]",
+        "encodeSetSamplerViews",
+        "encodeBindSamplerStates",
+    )
+    missing_compiler = [
+        token for token in compiler_required if token not in compiler
+    ]
+    if missing_compiler:
+        print(
+            "gpu-only path: missing GPU glyph lowering evidence: "
+            + ", ".join(missing_compiler),
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        "gpu-only path: accelerated boot has no CPU-rasterized color "
+        "or scanout dependencies"
+    )
     return 0
 
 

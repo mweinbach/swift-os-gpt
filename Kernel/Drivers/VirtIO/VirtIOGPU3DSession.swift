@@ -1,8 +1,10 @@
 // The complete SwiftOS accelerated rendering crossing for VirtIO-GPU. The
-// guest never allocates or uploads a pixel backing store: VirGL renders the
-// retained desktop into a host-private sRGB target and VirtIO-GPU scans that
-// resource out. Every controlq operation is fenced and completed before
-// dependent state is published.
+// guest never allocates or uploads a scanout pixel backing store: VirGL
+// renders the retained desktop into a host-private sRGB target and VirtIO-GPU
+// scans that resource out. The only uploaded image is an immutable R8 glyph
+// mask atlas; all visible placement, sampling, tinting, blending, and
+// presentation remain GPU work. Every controlq operation is fenced and
+// completed before dependent state is published.
 
 struct VirtIOGPU3DSessionConfiguration: Equatable {
     let scanoutID: UInt32
@@ -11,6 +13,7 @@ struct VirtIOGPU3DSessionConfiguration: Equatable {
     let contextID: UInt32
     let resourceID: UInt32
     let unitQuadResourceID: UInt32
+    let glyphAtlasResourceID: UInt32
     let colorSurfaceHandle: UInt32
     let capabilities: VirGLRendererCapabilities
     let completionFenceID: UInt64
@@ -26,6 +29,8 @@ enum VirtIOGPU3DSessionError: Equatable {
     case commandEncoding(VirGLEncodeRejection)
     case pipelineInitialization(VirGLIRPipelineInitializationRejection)
     case desktopScene(GPUDesktopSceneRejection)
+    case bootTextScene(GPUBootTextSceneRejection)
+    case fontAtlasWrite(GPUMaskFontAtlasWriteResult)
     case renderLowering(VirGLIRLoweringRejection)
     case transport(VirtIOMMIORequestResult)
     case malformedResponse(commandType: UInt32)
@@ -67,9 +72,9 @@ private struct VirtIOGPU3DScanoutMode {
 }
 
 /// Owns one VirGL context, its GPU-only scanout target, immutable unit-quad
-/// geometry, and the reusable retained-renderer pipeline. Copying this value
-/// would duplicate mutable transport and fence state, so callers must keep one
-/// mutable owner after construction.
+/// geometry and glyph atlas, and the reusable retained-renderer pipeline.
+/// Copying this value would duplicate mutable transport and fence state, so
+/// callers must keep one mutable owner after construction.
 struct VirtIOGPU3DSession {
     static let readyMarker: StaticString = "SWIFTOS:VIRTIO_GPU_3D_OK\n"
 
@@ -80,6 +85,7 @@ struct VirtIOGPU3DSession {
     private static let b8g8r8a8SRGB: UInt32 = 100
     private static let r8UNorm: UInt32 = 64
     private static let renderTargetBind: UInt32 = 1 << 1
+    private static let samplerViewBind: UInt32 = 1 << 3
     private static let vertexBufferBind: UInt32 = 1 << 4
     private static let scanoutBind: UInt32 = 1 << 18
     private static let maximumRendererCoordinate: UInt32 = 32_767
@@ -89,6 +95,7 @@ struct VirtIOGPU3DSession {
     private static let contextID: UInt32 = 1
     private static let resourceID: UInt32 = 1
     private static let unitQuadResourceID: UInt32 = 2
+    private static let glyphAtlasResourceID: UInt32 = 3
     private static let colorSurfaceHandle: UInt32 = 0x100
     private static let vertexShaderHandle: UInt32 = 0x101
     private static let fragmentShaderHandle: UInt32 = 0x102
@@ -99,6 +106,11 @@ struct VirtIOGPU3DSession {
     private static let sourceOverBlendHandle: UInt32 = 0x107
     private static let roundedVertexShaderHandle: UInt32 = 0x108
     private static let roundedFragmentShaderHandle: UInt32 = 0x109
+    private static let glyphVertexShaderHandle: UInt32 = 0x10a
+    private static let glyphFragmentShaderHandle: UInt32 = 0x10b
+    private static let glyphSamplerViewHandle: UInt32 = 0x10c
+    private static let glyphNearestSamplerHandle: UInt32 = 0x10d
+    private static let glyphLinearSamplerHandle: UInt32 = 0x10e
 
     private static let minimumCommandArenaByteCount: UInt64 = 4096
     private static let maximumSubmitRequestByteCount: UInt64 =
@@ -187,6 +199,9 @@ struct VirtIOGPU3DSession {
         guard capabilities.supportsB8G8R8A8SRGBScanout else {
             return abort(.capabilityPayload(.unsupportedScanoutFormat))
         }
+        guard capabilities.supportsR8UNormSampler else {
+            return abort(.capabilityPayload(.unsupportedSamplerFormat))
+        }
         if capabilities.hasExplicitTexture2DLimit,
            !capabilities.supportsTexture2D(
                width: scanout.width,
@@ -225,6 +240,22 @@ struct VirtIOGPU3DSession {
                   lastLevel: 0,
                   sampleCount: 0,
                   flags: 0
+              ),
+              let glyphAtlasResource = VirtIOGPU3DResourceDescriptor(
+                  resourceID: Self.glyphAtlasResourceID,
+                  target: Self.texture2DTarget,
+                  format: Self.r8UNorm,
+                  bind: Self.samplerViewBind,
+                  width: GPUMaskFontAtlasLayout.atlasWidth,
+                  height: GPUMaskFontAtlasLayout.atlasHeight,
+                  depth: 1,
+                  arraySize: 1,
+                  lastLevel: 0,
+                  sampleCount: 0,
+                  // VirGL flips inline uploads for Y_0_TOP textures. The
+                  // atlas writer and normalized UVs already agree on row 0,
+                  // so the mask resource must retain native texture rows.
+                  flags: 0
               )
         else {
             return abort(.commandStreamInvariant)
@@ -249,6 +280,14 @@ struct VirtIOGPU3DSession {
               attachResource(
                   resourceID: Self.unitQuadResourceID,
                   features: features
+              ),
+              createResource(
+                  glyphAtlasResource,
+                  features: features
+              ),
+              attachResource(
+                  resourceID: Self.glyphAtlasResourceID,
+                  features: features
               )
         else {
             // Each helper already preserved its exact error in lastError.
@@ -258,6 +297,13 @@ struct VirtIOGPU3DSession {
         }
 
         switch encodeAndSubmitUnitQuad(features: features) {
+        case .success:
+            break
+        case .failure(let error):
+            return abort(error)
+        }
+
+        switch encodeAndSubmitGlyphAtlas(features: features) {
         case .success:
             break
         case .failure(let error):
@@ -311,6 +357,7 @@ struct VirtIOGPU3DSession {
             contextID: Self.contextID,
             resourceID: Self.resourceID,
             unitQuadResourceID: Self.unitQuadResourceID,
+            glyphAtlasResourceID: Self.glyphAtlasResourceID,
             colorSurfaceHandle: Self.colorSurfaceHandle,
             capabilities: capabilities,
             completionFenceID: completionFenceID
@@ -827,15 +874,109 @@ struct VirtIOGPU3DSession {
         return submit(arena: arena, features: features)
     }
 
+    /// Builds and uploads the immutable mask atlas one bounded strip at a
+    /// time. These bytes are font coverage data, never scanout pixels; the
+    /// renderer turns the masks into visible glyphs entirely in VirGL.
+    private mutating func encodeAndSubmitGlyphAtlas(
+        features: VirtIOGPU3DFeatures
+    ) -> OperationResult {
+        guard let staging = UnsafeMutableRawPointer(
+                  bitPattern: UInt(responseMapping.cpuPhysicalAddress)
+              ),
+              responseMapping.byteCount
+                >= UInt64(GPUMaskFontAtlasUploadPlan.maximumUploadByteCount),
+              let blockLayout = VirGLTransferBlockLayout(
+                  blockWidth: 1,
+                  blockHeight: 1,
+                  blockDepth: 1,
+                  bytesPerBlock: 1
+              )
+        else {
+            return .failure(.invalidMemoryLayout)
+        }
+
+        var uploadIndex = 0
+        while uploadIndex < GPUMaskFontAtlasUploadPlan.uploadCount {
+            guard let upload = GPUMaskFontAtlasLayout.uploadPlan.upload(
+                      at: uploadIndex
+                  ),
+                  let box = VirGLTextureBox(
+                      x: upload.destination.x,
+                      y: upload.destination.y,
+                      z: 0,
+                      width: upload.destination.width,
+                      height: upload.destination.height,
+                      depth: 1
+                  ),
+                  var arena = makeCommandArena()
+            else {
+                return .failure(.commandStreamInvariant)
+            }
+            let bytes = UnsafeMutableRawBufferPointer(
+                start: staging,
+                count: upload.byteCount
+            )
+            switch GPUMaskFontAtlasWriter.writeUpload(
+                at: uploadIndex,
+                into: bytes
+            ) {
+            case .written(let byteCount):
+                guard byteCount == upload.byteCount else {
+                    return .failure(.commandStreamInvariant)
+                }
+            case .invalidUploadIndex:
+                return .failure(.fontAtlasWrite(.invalidUploadIndex))
+            case .insufficientCapacity(
+                let requiredByteCount,
+                let availableByteCount
+            ):
+                return .failure(.fontAtlasWrite(.insufficientCapacity(
+                    requiredByteCount: requiredByteCount,
+                    availableByteCount: availableByteCount
+                )))
+            }
+
+            let encodeResult = arena.encodeResourceInlineWrite(
+                resourceHandle: Self.glyphAtlasResourceID,
+                level: 0,
+                usage: Self.inlineWriteUsage,
+                stride: UInt32(upload.sourceBytesPerRow),
+                layerStride: UInt32(upload.byteCount),
+                box: box,
+                blockLayout: blockLayout,
+                bytes: UnsafeRawBufferPointer(bytes)
+            )
+            switch encodeResult {
+            case .encoded(let start, let count):
+                guard start == 0,
+                      count == 768,
+                      arena.dwordCount == 768
+                else {
+                    return .failure(.commandStreamInvariant)
+                }
+            case .rejected(let rejection):
+                return .failure(.commandEncoding(rejection))
+            }
+            switch submit(arena: arena, features: features) {
+            case .success:
+                break
+            case .failure(let error):
+                return .failure(error)
+            }
+            uploadIndex += 1
+        }
+        return .success
+    }
+
     private mutating func encodeAndSubmitDesktopFrame(
         scanout: VirtIOGPU3DScanoutMode,
         capabilities: VirGLRendererCapabilities,
         features: VirtIOGPU3DFeatures
     ) -> VirtIOGPU3DDesktopSubmissionResult {
-        guard var arena = makeCommandArena() else {
+        guard var initializationArena = makeCommandArena() else {
             return .failed(.invalidMemoryLayout)
         }
-        switch arena.encodeCreateSurface(
+        switch initializationArena.encodeCreateSurface(
             handle: Self.colorSurfaceHandle,
             resourceHandle: Self.resourceID,
             format: Self.b8g8r8a8SRGB,
@@ -847,11 +988,24 @@ struct VirtIOGPU3DSession {
             return .failed(.commandEncoding(rejection))
         }
 
-        guard let handles = VirGLIRPipelineHandles(
+        guard let glyphTextureID = GPUTextureID(
+                  rawValue: Self.glyphAtlasResourceID
+              ),
+              let glyphPipeline = VirGLIRGlyphPipeline(
+                  textureID: glyphTextureID,
+                  textureResource: Self.glyphAtlasResourceID,
+                  vertexShader: Self.glyphVertexShaderHandle,
+                  fragmentShader: Self.glyphFragmentShaderHandle,
+                  samplerView: Self.glyphSamplerViewHandle,
+                  nearestSampler: Self.glyphNearestSamplerHandle,
+                  linearSampler: Self.glyphLinearSamplerHandle
+              ),
+              let handles = VirGLIRPipelineHandles(
                   vertexShader: Self.vertexShaderHandle,
                   fragmentShader: Self.fragmentShaderHandle,
                   roundedVertexShader: Self.roundedVertexShaderHandle,
                   roundedFragmentShader: Self.roundedFragmentShaderHandle,
+                  glyph: glyphPipeline,
                   vertexElements: Self.vertexElementsHandle,
                   rasterizer: Self.rasterizerHandle,
                   depthStencilAlpha: Self.depthStencilAlphaHandle,
@@ -875,17 +1029,26 @@ struct VirtIOGPU3DSession {
                 unitQuadVertexLayout: .r32g32Float
             )
         )
-        switch compiler.initializePipeline(into: &arena) {
+        switch compiler.initializePipeline(into: &initializationArena) {
         case .initialized:
             break
         case .rejected(let rejection):
             return .failed(.pipelineInitialization(rejection))
         }
+        switch submit(arena: initializationArena, features: features) {
+        case .success:
+            break
+        case .failure(let error):
+            return .failed(error)
+        }
+
         guard let renderTarget = makeRenderTarget(
                   width: scanout.width,
                   height: scanout.height
               ),
-              let commandID = GPUCommandBufferID(rawValue: 1)
+              let desktopCommandID = GPUCommandBufferID(rawValue: 1),
+              let textCommandID = GPUCommandBufferID(rawValue: 2),
+              var renderArena = makeCommandArena()
         else {
             return .failed(.commandStreamInvariant)
         }
@@ -895,7 +1058,7 @@ struct VirtIOGPU3DSession {
             physicalWidth: scanout.width,
             physicalHeight: scanout.height,
             target: renderTarget.id,
-            commandBufferID: commandID
+            commandBufferID: desktopCommandID
         ) {
         case .frame(let frame):
             commandBuffer = frame.commandBuffer
@@ -906,14 +1069,39 @@ struct VirtIOGPU3DSession {
         switch compiler.lower(
             commandBuffer,
             renderTarget: renderTarget,
-            into: &arena
+            into: &renderArena
         ) {
         case .lowered:
             break
         case .rejected(let rejection):
             return .failed(.renderLowering(rejection))
         }
-        switch submit(arena: arena, features: features) {
+
+        switch GPUBootTextScene.makeFrame(
+            physicalWidth: scanout.width,
+            physicalHeight: scanout.height,
+            atlas: glyphTextureID,
+            target: renderTarget.id,
+            commandBufferID: textCommandID
+        ) {
+        case .frame(let frame):
+            switch compiler.lower(
+                frame.commandBuffer,
+                renderTarget: renderTarget,
+                into: &renderArena
+            ) {
+            case .lowered:
+                break
+            case .rejected(let rejection):
+                return .failed(.renderLowering(rejection))
+            }
+        case .nothingVisible:
+            break
+        case .rejected(let rejection):
+            return .failed(.bootTextScene(rejection))
+        }
+
+        switch submit(arena: renderArena, features: features) {
         case .success:
             renderer = compiler
             return .submitted(presentationDamage: presentationDamage)

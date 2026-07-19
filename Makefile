@@ -474,9 +474,12 @@ host-test:
 		Kernel/Graphics/DisplayViewport.swift \
 		Kernel/Graphics/DamageRegion.swift \
 		Kernel/Graphics/RetainedLayerTree.swift \
+		Kernel/Graphics/BitmapFont.swift \
 		Kernel/Graphics/GPU/GPUPrimitives.swift \
 		Kernel/Graphics/GPU/GPURenderCommands.swift \
 		Kernel/Graphics/GPU/GPUCommandBuffer.swift \
+		Kernel/Graphics/GPU/GPUMaskFontAtlas.swift \
+		Kernel/Graphics/GPU/GPUBootTextScene.swift \
 		Kernel/Graphics/GPU/GPURetainedSceneCompiler.swift \
 		Kernel/Graphics/GPU/GPUDesktopScene.swift \
 		Kernel/Drivers/VirtIO/VirtIOGPU.swift \

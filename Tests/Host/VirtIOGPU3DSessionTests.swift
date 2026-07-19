@@ -126,21 +126,33 @@ struct VirtIOMMIOTransport {
             expectedType = VirtIOGPU3DControlType.contextAttachResource
             expectedByteCount = 32
         case 9:
+            expectedType = VirtIOGPU3DControlType.resourceCreate3D
+            expectedByteCount = 72
+        case 10:
+            expectedType = VirtIOGPU3DControlType.contextAttachResource
+            expectedByteCount = 32
+        case 11:
             expectedType = VirtIOGPU3DControlType.submit3D
             expectedByteCount = 128
-        case 10:
+        case 12, 13:
             expectedType = VirtIOGPU3DControlType.submit3D
-            expectedByteCount = nil
-        case 11:
+            expectedByteCount = 3_104
+        case 14:
+            expectedType = VirtIOGPU3DControlType.submit3D
+            expectedByteCount = 3_052
+        case 15:
+            expectedType = VirtIOGPU3DControlType.submit3D
+            expectedByteCount = 2_252
+        case 16:
             expectedType = VirtIOGPUControlType.setScanout
             expectedByteCount = 48
-        case 12:
+        case 17:
             expectedType = VirtIOGPUControlType.resourceFlush
             expectedByteCount = 48
-        case 13:
+        case 18:
             expectedType = VirtIOGPU3DControlType.submit3D
-            expectedByteCount = nil
-        case 14:
+            expectedByteCount = 132
+        case 19:
             expectedType = VirtIOGPUControlType.resourceFlush
             expectedByteCount = 48
         default:
@@ -205,26 +217,59 @@ struct VirtIOMMIOTransport {
             return PhysicalBytes.readLE32(at: address + 16) == 1
                 && PhysicalBytes.readLE32(at: address + 24) == 2
         case 9:
-            return unitQuadUploadIsValid(at: address)
+            return PhysicalBytes.readLE32(at: address + 16) == 0
+                && PhysicalBytes.readLE32(at: address + 24) == 3
+                && PhysicalBytes.readLE32(at: address + 28) == 2
+                && PhysicalBytes.readLE32(at: address + 32) == 64
+                && PhysicalBytes.readLE32(at: address + 36) == 0x8
+                && PhysicalBytes.readLE32(at: address + 40) == 112
+                && PhysicalBytes.readLE32(at: address + 44) == 54
+                && PhysicalBytes.readLE32(at: address + 48) == 1
+                && PhysicalBytes.readLE32(at: address + 52) == 1
+                && PhysicalBytes.readLE32(at: address + 56) == 0
+                && PhysicalBytes.readLE32(at: address + 60) == 0
+                && PhysicalBytes.readLE32(at: address + 64) == 0
         case 10:
+            return PhysicalBytes.readLE32(at: address + 16) == 1
+                && PhysicalBytes.readLE32(at: address + 24) == 3
+        case 11:
+            return unitQuadUploadIsValid(at: address)
+        case 12:
+            return glyphAtlasUploadIsValid(
+                at: address,
+                requestByteCount: byteCount,
+                uploadIndex: 0
+            )
+        case 13:
+            return glyphAtlasUploadIsValid(
+                at: address,
+                requestByteCount: byteCount,
+                uploadIndex: 1
+            )
+        case 14:
+            return pipelineInitializationCommandStreamIsValid(
+                at: address,
+                requestByteCount: byteCount
+            )
+        case 15:
             return initialRenderCommandStreamIsValid(
                 at: address,
                 requestByteCount: byteCount
             )
-        case 11:
+        case 16:
             return rectangleIsFullDisplay(at: address + 24)
                 && PhysicalBytes.readLE32(at: address + 40) == 0
                 && PhysicalBytes.readLE32(at: address + 44) == 1
-        case 12:
+        case 17:
             return rectangleIsFullDisplay(at: address + 24)
                 && PhysicalBytes.readLE32(at: address + 40) == 1
                 && PhysicalBytes.readLE32(at: address + 44) == 0
-        case 13:
+        case 18:
             return subsequentRenderCommandStreamIsValid(
                 at: address,
                 requestByteCount: byteCount
             )
-        case 14:
+        case 19:
             return rectangleIsFullDisplay(at: address + 24)
                 && PhysicalBytes.readLE32(at: address + 40) == 1
                 && PhysicalBytes.readLE32(at: address + 44) == 0
@@ -262,14 +307,76 @@ struct VirtIOMMIOTransport {
         return true
     }
 
-    private func initialRenderCommandStreamIsValid(
+    private func glyphAtlasUploadIsValid(
+        at address: UInt64,
+        requestByteCount: UInt32,
+        uploadIndex: Int
+    ) -> Bool {
+        guard uploadIndex == 0 || uploadIndex == 1,
+              requestByteCount == 3_104,
+              PhysicalBytes.readLE32(at: address + 16) == 1,
+              PhysicalBytes.readLE32(at: address + 24) == 3_072
+        else {
+            return false
+        }
+
+        let stream = address + 32
+        let expectedY: UInt32 = uploadIndex == 0 ? 0 : 27
+        guard PhysicalBytes.readLE32(at: stream) == 0x02ff_0009,
+              PhysicalBytes.readLE32(at: stream + 4) == 3,
+              PhysicalBytes.readLE32(at: stream + 8) == 0,
+              PhysicalBytes.readLE32(at: stream + 12) == 0x82,
+              PhysicalBytes.readLE32(at: stream + 16) == 112,
+              PhysicalBytes.readLE32(at: stream + 20) == 3_024,
+              PhysicalBytes.readLE32(at: stream + 24) == 0,
+              PhysicalBytes.readLE32(at: stream + 28) == expectedY,
+              PhysicalBytes.readLE32(at: stream + 32) == 0,
+              PhysicalBytes.readLE32(at: stream + 36) == 112,
+              PhysicalBytes.readLE32(at: stream + 40) == 27,
+              PhysicalBytes.readLE32(at: stream + 44) == 1
+        else {
+            return false
+        }
+
+        let data = stream + 48
+        if uploadIndex == 0 {
+            // Capital A, atlas row 19, columns 8...12.
+            return bytesMatch(
+                [0, 255, 255, 255, 0],
+                at: data + 2_136
+            )
+        }
+
+        // Lowercase a in local row 10 and the replacement glyph in row 19
+        // prove that the second strip was generated rather than repeated.
+        return bytesMatch(
+            [0, 255, 255, 255, 0],
+            at: data + 1_128
+        ) && bytesMatch(
+            [255, 255, 255, 255, 255],
+            at: data + 2_234
+        )
+    }
+
+    private func bytesMatch(_ expected: [UInt8], at address: UInt64) -> Bool {
+        var index = 0
+        while index < expected.count {
+            if PhysicalBytes.read8(at: address + UInt64(index))
+                != expected[index] {
+                return false
+            }
+            index += 1
+        }
+        return true
+    }
+
+    private func pipelineInitializationCommandStreamIsValid(
         at address: UInt64,
         requestByteCount: UInt32
     ) -> Bool {
         guard PhysicalBytes.readLE32(at: address + 16) == 1,
-              requestByteCount > 32,
-              PhysicalBytes.readLE32(at: address + 24)
-                == requestByteCount - 32
+              requestByteCount == 3_052,
+              PhysicalBytes.readLE32(at: address + 24) == 3_020
         else {
             return false
         }
@@ -278,15 +385,10 @@ struct VirtIOMMIOTransport {
         var offset: UInt32 = 0
         var surfaceCount = 0
         var shaderCreateMask: UInt8 = 0
-        var shaderBindMask: UInt8 = 0
-        var framebufferCount = 0
-        var clearCount = 0
-        var scissorCount = 0
-        var sawFullScissor = false
-        var sawLogicalScissor = false
-        var vertexBufferCount = 0
-        var drawCount = 0
-        var inlineWriteCount = 0
+        var shaderCreateCount = 0
+        var samplerViewCount = 0
+        var samplerStateMask: UInt8 = 0
+        var samplerStateCount = 0
         var packetCount = 0
         while offset < commandByteCount {
             let packet = stream + UInt64(offset)
@@ -311,6 +413,7 @@ struct VirtIOMMIOTransport {
                     return false
                 }
             case 1 where objectType == 4:
+                shaderCreateCount += 1
                 let handle = PhysicalBytes.readLE32(at: packet + 4)
                 let stage = PhysicalBytes.readLE32(at: packet + 8)
                 switch (handle, stage) {
@@ -318,8 +421,88 @@ struct VirtIOMMIOTransport {
                 case (0x102, 1): shaderCreateMask |= 1 << 1
                 case (0x108, 0): shaderCreateMask |= 1 << 2
                 case (0x109, 1): shaderCreateMask |= 1 << 3
+                case (0x10a, 0): shaderCreateMask |= 1 << 4
+                case (0x10b, 1): shaderCreateMask |= 1 << 5
                 default: return false
                 }
+            case 1 where objectType == 6:
+                samplerViewCount += 1
+                guard PhysicalBytes.readLE32(at: packet + 4) == 0x10c,
+                      PhysicalBytes.readLE32(at: packet + 8) == 3,
+                      PhysicalBytes.readLE32(at: packet + 12) == 64,
+                      PhysicalBytes.readLE32(at: packet + 16) == 0,
+                      PhysicalBytes.readLE32(at: packet + 20) == 0,
+                      PhysicalBytes.readLE32(at: packet + 24) == 0
+                else {
+                    return false
+                }
+            case 1 where objectType == 7:
+                samplerStateCount += 1
+                let handle = PhysicalBytes.readLE32(at: packet + 4)
+                let packedState = PhysicalBytes.readLE32(at: packet + 8)
+                switch (handle, packedState) {
+                case (0x10d, 0x1092): samplerStateMask |= 1 << 0
+                case (0x10e, 0x3292): samplerStateMask |= 1 << 1
+                default: return false
+                }
+            case 1:
+                break
+            default:
+                return false
+            }
+            offset += packetByteCount
+        }
+        return offset == commandByteCount
+            && packetCount == 15
+            && surfaceCount == 1
+            && shaderCreateCount == 6
+            && shaderCreateMask == 0x3f
+            && samplerViewCount == 1
+            && samplerStateCount == 2
+            && samplerStateMask == 0x3
+    }
+
+    private func initialRenderCommandStreamIsValid(
+        at address: UInt64,
+        requestByteCount: UInt32
+    ) -> Bool {
+        guard PhysicalBytes.readLE32(at: address + 16) == 1,
+              requestByteCount == 2_252,
+              PhysicalBytes.readLE32(at: address + 24) == 2_220
+        else {
+            return false
+        }
+        let stream = address + 32
+        let commandByteCount = requestByteCount - 32
+        var offset: UInt32 = 0
+        var shaderBindMask: UInt8 = 0
+        var shaderBindCount = 0
+        var framebufferCount = 0
+        var clearCount = 0
+        var scissorCount = 0
+        var sawFullScissor = false
+        var sawLogicalScissor = false
+        var sawTextScissor = false
+        var vertexBufferCount = 0
+        var drawCount = 0
+        var samplerViewBindCount = 0
+        var samplerStateBindCount = 0
+        var packetCount = 0
+        while offset < commandByteCount {
+            let packet = stream + UInt64(offset)
+            let header = PhysicalBytes.readLE32(at: packet)
+            let payloadDWords = header >> 16
+            let packetByteCount = (payloadDWords + 1) * 4
+            guard packetByteCount > 4,
+                  packetByteCount <= commandByteCount - offset
+            else {
+                return false
+            }
+            let command = UInt8(truncatingIfNeeded: header)
+            packetCount += 1
+            switch command {
+            case 1, 9:
+                return false
             case 5:
                 framebufferCount += 1
             case 6:
@@ -339,8 +522,14 @@ struct VirtIOMMIOTransport {
                 else {
                     return false
                 }
-            case 9:
-                inlineWriteCount += 1
+            case 10:
+                samplerViewBindCount += 1
+                guard PhysicalBytes.readLE32(at: packet + 4) == 1,
+                      PhysicalBytes.readLE32(at: packet + 8) == 0,
+                      PhysicalBytes.readLE32(at: packet + 12) == 0x10c
+                else {
+                    return false
+                }
             case 15:
                 scissorCount += 1
                 let minimum = PhysicalBytes.readLE32(at: packet + 8)
@@ -354,7 +543,21 @@ struct VirtIOMMIOTransport {
                             == UInt32(560) | (UInt32(240) << 16)
                         && maximum
                             == UInt32(1_360) | (UInt32(840) << 16))
+                sawTextScissor = sawTextScissor
+                    || (minimum
+                            == UInt32(560) | (UInt32(796) << 16)
+                        && maximum
+                            == UInt32(1_360) | (UInt32(840) << 16))
+            case 18:
+                samplerStateBindCount += 1
+                guard PhysicalBytes.readLE32(at: packet + 4) == 1,
+                      PhysicalBytes.readLE32(at: packet + 8) == 0,
+                      PhysicalBytes.readLE32(at: packet + 12) == 0x10d
+                else {
+                    return false
+                }
             case 31:
+                shaderBindCount += 1
                 let handle = PhysicalBytes.readLE32(at: packet + 4)
                 let stage = PhysicalBytes.readLE32(at: packet + 8)
                 switch (handle, stage) {
@@ -362,6 +565,8 @@ struct VirtIOMMIOTransport {
                 case (0x102, 1): shaderBindMask |= 1 << 1
                 case (0x108, 0): shaderBindMask |= 1 << 2
                 case (0x109, 1): shaderBindMask |= 1 << 3
+                case (0x10a, 0): shaderBindMask |= 1 << 4
+                case (0x10b, 1): shaderBindMask |= 1 << 5
                 default: return false
                 }
             default:
@@ -370,18 +575,19 @@ struct VirtIOMMIOTransport {
             offset += packetByteCount
         }
         return offset == commandByteCount
-            && packetCount == 38
-            && surfaceCount == 1
-            && shaderCreateMask == 0xf
-            && shaderBindMask == 0xf
-            && framebufferCount == 1
+            && packetCount == 55
+            && shaderBindCount == 6
+            && shaderBindMask == 0x3f
+            && framebufferCount == 2
             && clearCount == 1
-            && scissorCount == 2
+            && scissorCount == 4
             && sawFullScissor
             && sawLogicalScissor
-            && vertexBufferCount == 1
-            && drawCount == 5
-            && inlineWriteCount == 0
+            && sawTextScissor
+            && vertexBufferCount == 2
+            && drawCount == 12
+            && samplerViewBindCount == 1
+            && samplerStateBindCount == 1
     }
 
     private func subsequentRenderCommandStreamIsValid(
@@ -478,6 +684,7 @@ struct VirtIOMMIOTransport {
 
     private func writeValidVirGL2Capabilities(at address: UInt64) {
         PhysicalBytes.writeLE32(2, at: address)
+        PhysicalBytes.writeLE32(1, at: address + 3 * 4)
         PhysicalBytes.writeLE32(1 << 2, at: address + 17 * 4)
         PhysicalBytes.writeLE32(1 << 4, at: address + 20 * 4)
         PhysicalBytes.writeLE32(120, at: address + 66 * 4)
@@ -523,6 +730,7 @@ struct VirtIOGPU3DSessionTests {
                 configured.contextID == 1
                     && configured.resourceID == 1
                     && configured.unitQuadResourceID == 2
+                    && configured.glyphAtlasResourceID == 3
                     && configured.colorSurfaceHandle == 0x100,
                 "nonzero object identifiers were not preserved"
             )
@@ -531,8 +739,8 @@ struct VirtIOGPU3DSessionTests {
                 "VIRGL2 capset was not selected"
             )
             expect(
-                configured.completionFenceID == 13,
-                "dependent operation did not complete on the thirteenth fence"
+                configured.completionFenceID == 18,
+                "dependent operation did not complete on the eighteenth fence"
             )
             expect(session.isConfigured, "configured state was not published")
             expect(
@@ -581,7 +789,7 @@ struct VirtIOGPU3DSessionTests {
                 request: request,
                 response: response,
                 queue: queue,
-                behavior: .timeoutAt(step: 9)
+                behavior: .timeoutAt(step: 11)
             )
             expect(
                 session.configureAndRenderDesktop()
@@ -599,7 +807,7 @@ struct VirtIOGPU3DSessionTests {
                 request: request,
                 response: response,
                 queue: queue,
-                behavior: .wrongFenceAt(step: 12)
+                behavior: .wrongFenceAt(step: 17)
             )
             expect(
                 session.configureAndRenderDesktop()
@@ -666,7 +874,7 @@ struct VirtIOGPU3DSessionTests {
             }
             expect(
                 session.render(frame)
-                    == .presented(completionFenceID: 15),
+                    == .presented(completionFenceID: 20),
                 "reusable GPU frame was not submitted and flushed"
             )
             expect(session.isConfigured, "successful frame invalidated session")
@@ -714,7 +922,7 @@ struct VirtIOGPU3DSessionTests {
             alignment: 4_096
         )
         let response = UnsafeMutableRawPointer.allocate(
-            byteCount: 8_192,
+            byteCount: 4_096,
             alignment: 4_096
         )
         let queue = UnsafeMutableRawPointer.allocate(
@@ -729,7 +937,7 @@ struct VirtIOGPU3DSessionTests {
         }
         guard let commandMapping = mapping(for: command, byteCount: 4_096),
               let requestMapping = mapping(for: request, byteCount: 4_096),
-              let responseMapping = mapping(for: response, byteCount: 8_192),
+              let responseMapping = mapping(for: response, byteCount: 4_096),
               let queueMapping = mapping(for: queue, byteCount: 4_096)
         else {
             fatalError("test DMA mapping was rejected")
