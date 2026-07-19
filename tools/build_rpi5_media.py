@@ -519,8 +519,8 @@ def build_image(
     boot_sectors: int,
     log_blocks: int,
 ) -> dict[str, object]:
-    if output.exists():
-        mode = output.stat().st_mode
+    if os.path.lexists(output):
+        mode = output.lstat().st_mode
         if not stat.S_ISREG(mode):
             raise MediaError("output must be a new regular file, never a device")
         raise MediaError(f"output already exists: {output}")
@@ -536,8 +536,10 @@ def build_image(
     files = package_files(package)
 
     output.parent.mkdir(parents=True, exist_ok=True)
+    created_output = False
     try:
         with output.open("xb") as image:
+            created_output = True
             image.truncate(total_sectors * SECTOR_SIZE)
             mbr = bytearray(SECTOR_SIZE)
             struct.pack_into("<I", mbr, 440, 0x5357_4F53)
@@ -573,10 +575,11 @@ def build_image(
             image.flush()
             os.fsync(image.fileno())
     except Exception:
-        try:
-            output.unlink()
-        except FileNotFoundError:
-            pass
+        if created_output:
+            try:
+                output.unlink()
+            except FileNotFoundError:
+                pass
         raise
 
     return {
@@ -759,6 +762,8 @@ class FAT32Reader:
         actual_ordinals = [entry[0] & 0x1F for entry in entries]
         if actual_ordinals != expected_ordinals:
             raise MediaError("FAT32 long-name ordinals are malformed")
+        if any(entry[12] != 0 or entry[26:28] != b"\0\0" for entry in entries):
+            raise MediaError("FAT32 long-name reserved fields are invalid")
         checksum = FAT32Volume._lfn_checksum(short_name)
         if any(entry[13] != checksum for entry in entries):
             raise MediaError("FAT32 long-name checksum is invalid")

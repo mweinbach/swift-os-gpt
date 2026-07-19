@@ -209,6 +209,19 @@ def main() -> int:
         )
         require(overwrite.returncode != 0, "builder overwrote an existing image")
 
+        dangling = root / "dangling.img"
+        dangling.symlink_to(root / "missing-target.img")
+        dangling_result = run(
+            sys.executable,
+            str(MEDIA_TOOL),
+            "build",
+            str(package),
+            str(dangling),
+        )
+        require(dangling_result.returncode != 0,
+                "builder accepted a dangling output symlink")
+        require(dangling.is_symlink(), "builder removed a rejected output symlink")
+
         # A self-looping root chain is bounded and rejected.
         _, boot, _ = read_mbr(second)
         with second.open("r+b") as target:
