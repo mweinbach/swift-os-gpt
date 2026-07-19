@@ -15,8 +15,10 @@ RPI5_BOOT_OBJECT := $(RPI5_BUILD_DIR)/boot.o
 RPI5_HEADER_OBJECT := $(RPI5_BUILD_DIR)/image-header.o
 RPI5_KERNEL_ELF := $(RPI5_BUILD_DIR)/swiftos-rpi5.elf
 RPI5_KERNEL_IMAGE := $(RPI5_BUILD_DIR)/kernel8.img
+USB_DISPLAY_VIEWER := $(BUILD_DIR)/swiftos-usb-display
 
 SWIFTC ?= swiftc
+MACOS_SWIFTC ?= xcrun swiftc
 CLANG ?= clang
 LD_LLD ?= ld.lld
 LLVM_OBJCOPY ?= llvm-objcopy
@@ -51,7 +53,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test usb-display-viewer userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -210,7 +212,30 @@ usb-debug-display-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/dwc2-usb-debug-gadget-host-tests
 	$(BUILD_DIR)/dwc2-usb-debug-gadget-host-tests
 
-host-test: usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test
+usb-display-viewer-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Drivers/USB/USBDebugDisplayProtocol.swift \
+		tools/USBDisplay/USBDisplayHostCore.swift \
+		Tests/Host/USBDisplayHostTests.swift \
+		-o $(BUILD_DIR)/usb-display-viewer-host-tests
+	$(BUILD_DIR)/usb-display-viewer-host-tests
+
+$(USB_DISPLAY_VIEWER): \
+		Kernel/Drivers/USB/USBDebugDisplayProtocol.swift \
+		tools/USBDisplay/USBDisplayHostCore.swift \
+		tools/USBDisplay/USBSerialTransport.swift \
+		tools/USBDisplay/USBDisplayViewer.swift | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/usb-display-module-cache
+	$(MACOS_SWIFTC) -parse-as-library -whole-module-optimization \
+		-swift-version 5 -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/usb-display-module-cache \
+		-framework AppKit $^ -o $@
+
+usb-display-viewer: $(USB_DISPLAY_VIEWER)
+
+host-test: usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
