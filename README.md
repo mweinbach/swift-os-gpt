@@ -196,6 +196,13 @@ SwiftOS's `1209:5a17` identity and associate the exact CDC tty; `--json` makes
 the same state available to scripts and agents without scraping System
 Profiler output.
 
+The guest-side control foundation is transport-neutral. `SDBG` frames carry a
+full 128-bit boot-session identity, 64-bit request identity, bounded payload,
+and CRC-32 over USB CDC today and future serial or network adapters. A fixed,
+caller-owned kernel log ring and board-neutral status snapshot preserve the
+evidence that those transports expose without importing host APIs or allocating
+inside the kernel.
+
 The same CDC stream accepts bounded `SUPD` kernel updates. Build the uploader
 with `make usb-update`, validate with `--dry-run`, close the display viewer so
 only one process owns the tty, then pass the explicit `/dev/cu.usbmodem*` path.
