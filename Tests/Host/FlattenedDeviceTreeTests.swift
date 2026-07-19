@@ -2,6 +2,7 @@
 struct FlattenedDeviceTreeTests {
     static func main() {
         findsNestedResourcesAndCompatibleListEntries()
+        translatesChainedPCIRangesAndRejectsMalformedMappings()
         readsPlatformMemoryCPUAndRegisterIndexes()
         readsFirmwareSimpleFramebufferProperties()
         discoversEnabledPi5GraphicsResources()
@@ -9,7 +10,44 @@ struct FlattenedDeviceTreeTests {
         discoversPi5PeripheralUSBController()
         rejectsUnavailablePi5USBController()
         rejectsBadMagicAndTruncatedStructure()
-        print("FDT host tests: 8 passed")
+        print("FDT host tests: 9 passed")
+    }
+
+    private static func translatesChainedPCIRangesAndRejectsMalformedMappings() {
+        let bytes = makeRaspberryPiPCITranslationDeviceTree()
+        bytes.withUnsafeBytes { storage in
+            let tree = FlattenedDeviceTree(
+                address: UInt64(UInt(bitPattern: storage.baseAddress!))
+            )!
+            expect(
+                tree.resource(compatibleWith: "raspberrypi,rp1-gem")
+                    == DeviceResource(
+                        baseAddress: 0x1f_0010_0000,
+                        length: 0x4000
+                    ),
+                "RP1 GEM did not traverse all AXI, PCI, and RP1 ranges"
+            )
+        }
+
+        for malformed in [
+            makeRaspberryPiPCITranslationDeviceTree(
+                truncateRP1Ranges: true
+            ),
+            makeRaspberryPiPCITranslationDeviceTree(
+                rp1ParentSelector: 0x4300_0000
+            ),
+        ] {
+            malformed.withUnsafeBytes { storage in
+                let tree = FlattenedDeviceTree(
+                    address: UInt64(UInt(bitPattern: storage.baseAddress!))
+                )!
+                expect(
+                    tree.resource(compatibleWith: "raspberrypi,rp1-gem")
+                        == nil,
+                    "malformed PCI translation fell back to an ancestor"
+                )
+            }
+        }
     }
 
     private static func discoversPi5PeripheralUSBController() {
@@ -364,6 +402,134 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() {
         fatalError(message)
     }
+}
+
+private func makeRaspberryPiPCITranslationDeviceTree(
+    truncateRP1Ranges: Bool = false,
+    rp1ParentSelector: UInt32 = 0x0200_0000
+) -> [UInt8] {
+    let names = ["#address-cells", "#size-cells", "compatible", "ranges", "reg"]
+    var strings: [UInt8] = []
+    var offsets: [String: UInt32] = [:]
+    for name in names {
+        offsets[name] = UInt32(strings.count)
+        strings.append(contentsOf: name.utf8)
+        strings.append(0)
+    }
+
+    var structure: [UInt8] = []
+    appendBeginNode("", to: &structure)
+    appendProperty(
+        nameOffset: offsets["#address-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#size-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+
+    // The desired address is deliberately in the second AXI range. A parser
+    // that consumes only the first tuple cannot reach the RP1 aperture.
+    appendBeginNode("axi", to: &structure)
+    appendProperty(
+        nameOffset: offsets["#address-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#size-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["ranges"]!,
+        value: be64(0) + be64(0) + be64(0x1000)
+            + be64(0x1c_0000_0000) + be64(0x1c_0000_0000)
+            + be64(0x4_0000_0000),
+        to: &structure
+    )
+
+    appendBeginNode("pcie@1000120000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["#address-cells"]!,
+        value: be32(3),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#size-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["ranges"]!,
+        value: be32(0x0200_0000) + be64(0)
+            + be64(0x1f_0000_0000) + be64(0xffff_fffc),
+        to: &structure
+    )
+
+    appendBeginNode("rp1", to: &structure)
+    appendProperty(
+        nameOffset: offsets["#address-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#size-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    var rp1Ranges = be64(0xc0_4000_0000)
+        + be32(rp1ParentSelector) + be64(0) + be64(0x41_0000)
+    if truncateRP1Ranges {
+        rp1Ranges.removeLast(4)
+    }
+    appendProperty(
+        nameOffset: offsets["ranges"]!,
+        value: rp1Ranges,
+        to: &structure
+    )
+
+    appendBeginNode("ethernet@100000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("raspberrypi,rp1-gem".utf8) + [0]
+            + Array("cdns,macb".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be64(0xc0_4010_0000) + be64(0x4000),
+        to: &structure
+    )
+
+    appendBE32(2, to: &structure) // ethernet
+    appendBE32(2, to: &structure) // rp1
+    appendBE32(2, to: &structure) // pcie
+    appendBE32(2, to: &structure) // axi
+    appendBE32(2, to: &structure) // root
+    appendBE32(9, to: &structure)
+
+    let headerSize = 40
+    let reservation = Array(repeating: UInt8(0), count: 16)
+    let structureOffset = headerSize + reservation.count
+    let stringsOffset = structureOffset + structure.count
+    let totalSize = stringsOffset + strings.count
+
+    var header: [UInt8] = []
+    appendBE32(0xd00d_feed, to: &header)
+    appendBE32(UInt32(totalSize), to: &header)
+    appendBE32(UInt32(structureOffset), to: &header)
+    appendBE32(UInt32(stringsOffset), to: &header)
+    appendBE32(UInt32(headerSize), to: &header)
+    appendBE32(17, to: &header)
+    appendBE32(16, to: &header)
+    appendBE32(0, to: &header)
+    appendBE32(UInt32(strings.count), to: &header)
+    appendBE32(UInt32(structure.count), to: &header)
+
+    return header + reservation + structure + strings
 }
 
 private func makeDeviceTree() -> [UInt8] {

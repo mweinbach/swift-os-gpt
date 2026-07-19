@@ -99,6 +99,14 @@ public func validateRaspberryPi5DeviceTree(
     guard platform.firmwareMailbox == expectedMailbox else {
         return 15
     }
+    guard tree.resource(
+        compatibleWith: "raspberrypi,rp1-gem"
+    ) == DeviceResource(
+        baseAddress: 0x1f_0010_0000,
+        length: 0x4000
+    ) else {
+        return 16
+    }
     return 0
 }
 

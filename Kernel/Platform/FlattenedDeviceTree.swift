@@ -37,30 +37,81 @@ private struct DeviceTreeSearchResult {
     let framebufferFormat: SimpleFramebufferFormat?
 }
 
-private struct AddressTranslation {
-    let childBase: UInt64
-    let rootBase: UInt64
-    let length: UInt64
-    let active: Bool
+/// One address in a Device Tree bus address space. Two-cell buses use only
+/// `value`. A three-cell bus keeps the leading cell as an opaque selector and
+/// the remaining 64 bits as the address. This covers PCI `phys.hi` ranges
+/// without pretending that an arbitrary 96-bit address fits in UInt64.
+private struct DeviceTreeBusAddress {
+    let selector: UInt32
+    let value: UInt64
+}
 
-    static let identity = AddressTranslation(
-        childBase: 0,
-        rootBase: 0,
-        length: UInt64.max,
-        active: false
-    )
+/// A raw `ranges` level retained by offset into the immutable FDT blob. Keeping
+/// the tuples in firmware-owned storage avoids heap allocation and lets lookup
+/// examine every range instead of silently accepting only the first tuple.
+private struct AddressTranslationLevel {
+    let offset: UInt
+    let length: UInt
+    let childAddressCells: UInt32
+    let parentAddressCells: UInt32
+    let sizeCells: UInt32
+}
 
-    func translate(address: UInt64, length resourceLength: UInt64) -> UInt64? {
-        guard active else { return address }
-        guard address >= childBase else { return nil }
-        let offset = address - childBase
-        guard offset <= length,
-              resourceLength <= length - offset,
-              rootBase <= UInt64.max - offset
-        else {
-            return nil
+/// Bounded root-to-leaf translation path. Eight independently described bus
+/// levels are sufficient for the supported QEMU and Pi trees; deeper or
+/// malformed paths fail closed instead of falling back to an ancestor mapping.
+private struct AddressTranslationPath {
+    static let maximumLevelCount = 8
+
+    private var level0: AddressTranslationLevel?
+    private var level1: AddressTranslationLevel?
+    private var level2: AddressTranslationLevel?
+    private var level3: AddressTranslationLevel?
+    private var level4: AddressTranslationLevel?
+    private var level5: AddressTranslationLevel?
+    private var level6: AddressTranslationLevel?
+    private var level7: AddressTranslationLevel?
+
+    private(set) var levelCount = 0
+    private(set) var isValid = true
+
+    static let identity = AddressTranslationPath()
+
+    mutating func append(_ level: AddressTranslationLevel) -> Bool {
+        guard isValid, levelCount < Self.maximumLevelCount else {
+            isValid = false
+            return false
         }
-        return rootBase + offset
+        switch levelCount {
+        case 0: level0 = level
+        case 1: level1 = level
+        case 2: level2 = level
+        case 3: level3 = level
+        case 4: level4 = level
+        case 5: level5 = level
+        case 6: level6 = level
+        default: level7 = level
+        }
+        levelCount += 1
+        return true
+    }
+
+    mutating func invalidate() {
+        isValid = false
+    }
+
+    func level(at index: Int) -> AddressTranslationLevel? {
+        guard isValid, index >= 0, index < levelCount else { return nil }
+        switch index {
+        case 0: return level0
+        case 1: return level1
+        case 2: return level2
+        case 3: return level3
+        case 4: return level4
+        case 5: return level5
+        case 6: return level6
+        default: return level7
+        }
     }
 }
 
@@ -337,7 +388,7 @@ struct FlattenedDeviceTree {
                 cursor: &cursor,
                 inheritedAddressCells: 2,
                 inheritedSizeCells: 1,
-                parentTranslation: .identity,
+                translationPath: .identity,
                 insideReservedMemory: false,
                 compatibility: compatibility,
                 deviceType: deviceType,
@@ -355,7 +406,7 @@ struct FlattenedDeviceTree {
         cursor: inout UInt,
         inheritedAddressCells: UInt32,
         inheritedSizeCells: UInt32,
-        parentTranslation: AddressTranslation,
+        translationPath: AddressTranslationPath,
         insideReservedMemory: Bool,
         compatibility: StaticString?,
         deviceType: StaticString?,
@@ -403,24 +454,25 @@ struct FlattenedDeviceTree {
             switch token {
             case Self.beginNode:
                 cursor -= 4
-                let childTranslation: AddressTranslation
-                if let rangesOffset {
-                    childTranslation = decodeTranslation(
+                var childTranslationPath = translationPath
+                if let rangesOffset, rangesLength != 0 {
+                    if let level = addressTranslationLevel(
                         at: rangesOffset,
                         length: rangesLength,
                         childAddressCells: childAddressCells,
                         parentAddressCells: inheritedAddressCells,
-                        sizeCells: childSizeCells,
-                        parentTranslation: parentTranslation
-                    ) ?? parentTranslation
-                } else {
-                    childTranslation = parentTranslation
+                        sizeCells: childSizeCells
+                    ) {
+                        _ = childTranslationPath.append(level)
+                    } else {
+                        childTranslationPath.invalidate()
+                    }
                 }
                 if let found = scanNode(
                     cursor: &cursor,
                     inheritedAddressCells: childAddressCells,
                     inheritedSizeCells: childSizeCells,
-                    parentTranslation: childTranslation,
+                    translationPath: childTranslationPath,
                     insideReservedMemory: insideReservedMemory
                         || nodeIntroducesReservedMemory,
                     compatibility: compatibility,
@@ -500,7 +552,7 @@ struct FlattenedDeviceTree {
                         addressCells: inheritedAddressCells,
                         sizeCells: inheritedSizeCells,
                         registerIndex: registerIndex,
-                        translation: parentTranslation
+                        translationPath: translationPath
                     )
                 } else if propertyName(at: UInt(nameOffset), equals: "ranges") {
                     // Property order is not semantic in DT. Decode only when a
@@ -600,9 +652,9 @@ struct FlattenedDeviceTree {
         addressCells: UInt32,
         sizeCells: UInt32,
         registerIndex: Int,
-        translation: AddressTranslation
+        translationPath: AddressTranslationPath
     ) -> DeviceResource? {
-        guard addressCells <= 2,
+        guard addressCells <= 3,
               sizeCells <= 2
         else {
             return nil
@@ -615,7 +667,7 @@ struct FlattenedDeviceTree {
               let entryOffset = UInt(exactly: registerIndex * Int(entryByteCount)),
               entryOffset <= length,
               entryByteCount <= length - entryOffset,
-              let baseAddress = readCells(
+              let busAddress = readBusAddress(
                   at: offset + entryOffset,
                   count: addressCells
               ),
@@ -623,9 +675,10 @@ struct FlattenedDeviceTree {
                   at: offset + entryOffset + addressByteCount,
                   count: sizeCells
               ),
-              let translatedAddress = translation.translate(
-                  address: baseAddress,
-                  length: resourceLength
+              let translatedAddress = translateToRoot(
+                  busAddress,
+                  resourceLength: resourceLength,
+                  through: translationPath
               )
         else {
             return nil
@@ -636,17 +689,16 @@ struct FlattenedDeviceTree {
         )
     }
 
-    private func decodeTranslation(
+    private func addressTranslationLevel(
         at offset: UInt,
         length: UInt,
         childAddressCells: UInt32,
         parentAddressCells: UInt32,
-        sizeCells: UInt32,
-        parentTranslation: AddressTranslation
-    ) -> AddressTranslation? {
-        if length == 0 { return parentTranslation }
-        guard childAddressCells <= 2,
-              parentAddressCells <= 2,
+        sizeCells: UInt32
+    ) -> AddressTranslationLevel? {
+        guard length != 0,
+              childAddressCells <= 3,
+              parentAddressCells <= 3,
               sizeCells <= 2
         else {
             return nil
@@ -657,31 +709,129 @@ struct FlattenedDeviceTree {
         let entryBytes = childBytes + parentBytes + sizeBytes
         guard entryBytes > 0,
               length >= entryBytes,
-              let childBase = readCells(at: offset, count: childAddressCells),
-              let parentBase = readCells(
-                  at: offset + childBytes,
-                  count: parentAddressCells
-              ),
-              let translationLength = readCells(
-                  at: offset + childBytes + parentBytes,
-                  count: sizeCells
-              ),
-              let rootBase = parentTranslation.translate(
-                  address: parentBase,
-                  length: translationLength
-              )
+              length % entryBytes == 0,
+              Self.range(offset: offset, length: length, fits: structureEnd)
         else {
             return nil
         }
-        return AddressTranslation(
-            childBase: childBase,
-            rootBase: rootBase,
-            length: translationLength,
-            active: true
+        return AddressTranslationLevel(
+            offset: offset,
+            length: length,
+            childAddressCells: childAddressCells,
+            parentAddressCells: parentAddressCells,
+            sizeCells: sizeCells
         )
     }
 
+    private func translateToRoot(
+        _ address: DeviceTreeBusAddress,
+        resourceLength: UInt64,
+        through path: AddressTranslationPath
+    ) -> UInt64? {
+        guard path.isValid else { return nil }
+        var translated = address
+        var index = path.levelCount
+        while index > 0 {
+            index -= 1
+            guard let level = path.level(at: index),
+                  let parentAddress = translate(
+                      translated,
+                      resourceLength: resourceLength,
+                      through: level
+                  )
+            else {
+                return nil
+            }
+            translated = parentAddress
+        }
+        // SwiftOS identity maps a UInt64 CPU physical address. A remaining
+        // selector means the root address cannot be represented by that model.
+        guard translated.selector == 0 else { return nil }
+        return translated.value
+    }
+
+    private func translate(
+        _ address: DeviceTreeBusAddress,
+        resourceLength: UInt64,
+        through level: AddressTranslationLevel
+    ) -> DeviceTreeBusAddress? {
+        let childBytes = UInt(level.childAddressCells) * 4
+        let parentBytes = UInt(level.parentAddressCells) * 4
+        let sizeBytes = UInt(level.sizeCells) * 4
+        let entryBytes = childBytes + parentBytes + sizeBytes
+        guard entryBytes > 0,
+              level.length >= entryBytes,
+              level.length % entryBytes == 0
+        else {
+            return nil
+        }
+
+        var matchedAddress: DeviceTreeBusAddress?
+        var entryOffset: UInt = 0
+        while entryOffset < level.length {
+            guard let childBase = readBusAddress(
+                      at: level.offset + entryOffset,
+                      count: level.childAddressCells
+                  ),
+                  let parentBase = readBusAddress(
+                      at: level.offset + entryOffset + childBytes,
+                      count: level.parentAddressCells
+                  ),
+                  let translationLength = readCells(
+                      at: level.offset + entryOffset + childBytes
+                          + parentBytes,
+                      count: level.sizeCells
+                  )
+            else {
+                return nil
+            }
+
+            if address.selector == childBase.selector,
+               address.value >= childBase.value {
+                let offset = address.value - childBase.value
+                if offset <= translationLength,
+                   resourceLength <= translationLength - offset,
+                   parentBase.value <= UInt64.max - offset {
+                    // Ambiguous ranges are malformed for one resource. Failing
+                    // closed prevents tuple order from selecting hardware.
+                    guard matchedAddress == nil else { return nil }
+                    matchedAddress = DeviceTreeBusAddress(
+                        selector: parentBase.selector,
+                        value: parentBase.value + offset
+                    )
+                }
+            }
+            entryOffset += entryBytes
+        }
+        return matchedAddress
+    }
+
+    private func readBusAddress(
+        at offset: UInt,
+        count: UInt32
+    ) -> DeviceTreeBusAddress? {
+        switch count {
+        case 0:
+            return DeviceTreeBusAddress(selector: 0, value: 0)
+        case 1, 2:
+            guard let value = readCells(at: offset, count: count) else {
+                return nil
+            }
+            return DeviceTreeBusAddress(selector: 0, value: value)
+        case 3:
+            guard let selector = readStructureWord(at: offset),
+                  let value = readCells(at: offset + 4, count: 2)
+            else {
+                return nil
+            }
+            return DeviceTreeBusAddress(selector: selector, value: value)
+        default:
+            return nil
+        }
+    }
+
     private func readCells(at offset: UInt, count: UInt32) -> UInt64? {
+        guard count <= 2 else { return nil }
         var value: UInt64 = 0
         var cell: UInt32 = 0
         while cell < count {
