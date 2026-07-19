@@ -171,10 +171,12 @@ RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware make rpi5-package
 `rpi5-inspect` validates the Image header, link addresses, BCM2712 high-MMIO
 bootstrap descriptor, architecture, and unresolved-symbol contract. Packaging
 first probes the pinned firmware DTB for the exact UART10, GICv2, PSCI, CPU, and
-ATF-reservation contract, then adds it and byte hashes. The packaged
-`config.txt` asks Pi firmware to select an HDMI mode from EDID and retain a
-32-bit boot framebuffer for the Swift driver. Neither target executes the image
-on a Pi.
+ATF-reservation contract, then adds it and the official `dwc2.dtbo` from that
+same revision with byte hashes. The packaged `config.txt` enables DWC2
+peripheral mode for USB-C debugging and asks Pi firmware to select an HDMI mode
+from EDID and retain a 32-bit boot framebuffer. The kernel discovers the
+translated DWC2 register resource, but controller operation is not yet a
+hardware-verified transport. Neither target executes the image on a Pi.
 
 ## Honest status
 

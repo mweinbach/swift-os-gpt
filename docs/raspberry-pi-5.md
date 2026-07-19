@@ -31,6 +31,7 @@ Raspberry Pi 5 keeps its boot firmware in EEPROM. It does not use
 | `config.txt` | Selects the 64-bit image and debug handoff. |
 | `kernel8.img` | Raw SwiftOS AArch64 Image with a 4 KiB-page header. |
 | `bcm2712-rpi-5-b.dtb` | Source hardware description, patched by firmware at boot. |
+| `overlays/dwc2.dtbo` | Official firmware overlay selecting the USB-C DWC2 controller. |
 | `BOOT-MANIFEST.txt` | Human-readable, explicitly unverified manifest. |
 | `BUILD-METADATA.txt` | Input hashes, SwiftOS revision/dirty state, and firmware-repository revision. |
 | `SHA256SUMS` | Stable byte-level hashes of all preceding files. |
@@ -41,15 +42,23 @@ The firmware normally prefers `kernel_2712.img` on BCM2712 and falls back to
 mapping contract. The AArch64 Image header declares the 4 KiB page-size encoding,
 and the board linker aligns executable and mapping storage to 4 KiB.
 
-The DTB comes from `boot/bcm2712-rpi-5-b.dtb` in a caller-supplied, pinned
+The DTB and DWC2 overlay come from `boot/bcm2712-rpi-5-b.dtb` and
+`boot/overlays/dwc2.dtbo` in a caller-supplied, pinned
 checkout of [raspberrypi/firmware](https://github.com/raspberrypi/firmware).
-The packager records its exact repository commit and refuses to overwrite a
-non-empty directory. That value identifies the `raspberrypi/firmware` file set,
-not the board's EEPROM bootloader revision; physical evidence must record the
-EEPROM build separately. Given identical kernel bytes, DTB checkout, and board
-files, the listed file bytes and `SHA256SUMS` are reproducible. A reproducible
-FAT or disk image must additionally normalize allocation order, timestamps, and
-volume ID.
+The packager verifies both files against that Git revision, records their
+individual hashes, and refuses to overwrite a non-empty directory. That value
+identifies the `raspberrypi/firmware` file set, not the board's EEPROM bootloader
+revision; physical evidence must record the EEPROM build separately. Given
+identical kernel bytes, firmware checkout, and board files, the listed file
+bytes and `SHA256SUMS` are reproducible. A reproducible FAT or disk image must
+additionally normalize allocation order, timestamps, and volume ID.
+
+`config.txt` applies `dwc2,dr_mode=peripheral`. The merged runtime DT can then
+publish an enabled `brcm,bcm2835-usb` node, which shared platform discovery
+translates through its parent `ranges` into a controller-neutral DWC2 MMIO
+resource. If `dr_mode` is present, SwiftOS accepts only `peripheral`; QEMU does
+not publish this resource. This boundary does not yet program DWC2 registers,
+enumerate on a host, or carry display frames.
 
 Build and statically inspect the Pi image with:
 

@@ -4,6 +4,11 @@ arm_64bit=1
 kernel=kernel8.img
 device_tree=bcm2712-rpi-5-b.dtb
 
+# Route the USB-C data pair to the SoC DWC2 controller in device mode. This is
+# the physical debug transport; endpoint protocol and controller setup remain
+# SwiftOS driver responsibilities.
+dtoverlay=dwc2,dr_mode=peripheral
+
 # Pi 5 defaults to leaving mode selection to an OS KMS driver. SwiftOS does
 # not own HVS/HDMI modesetting yet, so ask firmware to read HDMI EDID, select
 # the attached display's mode, and retain a 32-bit simple-framebuffer handoff.

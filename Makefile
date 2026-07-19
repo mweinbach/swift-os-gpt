@@ -51,7 +51,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -138,6 +138,9 @@ rpi5-package: rpi5-inspect
 		RPI5_DTB=$(RPI5_FIRMWARE)/boot/bcm2712-rpi-5-b.dtb
 	Boards/RaspberryPi5/package-boot.sh $(RPI5_KERNEL_IMAGE) \
 		$(RPI5_FIRMWARE) $(RPI5_BUILD_DIR)/boot
+
+rpi5-package-test:
+	$(PYTHON) Tests/Host/rpi5_package_contract.py
 
 run: build
 	$(QEMU) $(QEMU_FLAGS) -display cocoa -kernel $(KERNEL_BIN)
@@ -591,7 +594,7 @@ cpu-config-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
 		$(KERNEL_BIN) --cpu cortex-a76 --cpus 2
 
-test: toolchain-check source-check host-test userland-test qemu-fdt-test inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke rpi5-inspect
+test: toolchain-check source-check host-test userland-test qemu-fdt-test rpi5-package-test inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke rpi5-inspect
 
 clean:
 	rm -rf $(BUILD_DIR)

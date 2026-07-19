@@ -6,8 +6,60 @@ struct FlattenedDeviceTreeTests {
         readsFirmwareSimpleFramebufferProperties()
         discoversEnabledPi5GraphicsResources()
         rejectsUnavailablePi5GraphicsResources()
+        discoversPi5PeripheralUSBController()
+        rejectsUnavailablePi5USBController()
         rejectsBadMagicAndTruncatedStructure()
-        print("FDT host tests: 6 passed")
+        print("FDT host tests: 8 passed")
+    }
+
+    private static func discoversPi5PeripheralUSBController() {
+        for mode in ["peripheral", nil] as [String?] {
+            let bytes = makeRaspberryPiGraphicsDeviceTree(usbMode: mode)
+            bytes.withUnsafeBytes { storage in
+                guard let platform = Platform.discover(
+                          deviceTreeAddress: UInt64(
+                              UInt(bitPattern: storage.baseAddress!)
+                          )
+                      )
+                else {
+                    fatalError("Pi USB fixture was rejected")
+                }
+                expect(
+                    platform.usbDeviceController == .dwc2(
+                        registers: DeviceResource(
+                            baseAddress: 0x10_0048_0000,
+                            length: 0x1_0000
+                        )
+                    ),
+                    "translated Pi DWC2 peripheral resource mismatch"
+                )
+            }
+        }
+    }
+
+    private static func rejectsUnavailablePi5USBController() {
+        let fixtures = [
+            makeRaspberryPiGraphicsDeviceTree(usbMode: "host"),
+            makeRaspberryPiGraphicsDeviceTree(usbEnabled: false),
+            makeRaspberryPiGraphicsDeviceTree(unalignedUSBRegisters: true),
+            makeRaspberryPiGraphicsDeviceTree(usbRegisterLength: 0),
+        ]
+        for bytes in fixtures {
+            bytes.withUnsafeBytes { storage in
+                guard let platform = Platform.discover(
+                          deviceTreeAddress: UInt64(
+                              UInt(bitPattern: storage.baseAddress!)
+                          )
+                      )
+                else {
+                    fatalError("Pi platform fixture was rejected")
+                }
+                expect(
+                    platform.usbDeviceController == nil,
+                    "unavailable or host-mode Pi USB controller was bound"
+                )
+            }
+        }
     }
 
     private static func discoversEnabledPi5GraphicsResources() {
@@ -197,6 +249,10 @@ struct FlattenedDeviceTreeTests {
                 deviceTreeAddress: UInt64(UInt(bitPattern: storage.baseAddress!))
             )
             expect(platform?.kind == .qemuVirt, "QEMU platform mismatch")
+            expect(
+                platform?.usbDeviceController == nil,
+                "QEMU unexpectedly published a Pi USB device controller"
+            )
             expect(platform?.processorCount == 1, "processor count mismatch")
             expect(platform?.processorAffinity(at: 0) == 0x100, "CPU affinity mismatch")
             expect(
@@ -550,7 +606,11 @@ private func makeRaspberryPiGraphicsDeviceTree(
     includeHVSAddressTranslation: Bool = true,
     includeSMSRegisters: Bool = true,
     overlapV3DRegisters: Bool = false,
-    unalignedV3DRegisters: Bool = false
+    unalignedV3DRegisters: Bool = false,
+    usbMode: String? = "peripheral",
+    usbEnabled: Bool = true,
+    unalignedUSBRegisters: Bool = false,
+    usbRegisterLength: UInt64 = 0x1_0000
 ) -> [UInt8] {
     let names = [
         "#address-cells",
@@ -559,6 +619,8 @@ private func makeRaspberryPiGraphicsDeviceTree(
         "reg",
         "status",
         "iommus",
+        "ranges",
+        "dr_mode",
     ]
     var strings: [UInt8] = []
     var offsets: [String: UInt32] = [:]
@@ -666,6 +728,52 @@ private func makeRaspberryPiGraphicsDeviceTree(
         value: Array((hvsEnabled ? "okay" : "disabled").utf8) + [0],
         to: &structure
     )
+    appendBE32(2, to: &structure)
+
+    // Exercise the same parent-range translation the firmware-patched Pi DT
+    // uses. Platform discovery consumes only the translated resource.
+    appendBeginNode("soc@1000000000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["#address-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#size-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["ranges"]!,
+        value: be64(0) + be64(0x10_0000_0000) + be64(0x0100_0000),
+        to: &structure
+    )
+
+    appendBeginNode("usb@480000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("brcm,bcm2835-usb".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be64(unalignedUSBRegisters ? 0x0048_0001 : 0x0048_0000)
+            + be64(usbRegisterLength),
+        to: &structure
+    )
+    if let usbMode {
+        appendProperty(
+            nameOffset: offsets["dr_mode"]!,
+            value: Array(usbMode.utf8) + [0],
+            to: &structure
+        )
+    }
+    appendProperty(
+        nameOffset: offsets["status"]!,
+        value: Array((usbEnabled ? "okay" : "disabled").utf8) + [0],
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
     appendBE32(2, to: &structure)
 
     appendBE32(2, to: &structure)

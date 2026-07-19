@@ -13,6 +13,13 @@ enum InterruptControllerDescription: Equatable {
     case gicV3(distributor: DeviceResource, redistributor: DeviceResource)
 }
 
+/// A controller that can expose SwiftOS as a USB device to a host. This is a
+/// discovery contract only: register programming, endpoint ownership, and USB
+/// protocol policy remain in separate driver layers.
+enum USBDeviceControllerDescription: Equatable {
+    case dwc2(registers: DeviceResource)
+}
+
 /// Names the address-translation owner a graphics backend must program before
 /// a buffer can be accessed by one stage of the display pipeline. Renderer and
 /// scanout addresses are intentionally independent: a render target handed to
@@ -90,6 +97,7 @@ struct Platform {
     let interruptController: InterruptControllerDescription
     let firmwareConfiguration: DeviceResource?
     let firmwareMailbox: DeviceResource?
+    let usbDeviceController: USBDeviceControllerDescription?
     let simpleFramebuffer: SimpleFramebufferDescription?
     let graphicsResources: PlatformGraphicsResources?
     let virtioTransportWindow: DeviceResource?
@@ -186,6 +194,9 @@ struct Platform {
             interruptController: interruptController,
             firmwareConfiguration: firmwareConfiguration,
             firmwareMailbox: firmwareMailbox,
+            usbDeviceController: kind == .raspberryPi5
+                ? raspberryPi5USBDeviceController(in: tree)
+                : nil,
             simpleFramebuffer: tree.simpleFramebuffer(),
             graphicsResources: kind == .raspberryPi5
                 ? raspberryPi5GraphicsResources(in: tree)
@@ -196,6 +207,37 @@ struct Platform {
             deviceTreeSize: tree.blobSize,
             deviceTree: tree
         )
+    }
+
+    private static func raspberryPi5USBDeviceController(
+        in tree: FlattenedDeviceTree
+    ) -> USBDeviceControllerDescription? {
+        // The firmware overlay chooses the USB-C controller's device role. An
+        // older DT may omit dr_mode and leave role selection to the driver; if
+        // firmware publishes it explicitly, never bind a host-mode controller.
+        guard let registers = tree.resource(
+                  compatibleWith: "brcm,bcm2835-usb"
+              ), validMMIOResource(registers)
+        else {
+            return nil
+        }
+
+        if let roleQualifiedResource = tree.resource(
+            compatibleWith: "brcm,bcm2835-usb",
+            requiringProperty: "dr_mode"
+        ) {
+            guard roleQualifiedResource == registers,
+                  tree.resource(
+                      compatibleWith: "brcm,bcm2835-usb",
+                      cStringProperty: "dr_mode",
+                      equalTo: "peripheral"
+                  ) == registers
+            else {
+                return nil
+            }
+        }
+
+        return .dwc2(registers: registers)
     }
 
     private static func raspberryPi5GraphicsResources(

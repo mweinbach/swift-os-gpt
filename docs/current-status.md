@@ -248,7 +248,11 @@ checkout, `make rpi5-package` creates the boot-partition file set and hashes.
 Packaging also runs the parser against that checkout's real Pi 5 DTB and requires
 UART10 at `0x107d001000`, the GICv2 distributor/CPU-interface resources, PSCI
 `smc`, four affinities, and the ATF reservation. These gates prove an artifact
-and unpatched source-DTB contract. The kernel also contains a host-tested driver
+and unpatched source-DTB contract. The package carries the official pinned
+`dwc2.dtbo`, applies it in peripheral mode, and records its hash. Platform
+discovery host-tests the translated DWC2 MMIO resource and keeps QEMU free of
+that Pi-only contract; no USB controller or display transport is operational
+yet. The kernel also contains a host-tested driver
 for the runtime-patched firmware simple framebuffer and mailbox resources. No
 physical Raspberry Pi 5 boot, UART, GICv2 timer delivery, PSCI startup,
 firmware-patched 8 GB allocator exercise, HDMI frame, input, or GUI path has

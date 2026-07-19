@@ -46,6 +46,7 @@ public func validateQEMUDeviceTree(_ rawAddress: UnsafeRawPointer?) -> Int32 {
     else {
         return 12
     }
+    guard platform.usbDeviceController == nil else { return 13 }
     guard case let .gicV3(distributor, redistributor) = platform.interruptController,
           distributor.baseAddress == 0x0800_0000,
           redistributor.baseAddress == 0x080a_0000

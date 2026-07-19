@@ -242,6 +242,26 @@ struct FlattenedDeviceTree {
     }
 
     func resource(
+        compatibleWith compatibility: StaticString,
+        nodeIndex: Int = 0,
+        registerIndex: Int = 0,
+        cStringProperty property: StaticString,
+        equalTo value: StaticString
+    ) -> DeviceResource? {
+        guard nodeIndex >= 0, registerIndex >= 0 else { return nil }
+        var remainingMatches = nodeIndex
+        return search(
+            compatibleWith: compatibility,
+            deviceType: nil,
+            reservedMemory: false,
+            remainingMatches: &remainingMatches,
+            registerIndex: registerIndex,
+            matchingPropertyName: property,
+            matchingPropertyValue: value
+        )?.resource
+    }
+
+    func resource(
         deviceType: StaticString,
         nodeIndex: Int = 0,
         registerIndex: Int = 0

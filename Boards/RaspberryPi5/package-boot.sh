@@ -31,12 +31,16 @@ FIRMWARE_CHECKOUT=$2
 OUTPUT_DIRECTORY=$3
 SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 FIRMWARE_DTB="$FIRMWARE_CHECKOUT/boot/bcm2712-rpi-5-b.dtb"
+FIRMWARE_DWC2_OVERLAY="$FIRMWARE_CHECKOUT/boot/overlays/dwc2.dtbo"
 SWIFTOS_REPOSITORY=$(git -C "$SCRIPT_DIRECTORY" rev-parse --show-toplevel 2>/dev/null) || \
     fail "board files must be inside the SwiftOS Git checkout"
 
 [ -f "$KERNEL_IMAGE" ] || fail "kernel image not found: $KERNEL_IMAGE"
 [ -s "$KERNEL_IMAGE" ] || fail "kernel image is empty: $KERNEL_IMAGE"
 [ -f "$FIRMWARE_DTB" ] || fail "Pi 5 DTB not found: $FIRMWARE_DTB"
+[ -f "$FIRMWARE_DWC2_OVERLAY" ] || \
+    fail "DWC2 overlay not found: $FIRMWARE_DWC2_OVERLAY"
+[ -s "$FIRMWARE_DWC2_OVERLAY" ] || fail "DWC2 overlay is empty"
 [ -f "$SCRIPT_DIRECTORY/config.txt" ] || fail "board config.txt is missing"
 [ -f "$SCRIPT_DIRECTORY/boot-manifest.txt" ] || fail "board manifest is missing"
 
@@ -68,9 +72,15 @@ esac
 git -C "$FIRMWARE_CHECKOUT" cat-file -e \
     "$FIRMWARE_REVISION:boot/bcm2712-rpi-5-b.dtb" 2>/dev/null || \
     fail "firmware revision does not contain the Pi 5 DTB"
+git -C "$FIRMWARE_CHECKOUT" cat-file -e \
+    "$FIRMWARE_REVISION:boot/overlays/dwc2.dtbo" 2>/dev/null || \
+    fail "firmware revision does not contain the DWC2 overlay"
 git -C "$FIRMWARE_CHECKOUT" diff --quiet HEAD -- \
     boot/bcm2712-rpi-5-b.dtb || \
     fail "Pi 5 DTB differs from the recorded firmware revision"
+git -C "$FIRMWARE_CHECKOUT" diff --quiet HEAD -- \
+    boot/overlays/dwc2.dtbo || \
+    fail "DWC2 overlay differs from the recorded firmware revision"
 
 if [ -d "$OUTPUT_DIRECTORY" ] && \
    [ -n "$(find "$OUTPUT_DIRECTORY" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
@@ -99,21 +109,30 @@ DTB_MAGIC_BYTES=$(dd if="$FIRMWARE_DTB" bs=1 count=4 2>/dev/null | \
 [ "$DTB_MAGIC_BYTES" = "d00dfeed" ] || \
     fail "firmware input is not a flattened Device Tree blob"
 
+OVERLAY_MAGIC_BYTES=$(dd if="$FIRMWARE_DWC2_OVERLAY" bs=1 count=4 2>/dev/null | \
+    od -An -tx1 -v | tr -d ' \n')
+[ "$OVERLAY_MAGIC_BYTES" = "d00dfeed" ] || \
+    fail "firmware DWC2 input is not a flattened Device Tree overlay"
+
+mkdir -p "$OUTPUT_DIRECTORY/overlays"
 cp "$SCRIPT_DIRECTORY/config.txt" "$OUTPUT_DIRECTORY/config.txt"
 cp "$KERNEL_IMAGE" "$OUTPUT_DIRECTORY/kernel8.img"
 cp "$FIRMWARE_DTB" "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb"
+cp "$FIRMWARE_DWC2_OVERLAY" "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo"
 cp "$SCRIPT_DIRECTORY/boot-manifest.txt" "$OUTPUT_DIRECTORY/BOOT-MANIFEST.txt"
 chmod 0644 \
     "$OUTPUT_DIRECTORY/config.txt" \
     "$OUTPUT_DIRECTORY/kernel8.img" \
     "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb" \
+    "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo" \
     "$OUTPUT_DIRECTORY/BOOT-MANIFEST.txt"
 
 KERNEL_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/kernel8.img")
 DTB_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb")
+DWC2_OVERLAY_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo")
 
 {
-    echo "format=swiftos-rpi5-boot-v1"
+    echo "format=swiftos-rpi5-boot-v2"
     echo "board=raspberry-pi-5-model-b"
     echo "hardware_verified=false"
     echo "swiftos_revision=$SWIFTOS_REVISION"
@@ -122,6 +141,7 @@ DTB_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb")
     echo "firmware_repository_revision=$FIRMWARE_REVISION"
     echo "kernel_sha256=$KERNEL_SHA256"
     echo "dtb_sha256=$DTB_SHA256"
+    echo "dwc2_overlay_sha256=$DWC2_OVERLAY_SHA256"
 } > "$OUTPUT_DIRECTORY/BUILD-METADATA.txt"
 chmod 0644 "$OUTPUT_DIRECTORY/BUILD-METADATA.txt"
 
@@ -131,7 +151,8 @@ chmod 0644 "$OUTPUT_DIRECTORY/BUILD-METADATA.txt"
         BUILD-METADATA.txt \
         bcm2712-rpi-5-b.dtb \
         config.txt \
-        kernel8.img
+        kernel8.img \
+        overlays/dwc2.dtbo
     do
         printf '%s  %s\n' \
             "$(sha256_file "$OUTPUT_DIRECTORY/$FILE_NAME")" \
