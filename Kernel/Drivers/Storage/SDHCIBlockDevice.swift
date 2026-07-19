@@ -131,6 +131,15 @@ struct SDCardCSD: Equatable {
     let word2: UInt32
     let word3: UInt32
 
+    var usesBlockAddressing: Bool? {
+        guard let structure = bits(high: 127, low: 126) else { return nil }
+        switch structure {
+        case 0: return false
+        case 1: return true
+        default: return nil
+        }
+    }
+
     var logicalBlockCount: UInt64? {
         guard let structure = bits(high: 127, low: 126) else { return nil }
         switch structure {
@@ -232,6 +241,7 @@ private enum SDHCIBit {
     static let bufferReadReady: UInt32 = 1 << 5
     static let interruptError: UInt32 = 1 << 15
     static let allInterruptErrors: UInt32 = 0xffff_8000
+    static let dataTimeoutError: UInt32 = 1 << 20
     static let busWidth4: UInt8 = 1 << 1
     static let highSpeed: UInt8 = 1 << 2
     static let internalClockEnable: UInt16 = 1 << 0
@@ -296,6 +306,47 @@ struct SDHCIBlockDevice<Registers: SDHCIRegisterAccess, Board: SDCardBoardContro
     mutating func initialize() -> SDHCIInitializationResult {
         guard state == .cold else { return .invalidState }
 
+        let version = registers.read16(
+            at: SDHCIRegisterLayout.hostControllerVersion
+        )
+        let specificationVersion = UInt8(truncatingIfNeeded: version)
+        let capabilities = registers.read32(at: SDHCIRegisterLayout.capabilities)
+        guard specificationVersion >= 2,
+              capabilities & SDHCIBit.voltage3V3 != 0,
+              capabilities & 0x3f != 0,
+              (capabilities >> 16) & 3 < 3
+        else {
+            state = .faulted
+            return .unsupportedHost
+        }
+
+        // Firmware loaded SwiftOS from this same card. Quiesce every standard
+        // signalling source before board policy removes VMMC or forces VQMMC
+        // back to 3.3 V, so stale SDCLK/UHS state cannot phantom-power it.
+        registers.write32(0, at: SDHCIRegisterLayout.interruptSignalEnable)
+        registers.write16(0, at: SDHCIRegisterLayout.clockControl)
+        registers.write8(0, at: SDHCIRegisterLayout.powerControl)
+        var hostControl = registers.read8(at: SDHCIRegisterLayout.hostControl)
+        hostControl &= ~(SDHCIBit.busWidth4 | SDHCIBit.highSpeed | (3 << 3))
+        registers.write8(hostControl, at: SDHCIRegisterLayout.hostControl)
+        var hostControl2 = registers.read16(
+            at: SDHCIRegisterLayout.hostControl2
+        )
+        hostControl2 &= ~UInt16(0x800f) // presets, 1.8 V, and every UHS mode.
+        registers.write16(hostControl2, at: SDHCIRegisterLayout.hostControl2)
+        registers.synchronizePostedWrites()
+        guard reset(mask: SDHCIBit.resetAll) else {
+            state = .faulted
+            return .hostResetTimedOut
+        }
+        guard registers.read16(at: SDHCIRegisterLayout.clockControl)
+                  & (SDHCIBit.internalClockEnable | SDHCIBit.cardClockEnable) == 0,
+              registers.read8(at: SDHCIRegisterLayout.powerControl) & 1 == 0
+        else {
+            state = .faulted
+            return .hostResetTimedOut
+        }
+
         switch board.prepareSDCard(
             maximumPollCount: configuration.maximumPollCount,
             maximumElapsedTicks: configuration.commandTimeoutTicks
@@ -310,20 +361,7 @@ struct SDHCIBlockDevice<Registers: SDHCIRegisterAccess, Board: SDCardBoardContro
             return .boardPreparationFailed
         }
 
-        let version = registers.read16(
-            at: SDHCIRegisterLayout.hostControllerVersion
-        )
-        let specificationVersion = UInt8(truncatingIfNeeded: version)
-        let capabilities = registers.read32(at: SDHCIRegisterLayout.capabilities)
-        guard specificationVersion >= 2,
-              capabilities & SDHCIBit.voltage3V3 != 0,
-              (capabilities >> 16) & 3 <= 3
-        else {
-            state = .faulted
-            return .unsupportedHost
-        }
-
-        registers.write32(0, at: SDHCIRegisterLayout.interruptSignalEnable)
+        // Establish a second clean host epoch after the physical card reset.
         guard reset(mask: SDHCIBit.resetAll) else {
             state = .faulted
             return .hostResetTimedOut
@@ -335,10 +373,10 @@ struct SDHCIBlockDevice<Registers: SDHCIRegisterAccess, Board: SDCardBoardContro
         )
         registers.write32(UInt32.max, at: SDHCIRegisterLayout.interruptStatus)
 
-        var hostControl = registers.read8(at: SDHCIRegisterLayout.hostControl)
+        hostControl = registers.read8(at: SDHCIRegisterLayout.hostControl)
         hostControl &= ~(SDHCIBit.busWidth4 | SDHCIBit.highSpeed | (3 << 3))
         registers.write8(hostControl, at: SDHCIRegisterLayout.hostControl)
-        var hostControl2 = registers.read16(
+        hostControl2 = registers.read16(
             at: SDHCIRegisterLayout.hostControl2
         )
         hostControl2 &= ~UInt16(0x800f) // presets, 1.8 V, and every UHS mode.
@@ -379,7 +417,8 @@ struct SDHCIBlockDevice<Registers: SDHCIRegisterAccess, Board: SDCardBoardContro
                       index: 55,
                       argument: 0,
                       response: .short
-                  ), !responseHasCardError(applicationPrefix.word0)
+                  ), !responseHasCardError(applicationPrefix.word0),
+                  applicationPrefix.word0 & (1 << 5) != 0
             else { return failInitialization(command: 55) }
             guard let conditions = command(
                       index: 41,
@@ -388,6 +427,10 @@ struct SDHCIBlockDevice<Registers: SDHCIRegisterAccess, Board: SDCardBoardContro
                   )
             else { return failInitialization(command: 41) }
             if conditions.word0 & (1 << 31) != 0 {
+                guard conditions.word0 & 0x00ff_8000 != 0 else {
+                    state = .faulted
+                    return .unsupportedCard
+                }
                 operatingConditions = conditions.word0
                 break
             }
@@ -410,7 +453,9 @@ struct SDHCIBlockDevice<Registers: SDHCIRegisterAccess, Board: SDCardBoardContro
               )
         else { return failInitialization(command: 3) }
         relativeCardAddress = addressResponse.word0 & 0xffff_0000
-        guard relativeCardAddress != 0 else {
+        guard relativeCardAddress != 0,
+              addressResponse.word0 & 0x0000_e000 == 0
+        else {
             state = .faulted
             return .unsupportedCard
         }
@@ -419,12 +464,16 @@ struct SDHCIBlockDevice<Registers: SDHCIRegisterAccess, Board: SDCardBoardContro
                   index: 9,
                   argument: relativeCardAddress,
                   response: .long
-              ), let blockCount = SDCardCSD(
+              )
+        else { return failInitialization(command: 9) }
+        let csd = SDCardCSD(
                   word0: csdResponse.word0,
                   word1: csdResponse.word1,
                   word2: csdResponse.word2,
                   word3: csdResponse.word3
-              ).logicalBlockCount,
+              )
+        guard csd.usesBlockAddressing == isHighCapacity,
+              let blockCount = csd.logicalBlockCount,
               blockCount <= UInt64(UInt32.max) + 1,
               let discoveredGeometry = BlockDeviceGeometry(
                   logicalBlockByteCount: 512,
@@ -455,6 +504,7 @@ struct SDHCIBlockDevice<Registers: SDHCIRegisterAccess, Board: SDCardBoardContro
                   argument: relativeCardAddress,
                   response: .short
               ), !responseHasCardError(busPrefix.word0),
+              busPrefix.word0 & (1 << 5) != 0,
               let busWidth = command(
                   index: 6,
                   argument: 2,
@@ -650,9 +700,10 @@ struct SDHCIBlockDevice<Registers: SDHCIRegisterAccess, Board: SDCardBoardContro
             )
         }
 
-        if response == .shortBusy,
-           !waitForPresentStateClear(SDHCIBit.dataInhibit) {
-            return nil
+        if response == .shortBusy {
+            guard waitForInterrupt(SDHCIBit.transferComplete),
+                  waitForPresentStateClear(SDHCIBit.dataInhibit)
+            else { return nil }
         }
         return value
     }
@@ -731,8 +782,20 @@ struct SDHCIBlockDevice<Registers: SDHCIRegisterAccess, Board: SDCardBoardContro
               registers.counterValue() &- startedAt
                   <= configuration.commandTimeoutTicks {
             let status = registers.read32(at: SDHCIRegisterLayout.interruptStatus)
-            if status & (SDHCIBit.interruptError | SDHCIBit.allInterruptErrors)
-                != 0 { return false }
+            let errors = status & SDHCIBit.allInterruptErrors
+            if mask == SDHCIBit.transferComplete,
+               status & mask == mask,
+               errors & ~(SDHCIBit.interruptError | SDHCIBit.dataTimeoutError)
+                  == 0 {
+                // SDHCI gives Transfer Complete priority when the data line
+                // becomes idle exactly as its timeout counter expires.
+                registers.write32(
+                    mask | errors,
+                    at: SDHCIRegisterLayout.interruptStatus
+                )
+                return true
+            }
+            if errors != 0 { return false }
             if status & mask == mask {
                 registers.write32(mask, at: SDHCIRegisterLayout.interruptStatus)
                 return true

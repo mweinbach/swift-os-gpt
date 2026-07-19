@@ -1,12 +1,22 @@
+private final class TestSDHCIEventLog {
+    var entries: [String] = []
+}
+
 private final class TestSDCardBoard: SDCardBoardControl {
     var result = SDCardBoardPreparationResult.ready
     var calls: [(UInt64, UInt64)] = []
+    let eventLog: TestSDHCIEventLog?
+
+    init(eventLog: TestSDHCIEventLog? = nil) {
+        self.eventLog = eventLog
+    }
 
     func prepareSDCard(
         maximumPollCount: UInt64,
         maximumElapsedTicks: UInt64
     ) -> SDCardBoardPreparationResult {
         calls.append((maximumPollCount, maximumElapsedTicks))
+        eventLog?.entries.append("board.prepare")
         return result
     }
 }
@@ -20,14 +30,22 @@ private final class TestSDHCIHardware {
     var resetStuck = false
     var clockStuck = false
     var operatingConditionsReady = true
+    var operatingConditionsVoltage: UInt32 = 0x00ff_8000
+    var appCommandAccepted = true
+    var r6Status: UInt32 = 0
     var suppressCommandCompletion = false
+    var busyTransferCompletes = true
+    var busyErrorStatus: UInt32 = 0
+    var readCompletionErrorStatus: UInt32 = 0
     var readBlock = [UInt8](repeating: 0, count: 512)
     var writtenBlock = [UInt8]()
     var dataWordIndex = 0
     var csdWords = [UInt32](repeating: 0, count: 4)
+    let eventLog: TestSDHCIEventLog?
 
-    init() {
-        write32Raw(0x40, 1 << 24) // 3.3-V host capability.
+    init(eventLog: TestSDHCIEventLog? = nil) {
+        self.eventLog = eventLog
+        write32Raw(0x40, (1 << 24) | 1) // 3.3 V and a timeout clock.
         write16Raw(0xfe, 2) // SDHCI 3.00.
         setCSDField(high: 127, low: 126, value: 1)
         setCSDField(high: 69, low: 48, value: 31)
@@ -49,6 +67,12 @@ private final class TestSDHCIHardware {
         if offset == 0x20 {
             let byteIndex = dataWordIndex * 4
             dataWordIndex += 1
+            if dataWordIndex == 128, readCompletionErrorStatus != 0 {
+                write32Raw(
+                    0x30,
+                    read32Raw(0x30) | (1 << 1) | readCompletionErrorStatus
+                )
+            }
             return UInt32(readBlock[byteIndex])
                 | UInt32(readBlock[byteIndex + 1]) << 8
                 | UInt32(readBlock[byteIndex + 2]) << 16
@@ -59,14 +83,19 @@ private final class TestSDHCIHardware {
 
     func write8(_ value: UInt8, _ offset: UInt) {
         if offset == 0x2f {
+            eventLog?.entries.append("host.reset")
             bytes[Int(offset)] = resetStuck ? value : 0
             return
+        }
+        if offset == 0x29, value == 0 {
+            eventLog?.entries.append("host.powerOff")
         }
         bytes[Int(offset)] = value
     }
 
     func write16(_ value: UInt16, _ offset: UInt) {
         if offset == 0x2c {
+            if value == 0 { eventLog?.entries.append("host.clockOff") }
             var clock = value
             if value & 1 != 0, !clockStuck { clock |= 1 << 1 }
             write16Raw(offset, clock)
@@ -104,14 +133,17 @@ private final class TestSDHCIHardware {
         case 41:
             write32Raw(
                 0x10,
-                operatingConditionsReady ? 0xc0ff_8000 : 0x40ff_8000
+                (operatingConditionsReady ? 0xc000_0000 : 0x4000_0000)
+                    | operatingConditionsVoltage
             )
         case 3:
-            write32Raw(0x10, 0x1234_0000)
+            write32Raw(0x10, 0x1234_0000 | r6Status)
         case 9:
             publishLongResponse(csdWords)
         case 13:
             write32Raw(0x10, (1 << 8) | (4 << 9))
+        case 55:
+            write32Raw(0x10, appCommandAccepted ? 1 << 5 : 0)
         case 17:
             write32Raw(0x10, 0)
             dataWordIndex = 0
@@ -123,7 +155,14 @@ private final class TestSDHCIHardware {
         }
 
         var status: UInt32 = 1
-        if index == 17 { status |= (1 << 5) | (1 << 1) }
+        if index == 7 {
+            if busyTransferCompletes { status |= 1 << 1 }
+            status |= busyErrorStatus
+        }
+        if index == 17 {
+            status |= 1 << 5
+            if readCompletionErrorStatus == 0 { status |= 1 << 1 }
+        }
         if index == 24 { status |= (1 << 4) | (1 << 1) }
         write32Raw(0x30, read32Raw(0x30) | status)
     }
@@ -205,7 +244,12 @@ struct SDHCIBlockDeviceTests {
         initializesAndTransfersExactlyOneBlock()
         preservesBoundsFailuresWithoutFaultingDevice()
         boundsResetClockAndCardNegotiationStalls()
-        print("SDHCI block device: 5 groups passed")
+        rejectsOCRAndCSDAddressingContradictions()
+        consumesBusyCompletionAndErrors()
+        honorsTransferCompletePriorityAtTimeoutBoundary()
+        rejectsHostAndApplicationCommandAmbiguity()
+        quiescesFirmwareHostBeforeBoardPowerCycle()
+        print("SDHCI block device: 10 groups passed")
     }
 
     private static func selectsBoundedVersion3ClockDivisors() {
@@ -355,6 +399,153 @@ struct SDHCIBlockDeviceTests {
             "ACMD41 stall escaped"
         )
         expect(cardHardware.spinCount <= 10, "card negotiation exceeded its bound")
+    }
+
+    private static func rejectsOCRAndCSDAddressingContradictions() {
+        let voltageHardware = TestSDHCIHardware()
+        voltageHardware.operatingConditionsVoltage = 0
+        var voltageDevice = makeDevice(
+            hardware: voltageHardware,
+            board: TestSDCardBoard()
+        )
+        expect(
+            voltageDevice.initialize() == .unsupportedCard,
+            "ready OCR without requested voltage overlap was accepted"
+        )
+
+        let mismatchHardware = TestSDHCIHardware()
+        mismatchHardware.csdWords = [0, 0, 0, 0]
+        mismatchHardware.setCSDField(high: 83, low: 80, value: 9)
+        mismatchHardware.setCSDField(high: 73, low: 62, value: 1_023)
+        mismatchHardware.setCSDField(high: 49, low: 47, value: 7)
+        var mismatchDevice = makeDevice(
+            hardware: mismatchHardware,
+            board: TestSDCardBoard()
+        )
+        expect(
+            mismatchDevice.initialize() == .unsupportedCard,
+            "CCS/CSD addressing mismatch was accepted before writes"
+        )
+        expect(
+            !mismatchHardware.commands.map(\.index).contains(24),
+            "mismatched card reached CMD24"
+        )
+    }
+
+    private static func consumesBusyCompletionAndErrors() {
+        let timeoutHardware = TestSDHCIHardware()
+        timeoutHardware.busyTransferCompletes = false
+        var timeoutDevice = makeDevice(
+            hardware: timeoutHardware,
+            board: TestSDCardBoard(),
+            maximumPollCount: 8
+        )
+        expect(
+            timeoutDevice.initialize() == .cardRejectedCommand(7),
+            "R1b without Transfer Complete was accepted"
+        )
+        expect(timeoutHardware.spinCount <= 10, "R1b timeout was not bounded")
+
+        let errorHardware = TestSDHCIHardware()
+        errorHardware.busyErrorStatus = 1 << 16
+        var errorDevice = makeDevice(
+            hardware: errorHardware,
+            board: TestSDCardBoard()
+        )
+        expect(
+            errorDevice.initialize() == .cardRejectedCommand(7),
+            "R1b data-timeout status was ignored"
+        )
+    }
+
+    private static func honorsTransferCompletePriorityAtTimeoutBoundary() {
+        let hardware = TestSDHCIHardware()
+        let board = TestSDCardBoard()
+        var device = makeDevice(hardware: hardware, board: board)
+        expect(device.initialize() == .ready, "priority fixture did not initialize")
+        hardware.readCompletionErrorStatus = (1 << 15) | (1 << 20)
+        var output = [UInt8](repeating: 0, count: 512)
+        expect(
+            output.withUnsafeMutableBytes {
+                device.readBlock(at: 1, into: $0)
+            } == .success,
+            "TC plus sole data-timeout was not accepted at the boundary"
+        )
+        expect(hardware.read32(0x30) == 0, "boundary status was not consumed")
+    }
+
+    private static func rejectsHostAndApplicationCommandAmbiguity() {
+        let noTimeoutClock = TestSDHCIHardware()
+        noTimeoutClock.write32(1 << 24, 0x40)
+        let noTimeoutBoard = TestSDCardBoard()
+        var noTimeoutDevice = makeDevice(
+            hardware: noTimeoutClock,
+            board: noTimeoutBoard
+        )
+        expect(
+            noTimeoutDevice.initialize() == .unsupportedHost,
+            "host without timeout clock was accepted"
+        )
+        expect(noTimeoutBoard.calls.isEmpty, "unsupported host power-cycled card")
+
+        let reservedBlock = TestSDHCIHardware()
+        reservedBlock.write32((1 << 24) | (3 << 16) | 1, 0x40)
+        var reservedDevice = makeDevice(
+            hardware: reservedBlock,
+            board: TestSDCardBoard()
+        )
+        expect(
+            reservedDevice.initialize() == .unsupportedHost,
+            "reserved maximum-block encoding was accepted"
+        )
+
+        let noApplication = TestSDHCIHardware()
+        noApplication.appCommandAccepted = false
+        var noApplicationDevice = makeDevice(
+            hardware: noApplication,
+            board: TestSDCardBoard()
+        )
+        expect(
+            noApplicationDevice.initialize() == .cardRejectedCommand(55),
+            "CMD55 without APP_CMD was treated as an ACMD prefix"
+        )
+        expect(
+            !noApplication.commands.map(\.index).contains(6),
+            "regular CMD6 was issued after APP_CMD rejection"
+        )
+
+        let malformedR6 = TestSDHCIHardware()
+        malformedR6.r6Status = 1 << 14
+        var malformedR6Device = makeDevice(
+            hardware: malformedR6,
+            board: TestSDCardBoard()
+        )
+        expect(
+            malformedR6Device.initialize() == .unsupportedCard,
+            "CMD3 R6 illegal-command status was ignored"
+        )
+    }
+
+    private static func quiescesFirmwareHostBeforeBoardPowerCycle() {
+        let log = TestSDHCIEventLog()
+        let hardware = TestSDHCIHardware(eventLog: log)
+        hardware.write16(0x0007, 0x2c)
+        hardware.write8(0x0f, 0x29)
+        hardware.write8(0x1e, 0x28)
+        hardware.write16(0x800f, 0x3e)
+        log.entries.removeAll()
+        let board = TestSDCardBoard(eventLog: log)
+        var device = makeDevice(hardware: hardware, board: board)
+        expect(device.initialize() == .ready, "quiesce-order fixture failed")
+        let boardIndex = log.entries.firstIndex(of: "board.prepare")!
+        let firstReset = log.entries.firstIndex(of: "host.reset")!
+        let clockOff = log.entries.firstIndex(of: "host.clockOff")!
+        let powerOff = log.entries.firstIndex(of: "host.powerOff")!
+        let laterReset = log.entries.lastIndex(of: "host.reset")!
+        expect(clockOff < boardIndex, "board power changed before SDCLK stopped")
+        expect(powerOff < boardIndex, "board power changed before bus power stopped")
+        expect(firstReset < boardIndex, "firmware host was not reset before VMMC")
+        expect(laterReset > boardIndex, "host epoch was not reset after card power")
     }
 
     private static func makeDevice(
