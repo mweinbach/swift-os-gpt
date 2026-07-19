@@ -35,6 +35,7 @@ struct USBDebugDisplayTransmitter {
     private let sessionID: UInt64
     private let displayMode: DisplayMode
     private let wireMode: USBDebugDisplayMode
+    private let maximumChunkDataByteCount: UInt32
 
     private(set) var phase: USBDebugDisplayTransmitPhase = .hello
     private(set) var sequence: UInt32 = 1
@@ -59,7 +60,10 @@ struct USBDebugDisplayTransmitter {
         scaleDenominator: UInt16 = 1,
         horizontalPixelsPerInchMilli: UInt32 = 0,
         verticalPixelsPerInchMilli: UInt32 = 0,
-        sessionID: UInt64
+        sessionID: UInt64,
+        maximumChunkDataByteCount: UInt32 = UInt32(
+            USBDebugDisplayProtocol.maximumChunkDataByteCount
+        )
     ) {
         guard sourceBaseAddress <= UInt64(UInt.max),
               sourceByteCount > 0,
@@ -80,7 +84,11 @@ struct USBDebugDisplayTransmitter {
                     horizontalPixelsPerInchMilli,
                   verticalPixelsPerInchMilli: verticalPixelsPerInchMilli,
                   refreshRateMilliHertz: mode.refreshRateMilliHertz ?? 0
-              ), sessionID != 0
+              ), sessionID != 0,
+              maximumChunkDataByteCount > 0,
+              maximumChunkDataByteCount <= UInt32(
+                  USBDebugDisplayProtocol.maximumChunkDataByteCount
+              )
         else {
             return nil
         }
@@ -89,6 +97,7 @@ struct USBDebugDisplayTransmitter {
         self.sessionID = sessionID
         displayMode = mode
         self.wireMode = wireMode
+        self.maximumChunkDataByteCount = maximumChunkDataByteCount
     }
 
     var isReady: Bool {
@@ -97,6 +106,24 @@ struct USBDebugDisplayTransmitter {
 
     var hasQueuedFrame: Bool {
         queuedDamage != nil || activeDamage != nil
+    }
+
+    mutating func resetSession(requestFullFrame: Bool = true) {
+        phase = .hello
+        sequence = 1
+        activeFrameID = 0
+        nextFrameID = 1
+        activeDamage = nil
+        queuedDamage = requestFullFrame
+            ? DamageRectangle.fullMode(displayMode)
+            : nil
+        frameByteCount = 0
+        frameChunkCount = 0
+        frameChunkSequence = 1
+        frameOffset = 0
+        frameCRC = USBDebugDisplayCRC32()
+        preparedTransition = .none
+        preparedByteCount = 0
     }
 
     mutating func requestFullFrame() {
@@ -174,9 +201,7 @@ struct USBDebugDisplayTransmitter {
                       maximumPayloadByteCount: UInt32(
                           USBDebugDisplayProtocol.maximumPayloadByteCount
                       ),
-                      maximumChunkDataByteCount: UInt32(
-                          USBDebugDisplayProtocol.maximumChunkDataByteCount
-                      ),
+                      maximumChunkDataByteCount: maximumChunkDataByteCount,
                       maximumWidth: displayMode.widthInPixels,
                       maximumHeight: displayMode.heightInPixels,
                       pixelFormatMask: wireMode.pixelFormat.capabilityMask
@@ -226,9 +251,9 @@ struct USBDebugDisplayTransmitter {
             else { return fail() }
             let remaining = frameByteCount - frameOffset
             let chunkByteCount = remaining
-                < UInt64(USBDebugDisplayProtocol.maximumChunkDataByteCount)
+                < UInt64(maximumChunkDataByteCount)
                 ? Int(remaining)
-                : USBDebugDisplayProtocol.maximumChunkDataByteCount
+                : Int(maximumChunkDataByteCount)
             let payload = UnsafeMutableRawBufferPointer(
                 start: outputBase.advanced(
                     by: USBDebugDisplayProtocol.headerByteCount
@@ -308,9 +333,9 @@ struct USBDebugDisplayTransmitter {
         case .frameChunk:
             let remaining = frameByteCount - frameOffset
             let committed = remaining
-                < UInt64(USBDebugDisplayProtocol.maximumChunkDataByteCount)
+                < UInt64(maximumChunkDataByteCount)
                 ? remaining
-                : UInt64(USBDebugDisplayProtocol.maximumChunkDataByteCount)
+                : UInt64(maximumChunkDataByteCount)
             frameOffset += committed
             frameChunkSequence &+= 1
             if frameOffset == frameByteCount { phase = .frameEnd }
@@ -349,9 +374,7 @@ struct USBDebugDisplayTransmitter {
             guard !total.overflow, total.partialValue > 0 else { return false }
             byteCount = total.partialValue
         }
-        let maximum = UInt64(
-            USBDebugDisplayProtocol.maximumChunkDataByteCount
-        )
+        let maximum = UInt64(maximumChunkDataByteCount)
         let chunks = byteCount / maximum + (byteCount % maximum == 0 ? 0 : 1)
         guard chunks > 0, chunks <= UInt64(UInt32.max) else { return false }
 

@@ -349,7 +349,9 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         )
     }
 
-    mutating func armEndpoint0ForSetup() -> Bool {
+    mutating func armEndpoint0ForSetup(
+        preservingStall: Bool = false
+    ) -> Bool {
         guard state == .connected || state == .configured,
               let transferSize = DWC2RegisterLayout.outEndpointTransferSize(0),
               let control = DWC2RegisterLayout.outEndpointControl(0)
@@ -357,6 +359,35 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
             return false
         }
         write(DWC2TransferSize.endpoint0SetupReception, transferSize)
+        var endpointControl = read(control)
+        if !preservingStall {
+            endpointControl &= ~DWC2CoreBits.endpointStall
+        }
+        endpointControl |= DWC2CoreBits.endpointEnable
+            | DWC2CoreBits.clearNAK
+            | DWC2CoreBits.endpointActive
+        write(endpointControl, control)
+        return true
+    }
+
+    mutating func clearEndpoint0Stall() {
+        guard let input = DWC2RegisterLayout.inEndpointControl(0),
+              let output = DWC2RegisterLayout.outEndpointControl(0)
+        else { return }
+        write(read(input) & ~DWC2CoreBits.endpointStall, input)
+        write(read(output) & ~DWC2CoreBits.endpointStall, output)
+    }
+
+    mutating func armEndpoint0Out(byteCount: UInt16) -> Bool {
+        guard state == .connected || state == .configured,
+              let encoded = DWC2TransferSize.endpoint0Out(
+                  byteCount: byteCount
+              ), let transferSize = DWC2RegisterLayout.outEndpointTransferSize(0),
+              let control = DWC2RegisterLayout.outEndpointControl(0)
+        else {
+            return false
+        }
+        write(encoded, transferSize)
         var endpointControl = read(control)
         endpointControl &= ~DWC2CoreBits.endpointStall
         endpointControl |= DWC2CoreBits.endpointEnable
@@ -404,6 +435,23 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         write(inMask | outMask << 16, DWC2RegisterLayout.allEndpointInterruptMask)
         state = .configured
         return true
+    }
+
+    mutating func deconfigureCompositeEndpoints() {
+        guard state == .configured else { return }
+        var endpoint: UInt8 = 1
+        while endpoint < DWC2CompositeFIFOPlan.endpointCount {
+            if let input = DWC2RegisterLayout.inEndpointControl(endpoint) {
+                write(read(input) | DWC2CoreBits.setNAK, input)
+            }
+            if endpoint != 1,
+               let output = DWC2RegisterLayout.outEndpointControl(endpoint) {
+                write(read(output) | DWC2CoreBits.setNAK, output)
+            }
+            endpoint += 1
+        }
+        write(0x0001_0001, DWC2RegisterLayout.allEndpointInterruptMask)
+        state = .connected
     }
 
     mutating func setDeviceAddress(_ address: UInt8) {

@@ -166,6 +166,23 @@ struct DWC2DeviceControllerTests {
                 displayControl & (0xf << 22) == 3 << 22,
                 "display endpoint uses the wrong FIFO"
             )
+            expect(
+                controller.armEndpoint0Out(byteCount: 0),
+                "endpoint-zero OUT status was not armed"
+            )
+            guard let outSize = DWC2RegisterLayout.outEndpointTransferSize(0)
+            else { fail("endpoint-zero OUT size missing") }
+            expect(
+                words[Int(outSize / 4)] == 1 << 19,
+                "endpoint-zero OUT status size is wrong"
+            )
+            controller.deconfigureCompositeEndpoints()
+            expect(controller.state == .connected, "deconfigure state is wrong")
+            expect(
+                words[Int(DWC2RegisterLayout.allEndpointInterruptMask / 4)]
+                    == 0x0001_0001,
+                "deconfigure exposed data endpoints"
+            )
         }
     }
 

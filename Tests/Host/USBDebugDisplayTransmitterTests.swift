@@ -3,9 +3,10 @@ struct USBDebugDisplayTransmitterTests {
     static func main() {
         emitsHandshakeAndFullFrameWithoutAdvancingEarly()
         packsDamageRowsWithoutLeakingStridePadding()
+        respectsTransportChunkLimit()
         coalescesQueuedDamageConservatively()
         rejectsUndersizedPacketStorage()
-        print("USB debug display transmitter: 4 groups passed")
+        print("USB debug display transmitter: 5 groups passed")
     }
 
     private static func emitsHandshakeAndFullFrameWithoutAdvancingEarly() {
@@ -169,6 +170,58 @@ struct USBDebugDisplayTransmitterTests {
                     "damage union did not cover both updates"
                 )
             }
+        }
+    }
+
+    private static func respectsTransportChunkLimit() {
+        var pixels = [UInt8](repeating: 0xa5, count: 1_200)
+        pixels.withUnsafeMutableBytes { source in
+            let mode = DisplayMode(
+                widthInPixels: 100,
+                heightInPixels: 3,
+                refreshRateMilliHertz: nil,
+                pixelFormat: .b8g8r8x8
+            )!
+            guard let base = source.baseAddress,
+                  var transmitter = USBDebugDisplayTransmitter(
+                      sourceBaseAddress: UInt64(UInt(bitPattern: base)),
+                      sourceByteCount: UInt64(source.count),
+                      mode: mode,
+                      bytesPerRow: 400,
+                      scaleNumerator: 1,
+                      sessionID: 7,
+                      maximumChunkDataByteCount: 456
+                  )
+            else { fail("limited transmitter fixture rejected") }
+            transmitter.requestFullFrame()
+            var packet = [UInt8](
+                repeating: 0,
+                count: USBDebugDisplayProtocol.maximumPacketByteCount
+            )
+            var chunkLengths: [Int] = []
+            while transmitter.phase != .ready || transmitter.hasQueuedFrame {
+                guard case .packet(let count) = packet.withUnsafeMutableBytes({
+                    transmitter.prepareNextPacket(into: $0)
+                }) else { fail("limited transmitter packet missing") }
+                packet.withUnsafeBytes { bytes in
+                    guard case .decoded(let decoded)
+                            = USBDebugDisplayPacketDecoder.decodePrefix(
+                                UnsafeRawBufferPointer(
+                                    start: bytes.baseAddress,
+                                    count: count
+                                )
+                            )
+                    else { fail("limited packet failed decode") }
+                    if case .frameChunk(let chunk) = decoded.message {
+                        chunkLengths.append(chunk.data.count)
+                    }
+                }
+                _ = transmitter.commitPreparedPacket()
+            }
+            expect(
+                chunkLengths == [456, 456, 288],
+                "transport chunk limit was not honored"
+            )
         }
     }
 
