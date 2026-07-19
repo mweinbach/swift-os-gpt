@@ -388,6 +388,7 @@ private func runQEMUDesktop(
     memory: KernelMemoryActivation
 ) -> Never {
     activateQEMUVirtIONetwork(console: console, platform: platform)
+    QEMUVirtIOInputRuntime.activate(console: console, platform: platform)
 
     switch activateVirtIOGPU3D(platform: platform) {
     case .ready(let configuration):
@@ -658,9 +659,11 @@ private func runDesktopSession(
         storageAddress: AArch64.terminalStorageAddress,
         serial: PL011(baseAddress: UInt(platform.serial.baseAddress)),
         usbDebug: usbDebug,
-        cooperativeServiceHook: RaspberryPi5CooperativeRuntime.cooperativeServiceHook(
-            for: platform.kind
-        )
+        cooperativeServiceHook:
+            QEMUVirtIOInputRuntime.cooperativeServiceHook(for: platform)
+            ?? RaspberryPi5CooperativeRuntime.cooperativeServiceHook(
+                for: platform.kind
+            )
     )
     guard monitor.start() else {
         console.write("SWIFTOS:PANIC:DISPLAY_PRESENT\n")
@@ -681,9 +684,10 @@ private func runDesktopSession(
     console.write("SWIFTOS:SWIFT_OK\n")
 
     proveTimerInterrupts(console: console)
-    // QEMU currently hands its BSP to the preemptive EL0 scheduler. Until Pi
-    // service work has its own kernel thread, keep the Pi BSP in the monitor
-    // loop so polled USB and display presentation continue making progress.
+    // QEMU currently hands its SMP BSP to the preemptive EL0 scheduler. A
+    // single-CPU monitor boot instead owns bounded VirtIO-input polling. Until
+    // Pi service work has its own kernel thread, that board also stays in the
+    // monitor loop so polled USB and display presentation keep progressing.
     if platform.kind == .qemuVirt && platform.processorCount > 1 {
         runScheduledOrPark(
             console: console,
