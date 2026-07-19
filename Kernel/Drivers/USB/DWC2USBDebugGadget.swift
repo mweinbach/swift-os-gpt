@@ -16,6 +16,7 @@ enum USBDebugGadgetEvent: Equatable {
 }
 
 private enum DWC2USBDebugScratchLayout {
+    static let endpointZeroMaximumPacketByteCount: UInt16 = 64
     static let controlReplyOffset = 0
     static let controlReplyByteCount = 128
     static let receiveOffset = 128
@@ -25,6 +26,12 @@ private enum DWC2USBDebugScratchLayout {
         USBDebugDisplayProtocol.maximumPacketByteCount
     static let requiredByteCount = displayPacketOffset
         + displayPacketByteCount
+}
+
+private enum EndpointZeroInQueueResult {
+    case queued
+    case complete
+    case failed
 }
 
 /// Composite USB gadget runtime for the polled DWC2 engine. Endpoint zero is
@@ -51,6 +58,11 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     private var displayTransmitter: USBDebugDisplayTransmitter
     private let scratchBaseAddress: UInt
     private var endpointZeroTransaction: EndpointZeroTransaction = .idle
+    private var endpointZeroRequestedByteCount: UInt16 = 0
+    private var endpointZeroInReplyByteCount: UInt16 = 0
+    private var endpointZeroInQueuedByteCount: UInt16 = 0
+    private var endpointZeroInNeedsZeroLengthPacket = false
+    private var endpointZeroInQueuedZeroLengthPacket = false
     private var displayTransferInFlight = false
     private(set) var state: USBDebugGadgetState = .attached
 
@@ -118,7 +130,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             guard controller.handleBusReset() else { return fail() }
             controlEndpoint.busReset()
             displayTransmitter.resetSession(requestFullFrame: true)
-            endpointZeroTransaction = .idle
+            resetEndpointZeroTransaction()
             displayTransferInFlight = false
             state = .attached
             event = .busReset
@@ -183,7 +195,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             )
             if interrupt & DWC2CoreBits.endpointTransferComplete != 0,
                endpointZeroTransaction == .statusOut {
-                endpointZeroTransaction = .idle
+                resetEndpointZeroTransaction()
                 guard controller.armEndpoint0ForSetup() else { return fail() }
             }
         }
@@ -269,6 +281,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             guard copiedByteCount == USBSetupPacket.byteCount else {
                 return fail()
             }
+            resetEndpointZeroTransaction()
             controller.clearEndpoint0Stall()
             let receive = receiveBuffer
             let setup = USBSetupPacket.parse(
@@ -278,6 +291,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                 )
             )
             guard let setup else { return fail() }
+            endpointZeroRequestedByteCount = setup.length
             let reply = controlReplyBuffer
             let action = controlEndpoint.handle(setup, reply: reply)
             return performControlAction(action)
@@ -313,17 +327,31 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     ) -> USBDebugGadgetEvent? {
         switch action {
         case .dataIn(let byteCount):
-            let reply = controlReplyBuffer
-            let result = controller.queueInTransfer(
-                endpoint: 0,
-                bytes: UnsafeRawBufferPointer(
-                    start: reply.baseAddress,
-                    count: Int(byteCount)
-                )
-            )
-            guard result == .queued else { return fail() }
-            endpointZeroTransaction = .dataIn
-            return USBDebugGadgetEvent.none
+            guard byteCount <= endpointZeroRequestedByteCount,
+                  byteCount <= UInt16(controlReplyBuffer.count)
+            else { return fail() }
+            endpointZeroInReplyByteCount = byteCount
+            endpointZeroInQueuedByteCount = 0
+            endpointZeroInNeedsZeroLengthPacket = byteCount > 0
+                && byteCount < endpointZeroRequestedByteCount
+                && byteCount
+                    % DWC2USBDebugScratchLayout
+                        .endpointZeroMaximumPacketByteCount == 0
+            endpointZeroInQueuedZeroLengthPacket = false
+            switch queueNextEndpointZeroInPacket() {
+            case .queued:
+                endpointZeroTransaction = .dataIn
+                return USBDebugGadgetEvent.none
+            case .complete:
+                resetEndpointZeroInState()
+                guard controller.armEndpoint0Out(byteCount: 0) else {
+                    return fail()
+                }
+                endpointZeroTransaction = .statusOut
+                return USBDebugGadgetEvent.none
+            case .failed:
+                return fail()
+            }
 
         case .dataOut(let expectedByteCount):
             guard expectedByteCount <= 64,
@@ -333,6 +361,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             return USBDebugGadgetEvent.none
 
         case .statusIn:
+            resetEndpointZeroInState()
             let result = controller.queueInTransfer(
                 endpoint: 0,
                 bytes: UnsafeRawBufferPointer(start: nil, count: 0)
@@ -342,6 +371,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             return USBDebugGadgetEvent.none
 
         case .stall, .replyBufferTooSmall:
+            resetEndpointZeroTransaction()
             controller.stallEndpoint0()
             guard controller.armEndpoint0ForSetup(preservingStall: true) else {
                 return fail()
@@ -354,18 +384,26 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     private mutating func completeEndpointZeroIn() -> USBDebugGadgetEvent? {
         switch endpointZeroTransaction {
         case .dataIn:
-            guard controller.armEndpoint0Out(byteCount: 0) else {
+            switch queueNextEndpointZeroInPacket() {
+            case .queued:
+                return USBDebugGadgetEvent.none
+            case .complete:
+                resetEndpointZeroInState()
+                guard controller.armEndpoint0Out(byteCount: 0) else {
+                    return fail()
+                }
+                endpointZeroTransaction = .statusOut
+                return USBDebugGadgetEvent.none
+            case .failed:
                 return fail()
             }
-            endpointZeroTransaction = .statusOut
-            return USBDebugGadgetEvent.none
 
         case .statusIn:
             let commit = controlEndpoint.completeStatusStage(succeeded: true)
             if case .deviceAddress(let address) = commit {
                 controller.setDeviceAddress(address)
             }
-            endpointZeroTransaction = .idle
+            resetEndpointZeroTransaction()
             guard controller.armEndpoint0ForSetup() else { return fail() }
             guard let configurationEvent = synchronizeConfiguration() else {
                 return nil
@@ -376,6 +414,66 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         case .idle, .dataOut, .statusOut, .stalled:
             return USBDebugGadgetEvent.none
         }
+    }
+
+    private mutating func queueNextEndpointZeroInPacket()
+        -> EndpointZeroInQueueResult {
+        let start: UnsafeRawPointer?
+        let byteCount: UInt16
+        let queuesZeroLengthPacket: Bool
+
+        if endpointZeroInQueuedByteCount < endpointZeroInReplyByteCount {
+            let remaining = endpointZeroInReplyByteCount
+                - endpointZeroInQueuedByteCount
+            byteCount = remaining < DWC2USBDebugScratchLayout
+                .endpointZeroMaximumPacketByteCount
+                ? remaining
+                : DWC2USBDebugScratchLayout
+                    .endpointZeroMaximumPacketByteCount
+            let reply = controlReplyBuffer
+            guard let baseAddress = reply.baseAddress else { return .failed }
+            start = UnsafeRawPointer(
+                baseAddress.advanced(
+                    by: Int(endpointZeroInQueuedByteCount)
+                )
+            )
+            queuesZeroLengthPacket = false
+        } else if endpointZeroInNeedsZeroLengthPacket
+                    && !endpointZeroInQueuedZeroLengthPacket {
+            start = nil
+            byteCount = 0
+            queuesZeroLengthPacket = true
+        } else {
+            return .complete
+        }
+
+        let result = controller.queueInTransfer(
+            endpoint: 0,
+            bytes: UnsafeRawBufferPointer(
+                start: start,
+                count: Int(byteCount)
+            )
+        )
+        guard result == .queued else { return .failed }
+        if queuesZeroLengthPacket {
+            endpointZeroInQueuedZeroLengthPacket = true
+        } else {
+            endpointZeroInQueuedByteCount += byteCount
+        }
+        return .queued
+    }
+
+    private mutating func resetEndpointZeroInState() {
+        endpointZeroInReplyByteCount = 0
+        endpointZeroInQueuedByteCount = 0
+        endpointZeroInNeedsZeroLengthPacket = false
+        endpointZeroInQueuedZeroLengthPacket = false
+    }
+
+    private mutating func resetEndpointZeroTransaction() {
+        endpointZeroTransaction = .idle
+        endpointZeroRequestedByteCount = 0
+        resetEndpointZeroInState()
     }
 
     private mutating func synchronizeConfiguration() -> USBDebugGadgetEvent? {
@@ -485,6 +583,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     private mutating func fail() -> USBDebugGadgetEvent {
         controller.disconnect()
         state = .faulted
+        resetEndpointZeroTransaction()
         displayTransferInFlight = false
         return .faulted
     }

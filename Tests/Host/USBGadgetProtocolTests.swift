@@ -206,7 +206,7 @@ struct USBGadgetProtocolTests {
                 ) == .written(8),
                 "host-length string truncation"
             )
-            expect(output[0] == 44 && output[1] == 3, "full string length retained")
+            expect(output[0] == 64 && output[1] == 3, "full string length retained")
             expectUTF16ASCII(output, "Swi", at: 2)
         }
 

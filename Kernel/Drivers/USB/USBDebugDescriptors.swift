@@ -354,7 +354,7 @@ enum USBDebugDescriptorSet {
         case 2: return "SwiftOS USB Debug"
         case 3: return "SWIFTOS-0001"
         case 4: return "SwiftOS Console"
-        case 5: return "SwiftOS Debug Display"
+        case 5: return "SwiftOS Debug Display Interface"
         default: return nil
         }
     }

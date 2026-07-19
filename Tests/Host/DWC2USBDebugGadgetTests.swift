@@ -13,7 +13,7 @@ private final class USBDebugGadgetRegisterBank {
         words[Int(DWC2RegisterLayout.resetControl / 4)] = DWC2CoreBits.ahbIdle
         words[Int(DWC2RegisterLayout.deviceControl / 4)]
             = DWC2CoreBits.softDisconnect
-        words[Int(DWC2RegisterLayout.endpoint0TransmitFIFOStatus / 4)] = 64
+        words[Int(DWC2RegisterLayout.inEndpointFIFOStatus(0)! / 4)] = 64
         words[Int(DWC2RegisterLayout.inEndpointFIFOStatus(2)! / 4)] = 128
     }
 
@@ -36,6 +36,14 @@ private final class USBDebugGadgetRegisterBank {
         words[Int(DWC2RegisterLayout.allEndpointInterrupts / 4)]
             |= 1 << UInt32(endpoint)
         injectGlobal(DWC2CoreBits.inEndpointInterrupt)
+    }
+
+    func injectOutCompletion(_ endpoint: UInt8) {
+        words[Int(DWC2RegisterLayout.outEndpointInterrupt(endpoint)! / 4)]
+            |= DWC2CoreBits.endpointTransferComplete
+        words[Int(DWC2RegisterLayout.allEndpointInterrupts / 4)]
+            |= 1 << UInt32(endpoint + 16)
+        injectGlobal(DWC2CoreBits.outEndpointInterrupt)
     }
 
     private func pack(_ bytes: [UInt8], start: Int) -> UInt32 {
@@ -151,6 +159,15 @@ struct DWC2USBDebugGadgetTests {
                     "high-speed enumeration not handled"
                 )
 
+                requestFullConfigurationDescriptor(
+                    bank: bank,
+                    gadget: &gadget
+                )
+                requestFullPacketStringDescriptor(
+                    bank: bank,
+                    gadget: &gadget
+                )
+
                 injectSetup(
                     [0x00, USBStandardRequest.setAddress, 1, 0, 0, 0, 0, 0],
                     bank: bank,
@@ -189,6 +206,134 @@ struct DWC2USBDebugGadgetTests {
                 expect(gadget.isOperational, "successful stream faulted")
             }
         }
+    }
+
+    private static func requestFullConfigurationDescriptor(
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        injectSetup(
+            [
+                0x80,
+                USBStandardRequest.getDescriptor,
+                0,
+                USBDescriptorType.configuration,
+                0,
+                0,
+                UInt8(USBDebugDeviceIdentity.configurationByteCount),
+                0,
+            ],
+            bank: bank,
+            gadget: &gadget
+        )
+        let inputTransferSize = Int(
+            DWC2RegisterLayout.inEndpointTransferSize(0)! / 4
+        )
+        expect(
+            bank.words[inputTransferSize]
+                == DWC2TransferSize.endpoint0In(byteCount: 64),
+            "configuration descriptor did not queue its first 64 bytes"
+        )
+
+        bank.injectInCompletion(0)
+        expect(
+            gadget.service() != .faulted,
+            "first configuration descriptor packet faulted gadget"
+        )
+        expect(
+            bank.words[inputTransferSize]
+                == DWC2TransferSize.endpoint0In(byteCount: 34),
+            "configuration descriptor did not queue its final 34 bytes"
+        )
+
+        bank.injectInCompletion(0)
+        expect(
+            gadget.service() != .faulted,
+            "final configuration descriptor packet faulted gadget"
+        )
+        let outputTransferSize = Int(
+            DWC2RegisterLayout.outEndpointTransferSize(0)! / 4
+        )
+        expect(
+            bank.words[outputTransferSize]
+                == DWC2TransferSize.endpoint0Out(byteCount: 0),
+            "configuration descriptor did not arm its status OUT stage"
+        )
+
+        bank.injectOutCompletion(0)
+        expect(
+            gadget.service() != .faulted,
+            "configuration descriptor status stage faulted gadget"
+        )
+        expect(
+            bank.words[outputTransferSize]
+                == DWC2TransferSize.endpoint0SetupReception,
+            "EP0 was not rearmed for SETUP after the descriptor transfer"
+        )
+    }
+
+    private static func requestFullPacketStringDescriptor(
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        injectSetup(
+            [
+                0x80,
+                USBStandardRequest.getDescriptor,
+                5,
+                USBDescriptorType.string,
+                0x09,
+                0x04,
+                0xff,
+                0,
+            ],
+            bank: bank,
+            gadget: &gadget
+        )
+        let inputTransferSize = Int(
+            DWC2RegisterLayout.inEndpointTransferSize(0)! / 4
+        )
+        expect(
+            bank.words[inputTransferSize]
+                == DWC2TransferSize.endpoint0In(byteCount: 64),
+            "64-byte string descriptor did not queue its data packet"
+        )
+
+        bank.injectInCompletion(0)
+        expect(
+            gadget.service() != .faulted,
+            "64-byte string descriptor packet faulted gadget"
+        )
+        expect(
+            bank.words[inputTransferSize]
+                == DWC2TransferSize.endpoint0In(byteCount: 0),
+            "full-sized short reply did not queue its terminating ZLP"
+        )
+
+        bank.injectInCompletion(0)
+        expect(
+            gadget.service() != .faulted,
+            "string descriptor ZLP faulted gadget"
+        )
+        let outputTransferSize = Int(
+            DWC2RegisterLayout.outEndpointTransferSize(0)! / 4
+        )
+        expect(
+            bank.words[outputTransferSize]
+                == DWC2TransferSize.endpoint0Out(byteCount: 0),
+            "string descriptor did not arm its status OUT stage"
+        )
+
+        bank.injectOutCompletion(0)
+        expect(
+            gadget.service() != .faulted,
+            "string descriptor status stage faulted gadget"
+        )
+        expect(
+            bank.words[outputTransferSize]
+                == DWC2TransferSize.endpoint0SetupReception,
+            "EP0 was not rearmed after the string descriptor transfer"
+        )
     }
 
     private static func injectSetup(
