@@ -223,6 +223,10 @@ ASSERT(((__bss_end - __bss_start) & 15) == 0,
        "BSS clear span must be 16-byte aligned")
 ASSERT((__dma_scratch_start & 4095) == 0,
        "DMA scratch must be 4 KiB aligned")
+ASSERT(__dma_scratch_end - __dma_scratch_start == 4K,
+       "DMA scratch must own one isolated cacheable page")
+ASSERT(__dma_scratch_end <= 0x100000000,
+       "Pi firmware mailbox scratch must fit its 32-bit physical word")
 ASSERT((__terminal_storage_start & 4095) == 0,
        "terminal storage must be 4 KiB aligned")
 ASSERT((__framebuffer_start & 4095) == 0,

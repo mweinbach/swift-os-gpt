@@ -254,6 +254,39 @@ arch_clean_data_cache_range:
     ret
 .size arch_clean_data_cache_range, . - arch_clean_data_cache_range
 
+/*
+ * Invalidate every data-cache line touched by [x0, x0 + x1) after a
+ * non-coherent device has returned ownership. Swift rejects empty and
+ * overflowing intervals. The pre-invalidation barrier orders the MMIO
+ * completion observation before stale CPU lines are discarded.
+ */
+.align 4
+.global arch_invalidate_data_cache_range
+.type arch_invalidate_data_cache_range, %function
+arch_invalidate_data_cache_range:
+    cbz     x1, .Lcache_invalidate_done
+    sub     x4, x1, #1
+    add     x4, x0, x4
+    mrs     x2, ctr_el0
+    ubfx    x2, x2, #16, #4
+    mov     x3, #4
+    lsl     x2, x3, x2
+    sub     x3, x2, #1
+    bic     x0, x0, x3
+    bic     x4, x4, x3
+    dsb     sy
+.Lcache_invalidate_loop:
+    dc      ivac, x0
+    cmp     x0, x4
+    b.hs    .Lcache_invalidate_barrier
+    add     x0, x0, x2
+    b       .Lcache_invalidate_loop
+.Lcache_invalidate_barrier:
+    dsb     sy
+.Lcache_invalidate_done:
+    ret
+.size arch_invalidate_data_cache_range, . - arch_invalidate_data_cache_range
+
 /* Early vectors park safely. Typed diagnostic vectors are the next milestone. */
 .align 11
 early_vectors:

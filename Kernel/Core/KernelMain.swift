@@ -492,10 +492,19 @@ private func activateUSBDebugGadget(
     else {
         return nil
     }
+    let scratchAddress = AArch64.dmaScratchAddress
+    guard powerOnRaspberryPiUSB(
+              console: console,
+              platform: platform,
+              scratchAddress: scratchAddress
+          )
+    else {
+        return nil
+    }
     let sessionID = AArch64.counterValue | 1
     guard let gadget = RaspberryPiUSBDebugGadget(
               resource: resource,
-              scratchBaseAddress: AArch64.dmaScratchAddress,
+              scratchBaseAddress: scratchAddress,
               scratchByteCount: 4_096,
               scanout: scanout,
               viewportScale: UInt16(viewport.scale),
@@ -509,6 +518,88 @@ private func activateUSBDebugGadget(
         DWC2USBDebugGadget<DWC2MMIORegisterAccess>.readyMarker
     )
     return gadget
+}
+
+/// Transfers the linker-owned scratch prefix to firmware long enough to power
+/// the DWC2 domain. A failure disables only the optional USB debug path; HDMI,
+/// serial, scheduling, and the QEMU platform continue independently.
+private func powerOnRaspberryPiUSB(
+    console: EarlyConsole,
+    platform: Platform,
+    scratchAddress: UInt64
+) -> Bool {
+    guard let mailboxResource = platform.firmwareMailbox else {
+        console.write("SWIFTOS:USB_POWER_NO_MAILBOX\n")
+        return false
+    }
+    guard let registers = FirmwareMailboxMMIORegisterAccess(
+              resource: mailboxResource
+          )
+    else {
+        console.write("SWIFTOS:USB_POWER_MAILBOX_RESOURCE\n")
+        return false
+    }
+    guard var mailbox = FirmwarePropertyMailbox(
+              registers: registers,
+              cache: AArch64FirmwareMailboxCacheMaintenance(),
+              bufferCPUAddress: scratchAddress,
+              // SwiftOS keeps its kernel and DMA scratch identity-mapped.
+              // Property channel 8 consumes the ARM physical address.
+              bufferPhysicalAddress: scratchAddress,
+              bufferByteCount: 4_096
+          )
+    else {
+        console.write("SWIFTOS:USB_POWER_MAILBOX_BUFFER\n")
+        return false
+    }
+
+    let result = mailbox.setPowerState(
+        deviceID: FirmwareMailboxPowerDevice.usb,
+        poweredOn: true,
+        waitUntilStable: true,
+        maximumPollCount: 100_000
+    )
+    switch result {
+    case .completed:
+        console.write("SWIFTOS:USB_POWER_READY\n")
+        return true
+    case .invalidPollLimit:
+        console.write("SWIFTOS:USB_POWER_POLL_LIMIT\n")
+    case .cacheCleanFailed:
+        console.write("SWIFTOS:USB_POWER_CACHE_CLEAN\n")
+    case .writeTimedOut:
+        console.write("SWIFTOS:USB_POWER_WRITE_TIMEOUT\n")
+    case .responseTimedOut:
+        console.write("SWIFTOS:USB_POWER_RESPONSE_TIMEOUT\n")
+    case .cacheInvalidationFailed:
+        console.write("SWIFTOS:USB_POWER_CACHE_INVALIDATE\n")
+    case .malformedResponse(let error):
+        console.write(usbPowerResponseMarker(for: error))
+    }
+    return false
+}
+
+private func usbPowerResponseMarker(
+    for error: FirmwareMailboxPowerResponseError
+) -> StaticString {
+    switch error {
+    case .bufferSize:
+        return "SWIFTOS:USB_POWER_RESPONSE_SIZE\n"
+    case .messageResponseCode:
+        return "SWIFTOS:USB_POWER_RESPONSE_CODE\n"
+    case .tagIdentifier:
+        return "SWIFTOS:USB_POWER_TAG_ID\n"
+    case .tagBufferSize:
+        return "SWIFTOS:USB_POWER_TAG_SIZE\n"
+    case .tagResponseLength:
+        return "SWIFTOS:USB_POWER_TAG_LENGTH\n"
+    case .deviceIdentifier:
+        return "SWIFTOS:USB_POWER_DEVICE_ID\n"
+    case .powerState:
+        return "SWIFTOS:USB_POWER_STATE\n"
+    case .endTag:
+        return "SWIFTOS:USB_POWER_END_TAG\n"
+    }
 }
 
 private func activateQEMUDisplay(

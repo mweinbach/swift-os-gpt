@@ -58,6 +58,23 @@ def main() -> int:
         if not match or int(match.group(1), 16) != expected:
             return fail(f"{name} does not preserve its identity output address")
 
+    dma_symbols: dict[str, int] = {}
+    for name in ("__dma_scratch_start", "__dma_scratch_end"):
+        match = re.search(
+            rf"^([0-9a-fA-F]+)\s+\S\s+{name}$",
+            symbols,
+            re.MULTILINE,
+        )
+        if not match:
+            return fail(f"missing linker-owned mailbox buffer symbol {name}")
+        dma_symbols[name] = int(match.group(1), 16)
+    dma_start = dma_symbols["__dma_scratch_start"]
+    dma_end = dma_symbols["__dma_scratch_end"]
+    if dma_start & 0xFFF or dma_end - dma_start != 0x1000:
+        return fail("DMA scratch is not one isolated, 4 KiB-aligned page")
+    if dma_end > 0x1_0000_0000:
+        return fail("DMA scratch cannot be encoded in a property mailbox word")
+
     data = image.read_bytes()
     if len(data) < 64:
         return fail("raw image is shorter than its 64-byte header")
@@ -74,7 +91,8 @@ def main() -> int:
     print(identity.strip())
     print(
         "Pi 5 image contract: entry=0x80000, reset=0x81000, "
-        f"raw={len(data)} bytes, memory={image_size} bytes, 4 KiB pages"
+        f"raw={len(data)} bytes, memory={image_size} bytes, 4 KiB pages, "
+        f"mailbox-scratch=0x{dma_start:x}"
     )
     print("hardware execution: UNVERIFIED")
     return 0

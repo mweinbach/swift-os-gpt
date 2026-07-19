@@ -76,6 +76,23 @@ enum AArch64 {
         return true
     }
 
+    /// Discards CPU cache lines after a non-coherent device has completed
+    /// writing the corresponding physical byte interval. Callers must clean
+    /// any dirty CPU data before ownership is transferred to the device.
+    @inline(__always)
+    static func invalidateDataCache(
+        address: UInt64,
+        byteCount: UInt64
+    ) -> Bool {
+        guard byteCount > 0,
+              byteCount <= UInt64.max - address
+        else {
+            return false
+        }
+        archInvalidateDataCacheRange(address, byteCount)
+        return true
+    }
+
     @inline(__always)
     static func spinHint() {
         archSpinHint()
@@ -180,6 +197,12 @@ private func archDataSyncBarrier()
 
 @_silgen_name("arch_clean_data_cache_range")
 private func archCleanDataCacheRange(_ address: UInt64, _ byteCount: UInt64)
+
+@_silgen_name("arch_invalidate_data_cache_range")
+private func archInvalidateDataCacheRange(
+    _ address: UInt64,
+    _ byteCount: UInt64
+)
 
 @_silgen_name("arch_spin_hint")
 private func archSpinHint()

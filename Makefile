@@ -53,7 +53,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test usb-display-viewer userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test usb-display-viewer userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -151,6 +151,16 @@ source-check:
 	$(PYTHON) tools/validate_source_boundary.py
 	$(PYTHON) tools/validate_gpu_only_path.py Kernel/Core/KernelMain.swift
 
+firmware-mailbox-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Core/PhysicalBytes.swift \
+		Kernel/Drivers/FirmwarePropertyMailbox.swift \
+		Tests/Host/FirmwarePropertyMailboxTests.swift \
+		-o $(BUILD_DIR)/firmware-property-mailbox-host-tests
+	$(BUILD_DIR)/firmware-property-mailbox-host-tests
+
 usb-gadget-host-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
@@ -235,7 +245,7 @@ $(USB_DISPLAY_VIEWER): \
 
 usb-display-viewer: $(USB_DISPLAY_VIEWER)
 
-host-test: usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test
+host-test: firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-display-viewer-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \

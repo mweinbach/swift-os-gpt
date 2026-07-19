@@ -548,6 +548,22 @@ struct SimpleFramebufferDisplayTests {
         )
         expect(bootstrap?.display != nil, "framebuffer display missing")
 
+        let headless = PlatformDriverBootstrap.discover(
+            platform: Platform(
+                firmwareMailbox: mailbox,
+                usbDeviceController: .dwc2(registers: usb),
+                simpleFramebuffer: nil,
+                graphicsResources: nil
+            )
+        )
+        expect(
+            headless?.display == nil
+                && headless?.resources.mmioResourceCount == 2
+                && headless?.resources.mmioResource(at: 0) == mailbox
+                && headless?.resources.mmioResource(at: 1) == usb,
+            "headless Pi lost mailbox or DWC2 MMIO mappings"
+        )
+
         let unsupported = PlatformDriverBootstrap.discover(
             platform: Platform(
                 firmwareMailbox: nil,
