@@ -19,6 +19,7 @@ private final class VirtIOBlockTestHardware {
     var status: UInt32 = 0
     var interruptStatus: UInt32 = 0
     var interruptStatusAfterReset: UInt32?
+    var capacityChangeOnInterruptRead: UInt64?
     var interruptAcknowledgeWrites: [UInt32] = []
     var registerReads: [UInt] = []
     var configurationGeneration: UInt32 = 4
@@ -168,6 +169,11 @@ private struct VirtIOBlockTestRegisters: VirtIOBlockRegisterAccess {
         case VirtIOBlockMMIORegisterLayout.queueReady:
             return hardware.queueReady
         case VirtIOBlockMMIORegisterLayout.interruptStatus:
+            if let capacity = hardware.capacityChangeOnInterruptRead {
+                hardware.capacityChangeOnInterruptRead = nil
+                hardware.capacity = capacity
+                hardware.interruptStatus |= 2
+            }
             return hardware.interruptStatus
         case VirtIOBlockMMIORegisterLayout.status:
             return hardware.status
@@ -289,6 +295,7 @@ struct VirtIOBlockDeviceTests {
         initializesModernDeviceAndNegotiatesOnlySupportedFeatures()
         discoversMMIOIdentityInRequiredOrder()
         acknowledgesOnlyDefinedInterruptBits()
+        snapshotsCapacityAfterResetEraConfigurationChanges()
         rejectsTranslatedDMAWithoutAccessPlatform()
         resetsOrQuarantinesPublishedDMAStorage()
         transfersCompleteBlocksAndFlushes()
@@ -297,7 +304,7 @@ struct VirtIOBlockDeviceTests {
         failsClosedOnTimedOutAndMalformedCompletions()
         rejectsConfigurationMutationAfterPublication()
         mapsDeviceReportedErrors()
-        print("VirtIO block device host tests: 11 groups passed")
+        print("VirtIO block device host tests: 12 groups passed")
     }
 
     private static func discoversMMIOIdentityInRequiredOrder() {
@@ -386,6 +393,32 @@ struct VirtIOBlockDeviceTests {
             expect(
                 hardware.registerReads.isEmpty,
                 "invalid DMA reached MMIO discovery"
+            )
+        }
+    }
+
+    private static func snapshotsCapacityAfterResetEraConfigurationChanges() {
+        withDMAStorage { storage in
+            let hardware = VirtIOBlockTestHardware()
+            hardware.capacityChangeOnInterruptRead = 16
+            let result = VirtIOBlockDevice<VirtIOBlockTestRegisters>.initialize(
+                registers: VirtIOBlockTestRegisters(hardware: hardware),
+                storage: storage
+            )
+            guard case .ready(var device) = result else {
+                fail("configuration-race device initialization")
+            }
+            expect(
+                device.geometry.logicalBlockCount == 16,
+                "configuration interrupt stale capacity was published"
+            )
+            expect(
+                hardware.interruptAcknowledgeWrites == [2],
+                "configuration change was not handled before snapshot"
+            )
+            expect(
+                device.teardown() == .safeToRelease,
+                "configuration-race teardown"
             )
         }
     }

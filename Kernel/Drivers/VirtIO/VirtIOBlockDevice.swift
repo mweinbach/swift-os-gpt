@@ -396,6 +396,11 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
             return .failure(.featureNegotiationFailed)
         }
 
+        // Clear reset-era notifications before taking the capacity snapshot.
+        // A configuration change after this point remains pending, so submit
+        // will fail closed instead of using geometry whose notification was
+        // accidentally acknowledged after the snapshot.
+        acknowledgeInterrupts(registers, mask: Interrupt.known)
         guard let sectorCount = readStableCapacity(registers) else {
             failInitialization(registers)
             return .failure(.unstableConfiguration)
@@ -409,7 +414,6 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
             return .failure(.invalidCapacity)
         }
 
-        acknowledgeInterrupts(registers, mask: Interrupt.known)
         switch configureQueue(registers, storage: storage) {
         case .ready:
             break
