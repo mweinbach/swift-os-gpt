@@ -60,7 +60,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke virtio-input-smoke smp-el0-smoke cpu-config-smoke test host-test vfs-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test platform-storage-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke virtio-input-smoke virtio-block-swiftfs-smoke smp-el0-smoke cpu-config-smoke test host-test vfs-host-test filesystem-host-test file-manager-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test virtio-block-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test platform-storage-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -697,6 +697,66 @@ vfs-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/vfs-primitives-host-tests
 	$(BUILD_DIR)/vfs-primitives-host-tests
 
+filesystem-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Storage/BlockDevice.swift \
+		Kernel/Storage/StorageCRC32.swift \
+		Kernel/FileSystem/VFSPath.swift \
+		Kernel/FileSystem/VFSContracts.swift \
+		Kernel/FileSystem/SwiftFSOnDisk.swift \
+		Kernel/FileSystem/SwiftFSPersistentProvider.swift \
+		Tests/Host/SwiftFSPersistentProviderTests.swift \
+		-o $(BUILD_DIR)/swiftfs-persistent-provider-host-tests
+	$(BUILD_DIR)/swiftfs-persistent-provider-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Storage/BlockDevice.swift \
+		Kernel/Storage/StorageCRC32.swift \
+		Kernel/Storage/SwiftOSDataVolume.swift \
+		Kernel/Storage/SwiftOSDataVolumeBootstrap.swift \
+		Kernel/FileSystem/VFSPath.swift \
+		Kernel/FileSystem/VFSContracts.swift \
+		Kernel/FileSystem/SwiftFSOnDisk.swift \
+		Kernel/FileSystem/SwiftFSPersistentProvider.swift \
+		Kernel/FileSystem/SwiftFSPersistentVolumeBootstrap.swift \
+		Tests/Host/StorageTestSupport.swift \
+		Tests/Host/PersistentVolumeBootstrapTests.swift \
+		-o $(BUILD_DIR)/persistent-volume-bootstrap-host-tests
+	$(BUILD_DIR)/persistent-volume-bootstrap-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/FileSystem/VFSPath.swift \
+		Kernel/FileSystem/VFSContracts.swift \
+		Kernel/FileSystem/VFSHandleTable.swift \
+		Kernel/FileSystem/VFSMountNamespace.swift \
+		Kernel/FileSystem/FileSystemSyscallABI.swift \
+		Kernel/FileSystem/EL0UserMemory.swift \
+		Kernel/FileSystem/KernelFileService.swift \
+		Kernel/Interrupts/ExceptionFrame.swift \
+		Kernel/FileSystem/EL0FileSystemExceptionDispatcher.swift \
+		Tests/Host/FileSystemSyscallTests.swift \
+		-o $(BUILD_DIR)/filesystem-syscall-host-tests
+	$(BUILD_DIR)/filesystem-syscall-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Storage/BlockDevice.swift \
+		Kernel/Storage/StorageCRC32.swift \
+		Kernel/FileSystem/VFSPath.swift \
+		Kernel/FileSystem/VFSContracts.swift \
+		Kernel/FileSystem/VFSHandleTable.swift \
+		Kernel/FileSystem/VFSMountNamespace.swift \
+		Kernel/FileSystem/FileSystemSyscallABI.swift \
+		Kernel/FileSystem/EL0UserMemory.swift \
+		Kernel/FileSystem/KernelFileService.swift \
+		Kernel/FileSystem/SwiftFSOnDisk.swift \
+		Kernel/FileSystem/SwiftFSPersistentProvider.swift \
+		Kernel/FileSystem/BorrowedMountedProviderBackend.swift \
+		Tests/Host/BorrowedMountedProviderBackendTests.swift \
+		-o $(BUILD_DIR)/borrowed-mounted-provider-backend-host-tests
+	$(BUILD_DIR)/borrowed-mounted-provider-backend-host-tests
+
 input-host-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
@@ -710,6 +770,56 @@ input-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/input-primitives-host-tests
 	$(BUILD_DIR)/input-primitives-host-tests
 
+file-manager-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Input/InputEvent.swift \
+		Kernel/Input/SynchronousInputEventDispatch.swift \
+		Tests/Host/SynchronousInputEventDispatchTests.swift \
+		-o $(BUILD_DIR)/synchronous-input-event-dispatch-host-tests
+	$(BUILD_DIR)/synchronous-input-event-dispatch-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/Animation.swift \
+		Kernel/Input/InputEvent.swift \
+		Kernel/FileSystem/VFSPath.swift \
+		Kernel/FileSystem/VFSContracts.swift \
+		Kernel/UI/FileBrowserModel.swift \
+		Kernel/UI/FileManagerPresentationState.swift \
+		Kernel/UI/USKeyboardTextComposer.swift \
+		Kernel/UI/WindowInputRouter.swift \
+		Tests/Host/FileManagerInteractionTests.swift \
+		-o $(BUILD_DIR)/file-manager-interaction-host-tests
+	$(BUILD_DIR)/file-manager-interaction-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/DisplayViewport.swift \
+		Kernel/Graphics/DamageRegion.swift \
+		Kernel/Graphics/RetainedLayerTree.swift \
+		Kernel/Graphics/BitmapFont.swift \
+		Kernel/Graphics/Animation.swift \
+		Kernel/Graphics/GPU/GPUPrimitives.swift \
+		Kernel/Graphics/GPU/GPURenderCommands.swift \
+		Kernel/Graphics/GPU/GPUCommandBuffer.swift \
+		Kernel/Graphics/GPU/GPUMaskFontAtlas.swift \
+		Kernel/Graphics/GPU/GPURetainedSceneCompiler.swift \
+		Kernel/Drivers/VirtIO/VirGLCommandEncoder.swift \
+		Kernel/Drivers/VirtIO/VirGLIRCompiler.swift \
+		Kernel/Input/InputEvent.swift \
+		Kernel/FileSystem/VFSPath.swift \
+		Kernel/FileSystem/VFSContracts.swift \
+		Kernel/UI/FileBrowserModel.swift \
+		Kernel/UI/FileManagerPresentationState.swift \
+		Kernel/UI/WindowInputRouter.swift \
+		Kernel/UI/GPUFileManagerSceneCompiler.swift \
+		Tests/Host/GPUFileManagerSceneTests.swift \
+		-o $(BUILD_DIR)/gpu-file-manager-scene-host-tests
+	$(BUILD_DIR)/gpu-file-manager-scene-host-tests
+
 storage-host-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
@@ -720,6 +830,36 @@ storage-host-test: | $(BUILD_DIR)
 		Tests/Host/StorageFoundationTests.swift \
 		-o $(BUILD_DIR)/storage-foundation-host-tests
 	$(BUILD_DIR)/storage-foundation-host-tests
+
+virtio-block-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Core/PhysicalBytes.swift \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Storage/BlockDevice.swift \
+		Kernel/Drivers/VirtIO/VirtIOFeatureNegotiation.swift \
+		Kernel/Drivers/VirtIO/VirtIOSplitQueueLayout.swift \
+		Kernel/Drivers/VirtIO/VirtIOBlockDevice.swift \
+		Tests/Host/VirtIOBlockDeviceTests.swift \
+		-o $(BUILD_DIR)/virtio-block-device-host-tests
+	$(BUILD_DIR)/virtio-block-device-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Core/PhysicalBytes.swift \
+		Kernel/Memory/PhysicalMemory.swift \
+		Kernel/Memory/ClassifiedPhysicalMemory.swift \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Storage/BlockDevice.swift \
+		Kernel/Drivers/VirtIO/VirtIOFeatureNegotiation.swift \
+		Kernel/Drivers/VirtIO/VirtIOSplitQueueLayout.swift \
+		Kernel/Drivers/VirtIO/VirtIOBlockDevice.swift \
+		Kernel/Drivers/VirtIO/VirtIOBlockBootstrapMemory.swift \
+		Tests/Host/VirtIOBlockBootstrapMemoryTests.swift \
+		-o $(BUILD_DIR)/virtio-block-bootstrap-memory-host-tests
+	$(BUILD_DIR)/virtio-block-bootstrap-memory-host-tests
 
 sdhci-block-device-host-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
@@ -781,7 +921,7 @@ rpi5-cooperative-policy-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/rpi5-cooperative-policy-host-tests
 	$(BUILD_DIR)/rpi5-cooperative-policy-host-tests
 
-host-test: vfs-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
+host-test: vfs-host-test filesystem-host-test file-manager-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test virtio-block-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
@@ -1273,6 +1413,10 @@ virtio-input-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/virtio_input_smoke.py \
 		$(KERNEL_BIN)
 
+virtio-block-swiftfs-smoke: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/virtio_block_swiftfs_smoke.py \
+		$(KERNEL_BIN)
+
 smp-el0-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py $(KERNEL_BIN)
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
@@ -1282,7 +1426,7 @@ cpu-config-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
 		$(KERNEL_BIN) --cpu cortex-a76 --cpus 2
 
-test: toolchain-check source-check host-test userland-test qemu-fdt-test rpi5-package-test inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke virtio-input-smoke smp-el0-smoke cpu-config-smoke rpi5-inspect
+test: toolchain-check source-check host-test userland-test qemu-fdt-test rpi5-package-test inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke virtio-input-smoke virtio-block-swiftfs-smoke smp-el0-smoke cpu-config-smoke rpi5-inspect
 
 clean:
 	rm -rf $(BUILD_DIR)
