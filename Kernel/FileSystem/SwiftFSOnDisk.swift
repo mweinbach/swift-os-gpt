@@ -161,6 +161,26 @@ enum SwiftFSOnDisk {
         .union(.readMetadata)
         .union(.writeMetadata)
 
+    static func initialRootRecord() -> SwiftFSNodeRecord {
+        let epoch = VFSTimestamp(
+            secondsSinceUnixEpoch: 0,
+            nanoseconds: 0
+        )!
+        return SwiftFSNodeRecord(
+            slot: rootSlot,
+            kind: .directory,
+            parentSlot: rootSlot,
+            nameByteCount: 0,
+            byteCount: 0,
+            firstDataBlock: 0,
+            dataBlockCount: 0,
+            generation: 1,
+            createdAt: epoch,
+            modifiedAt: epoch,
+            availableAccess: directoryAccess
+        )
+    }
+
     static func encodeSuperblock(
         _ superblock: SwiftFSSuperblock,
         into bytes: UnsafeMutableRawBufferPointer

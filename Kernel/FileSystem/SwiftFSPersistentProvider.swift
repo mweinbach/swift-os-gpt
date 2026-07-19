@@ -101,20 +101,7 @@ struct SwiftFSPersistentProvider<Device: BlockDevice>: VFSNodeProvider {
             return .failure(.synchronizeFailed(invalidationSync))
         }
 
-        let epoch = VFSTimestamp(secondsSinceUnixEpoch: 0, nanoseconds: 0)!
-        let root = SwiftFSNodeRecord(
-            slot: SwiftFSOnDisk.rootSlot,
-            kind: .directory,
-            parentSlot: SwiftFSOnDisk.rootSlot,
-            nameByteCount: 0,
-            byteCount: 0,
-            firstDataBlock: 0,
-            dataBlockCount: 0,
-            generation: 1,
-            createdAt: epoch,
-            modifiedAt: epoch,
-            availableAccess: SwiftFSOnDisk.directoryAccess
-        )
+        let root = SwiftFSOnDisk.initialRootRecord()
         var slot: UInt32 = 1
         while slot <= layout.nodeCapacity {
             if slot == SwiftFSOnDisk.rootSlot {
@@ -241,6 +228,33 @@ struct SwiftFSPersistentProvider<Device: BlockDevice>: VFSNodeProvider {
             }
         }
         return .failure(.noValidSnapshot)
+    }
+
+    /// Constructs a provider after an external incremental mount validator has
+    /// checked every block in `superblock`'s active snapshot. This is kept
+    /// internal to the filesystem module so transport runtimes cannot bypass
+    /// validation accidentally.
+    static func mountedValidatedSnapshot(
+        device: Device,
+        superblock: SwiftFSSuperblock,
+        accessMode: SwiftFSAccessMode,
+        scratch: UnsafeMutableRawBufferPointer
+    ) -> Self? {
+        guard scratchBuffers(
+                  scratch,
+                  blockByteCount: superblock.layout.logicalBlockByteCount
+              ) != nil
+        else { return nil }
+        return Self(
+            device: device,
+            volumeIdentifier: superblock.volumeIdentifier,
+            accessMode: accessMode,
+            layout: superblock.layout,
+            sequence: superblock.sequence,
+            activeBank: superblock.activeBank,
+            scratchBase: scratch.baseAddress!,
+            isAvailable: true
+        )
     }
 
     mutating func metadata(for node: VFSNodeIdentifier) -> VFSMetadataResult {

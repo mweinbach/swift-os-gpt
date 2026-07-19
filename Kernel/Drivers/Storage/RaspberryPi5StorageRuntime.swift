@@ -20,6 +20,10 @@ private typealias RaspberryPi5PersistentLogService =
         RaspberryPi5SharedSDCardBlockDevice,
         RuntimeRetainedKernelLogSource
     >
+private typealias RaspberryPi5UserFileSystemBootstrap =
+    SwiftFSIncrementalVolumeBootstrap<
+        RaspberryPi5SharedSDCardBlockDevice
+    >
 
 private nonisolated(unsafe) var raspberryPi5SDDeviceAllocation:
     ClassifiedPageAllocationToken?
@@ -45,8 +49,8 @@ enum RaspberryPi5StorageRuntime {
     private nonisolated(unsafe) static var faulted = false
     private nonisolated(unsafe) static var reportingPolicy =
         RaspberryPi5StorageReportingPolicy()
-    private nonisolated(unsafe) static var pendingUserFileSystemRange:
-        BlockDeviceRange?
+    private nonisolated(unsafe) static var pendingUserFileSystemBootstrap:
+        RaspberryPi5UserFileSystemBootstrap?
     private nonisolated(unsafe) static var userFileSystemBootstrapResolved =
         false
 
@@ -132,9 +136,9 @@ enum RaspberryPi5StorageRuntime {
     static func serviceRecoveryOrFlushOnce() {
         if RaspberryPi5SwiftFSStoragePolicy.steadyStateAction(
             userFileSystemBootstrapPending:
-                pendingUserFileSystemRange != nil
+                pendingUserFileSystemBootstrap != nil
         ) == .bootstrapUserFileSystem {
-            bootstrapUserFileSystem()
+            serviceUserFileSystemBootstrapOnce()
             return
         }
         guard var service = activeService,
@@ -258,43 +262,53 @@ enum RaspberryPi5StorageRuntime {
         )
         switch planned {
         case .plan(let plan):
-            pendingUserFileSystemRange = plan.userFileSystem
+            guard let scratchAllocation =
+                      raspberryPi5SwiftFSScratchAllocation,
+                  let scratch = rawBuffer(for: scratchAllocation),
+                  let userDevice = RaspberryPi5SharedSDCardBlockDevice(
+                      borrowing: devicePointer,
+                      partitionRange: plan.userFileSystem
+                  )
+            else {
+                reportUserFileSystemUnavailable()
+                return
+            }
+            pendingUserFileSystemBootstrap =
+                RaspberryPi5UserFileSystemBootstrap(
+                    device: userDevice,
+                    volumeIdentifier:
+                        SwiftOSUserFileSystemConfiguration.volumeIdentifier,
+                    nodeCapacity:
+                        SwiftOSUserFileSystemConfiguration
+                            .initialNodeCapacity,
+                    scratch: scratch
+                )
         case .failure:
             reportUserFileSystemUnavailable()
         }
     }
 
-    private static func bootstrapUserFileSystem() {
-        guard let range = pendingUserFileSystemRange else { return }
-        // One attempt owns this cooperative pass. Even failure cannot cause an
-        // implicit retry or an unbounded write loop on ambiguous media.
-        pendingUserFileSystemRange = nil
-        guard let devicePointer = raspberryPi5SDDevice,
-              let scratchAllocation = raspberryPi5SwiftFSScratchAllocation,
-              let providerAllocation = raspberryPi5SwiftFSProviderAllocation,
-              let scratch = rawBuffer(for: scratchAllocation),
-              let providerPointer = pointer(
-                  in: providerAllocation,
-                  to: RaspberryPi5UserFileSystemProvider.self
-              ), let userDevice = RaspberryPi5SharedSDCardBlockDevice(
-                  borrowing: devicePointer,
-                  partitionRange: range
-              )
-        else {
-            reportUserFileSystemUnavailable()
-            return
-        }
-
-        let opened = SwiftFSPersistentVolumeBootstrap.openOrFormatBlank(
-            userDevice,
-            volumeIdentifier:
-                SwiftOSUserFileSystemConfiguration.volumeIdentifier,
-            nodeCapacity:
-                SwiftOSUserFileSystemConfiguration.initialNodeCapacity,
-            scratch: scratch
-        )
-        switch opened {
+    /// Advances only one incremental filesystem phase. A phase may perform one
+    /// block read, one block write, one synchronize, or CPU-only validation;
+    /// the persistent-log service never shares the same cooperative pass.
+    private static func serviceUserFileSystemBootstrapOnce() {
+        guard var bootstrap = pendingUserFileSystemBootstrap else { return }
+        let step = bootstrap.serviceOnce()
+        switch step {
+        case .advanced:
+            pendingUserFileSystemBootstrap = bootstrap
         case .ready(let provider, let state):
+            pendingUserFileSystemBootstrap = nil
+            guard let providerAllocation =
+                      raspberryPi5SwiftFSProviderAllocation,
+                  let providerPointer = pointer(
+                      in: providerAllocation,
+                      to: RaspberryPi5UserFileSystemProvider.self
+                  )
+            else {
+                reportUserFileSystemUnavailable()
+                return
+            }
             providerPointer.initialize(to: provider)
             raspberryPi5UserFileSystemProvider = providerPointer
             switch state {
@@ -305,6 +319,7 @@ enum RaspberryPi5StorageRuntime {
             }
             console?.write("SWIFTOS:SWIFTFS_READY\n")
         case .failure:
+            pendingUserFileSystemBootstrap = nil
             reportUserFileSystemUnavailable()
         }
     }
@@ -455,7 +470,7 @@ enum RaspberryPi5StorageRuntime {
         case .disabled(let failure):
             reportFailure(failure, console: console)
             activeService = nil
-            pendingUserFileSystemRange = nil
+            pendingUserFileSystemBootstrap = nil
             releaseUnpublishedUserFileSystemResources()
             raspberryPi5UserFileSystemProvider = nil
             faulted = true
@@ -570,7 +585,7 @@ enum RaspberryPi5StorageRuntime {
         pendingDescription = nil
         deferredActivation = nil
         activeService = nil
-        pendingUserFileSystemRange = nil
+        pendingUserFileSystemBootstrap = nil
         releaseUnpublishedUserFileSystemResources()
         raspberryPi5UserFileSystemProvider = nil
         faulted = true
