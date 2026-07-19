@@ -87,40 +87,25 @@ enum VirtIONetworkConfiguration {
     static let packetBufferByteCount: UInt64 = 1_536
 }
 
-/// Packed split-ring offsets for one caller-owned DMA mapping. The trailing
-/// event fields retain their standard storage slots but are ignored because
-/// this polling driver never negotiates EVENT_IDX.
+/// Network-specific size policy over the transport-neutral split-ring layout.
+/// The trailing event fields retain their standard storage slots but are
+/// ignored because this polling driver never negotiates EVENT_IDX.
 struct VirtIONetworkSplitQueueLayout: Equatable {
-    let size: UInt16
-    let descriptorOffset: UInt64
-    let availableOffset: UInt64
-    let usedOffset: UInt64
-    let requiredByteCount: UInt64
+    private let layout: VirtIOSplitQueueLayout
+
+    var size: UInt16 { layout.size }
+    var descriptorOffset: UInt64 { layout.descriptorOffset }
+    var availableOffset: UInt64 { layout.availableOffset }
+    var usedOffset: UInt64 { layout.usedOffset }
+    var requiredByteCount: UInt64 { layout.requiredByteCount }
 
     init?(size: UInt16) {
-        guard size > 0,
-              size <= 256,
-              size & (size - 1) == 0
+        guard size <= 256,
+              let layout = VirtIOSplitQueueLayout(size: size)
         else {
             return nil
         }
-        let count = UInt64(size)
-        let descriptorByteCount = count * 16
-        let availableByteCount = 6 + count * 2
-        let used = Self.aligned(
-            descriptorByteCount + availableByteCount,
-            to: 4
-        )
-        let required = used + 6 + count * 8
-        self.size = size
-        descriptorOffset = 0
-        availableOffset = descriptorByteCount
-        usedOffset = used
-        requiredByteCount = required
-    }
-
-    private static func aligned(_ value: UInt64, to alignment: UInt64) -> UInt64 {
-        (value + alignment - 1) & ~(alignment - 1)
+        self.layout = layout
     }
 }
 

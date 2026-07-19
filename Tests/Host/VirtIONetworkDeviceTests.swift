@@ -266,6 +266,10 @@ struct VirtIONetworkDeviceTests {
     private static func validatesSplitQueueAndCallerOwnedStorage() {
         require(VirtIONetworkSplitQueueLayout(size: 0) == nil, "zero queue accepted")
         require(VirtIONetworkSplitQueueLayout(size: 3) == nil, "non-power-of-two queue accepted")
+        require(
+            VirtIONetworkSplitQueueLayout(size: 512) == nil,
+            "network queue exceeded its 256-entry policy"
+        )
         guard let layout = VirtIONetworkSplitQueueLayout(size: 4) else {
             fail("valid queue rejected")
         }
