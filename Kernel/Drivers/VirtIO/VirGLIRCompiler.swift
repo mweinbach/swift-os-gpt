@@ -29,7 +29,85 @@ enum VirGLIRUnitQuadVertexLayout: Equatable {
     }
 }
 
-/// Context-local object handles used by the quad pipelines. Resource
+/// Complete binding for one immutable, single-channel glyph atlas.
+/// Texture identity belongs to device-neutral IR; the resource handle and all
+/// object handles belong to this VirGL context.
+struct VirGLIRGlyphPipeline: Equatable {
+    let textureID: GPUTextureID
+    let textureResource: UInt32
+    let vertexShader: UInt32
+    let fragmentShader: UInt32
+    let samplerView: UInt32
+    let nearestSampler: UInt32
+    let linearSampler: UInt32
+
+    init?(
+        textureID: GPUTextureID,
+        textureResource: UInt32,
+        vertexShader: UInt32,
+        fragmentShader: UInt32,
+        samplerView: UInt32,
+        nearestSampler: UInt32,
+        linearSampler: UInt32
+    ) {
+        guard textureResource != 0,
+              vertexShader != 0,
+              fragmentShader != 0,
+              samplerView != 0,
+              nearestSampler != 0,
+              linearSampler != 0,
+              Self.areDistinct(
+                  vertexShader,
+                  fragmentShader,
+                  samplerView,
+                  nearestSampler,
+                  linearSampler
+              )
+        else {
+            return nil
+        }
+        self.textureID = textureID
+        self.textureResource = textureResource
+        self.vertexShader = vertexShader
+        self.fragmentShader = fragmentShader
+        self.samplerView = samplerView
+        self.nearestSampler = nearestSampler
+        self.linearSampler = linearSampler
+    }
+
+    func containsContextObjectHandle(_ handle: UInt32) -> Bool {
+        handle == vertexShader
+            || handle == fragmentShader
+            || handle == samplerView
+            || handle == nearestSampler
+            || handle == linearSampler
+    }
+
+    private static func areDistinct(
+        _ value0: UInt32,
+        _ value1: UInt32,
+        _ value2: UInt32,
+        _ value3: UInt32,
+        _ value4: UInt32
+    ) -> Bool {
+        let values = (value0, value1, value2, value3, value4)
+        return withUnsafeBytes(of: values) { bytes in
+            let words = bytes.bindMemory(to: UInt32.self)
+            var left = 0
+            while left < words.count {
+                var right = left + 1
+                while right < words.count {
+                    if words[left] == words[right] { return false }
+                    right += 1
+                }
+                left += 1
+            }
+            return true
+        }
+    }
+}
+
+/// Context-local object handles used by the drawing pipelines. Resource
 /// handles live in a separate VirtIO-GPU namespace, but all object handles are
 /// kept distinct so teardown and protocol traces remain unambiguous.
 struct VirGLIRPipelineHandles: Equatable {
@@ -40,6 +118,7 @@ struct VirGLIRPipelineHandles: Equatable {
     /// valid staged configuration, but rounded commands then fail closed.
     let roundedVertexShader: UInt32?
     let roundedFragmentShader: UInt32?
+    let glyph: VirGLIRGlyphPipeline?
     let vertexElements: UInt32
     let rasterizer: UInt32
     let depthStencilAlpha: UInt32
@@ -52,6 +131,7 @@ struct VirGLIRPipelineHandles: Equatable {
         fragmentShader: UInt32,
         roundedVertexShader: UInt32? = nil,
         roundedFragmentShader: UInt32? = nil,
+        glyph: VirGLIRGlyphPipeline? = nil,
         vertexElements: UInt32,
         rasterizer: UInt32,
         depthStencilAlpha: UInt32,
@@ -86,6 +166,19 @@ struct VirGLIRPipelineHandles: Equatable {
                   depthStencilAlpha,
                   copyBlend,
                   sourceOverBlend
+              ),
+              Self.glyphHandlesAreValid(
+                  glyph,
+                  unitQuadVertexResource: unitQuadVertexResource,
+                  vertexShader: vertexShader,
+                  fragmentShader: fragmentShader,
+                  roundedVertexShader: roundedVertexShader,
+                  roundedFragmentShader: roundedFragmentShader,
+                  vertexElements: vertexElements,
+                  rasterizer: rasterizer,
+                  depthStencilAlpha: depthStencilAlpha,
+                  copyBlend: copyBlend,
+                  sourceOverBlend: sourceOverBlend
               )
         else {
             return nil
@@ -94,12 +187,59 @@ struct VirGLIRPipelineHandles: Equatable {
         self.fragmentShader = fragmentShader
         self.roundedVertexShader = roundedVertexShader
         self.roundedFragmentShader = roundedFragmentShader
+        self.glyph = glyph
         self.vertexElements = vertexElements
         self.rasterizer = rasterizer
         self.depthStencilAlpha = depthStencilAlpha
         self.copyBlend = copyBlend
         self.sourceOverBlend = sourceOverBlend
         self.unitQuadVertexResource = unitQuadVertexResource
+    }
+
+    private static func glyphHandlesAreValid(
+        _ glyph: VirGLIRGlyphPipeline?,
+        unitQuadVertexResource: UInt32,
+        vertexShader: UInt32,
+        fragmentShader: UInt32,
+        roundedVertexShader: UInt32?,
+        roundedFragmentShader: UInt32?,
+        vertexElements: UInt32,
+        rasterizer: UInt32,
+        depthStencilAlpha: UInt32,
+        copyBlend: UInt32,
+        sourceOverBlend: UInt32
+    ) -> Bool {
+        guard let glyph else { return true }
+        guard glyph.textureResource != unitQuadVertexResource else {
+            return false
+        }
+        let values = (
+            glyph.vertexShader,
+            glyph.fragmentShader,
+            glyph.samplerView,
+            glyph.nearestSampler,
+            glyph.linearSampler
+        )
+        return withUnsafeBytes(of: values) { bytes in
+            let words = bytes.bindMemory(to: UInt32.self)
+            var index = 0
+            while index < words.count {
+                let value = words[index]
+                if value == vertexShader
+                    || value == fragmentShader
+                    || roundedVertexShader == Optional(value)
+                    || roundedFragmentShader == Optional(value)
+                    || value == vertexElements
+                    || value == rasterizer
+                    || value == depthStencilAlpha
+                    || value == copyBlend
+                    || value == sourceOverBlend {
+                    return false
+                }
+                index += 1
+            }
+            return true
+        }
     }
 
     private static func roundedHandlesAreValid(
@@ -174,6 +314,7 @@ struct VirGLIRPipelineHandles: Equatable {
             || handle == fragmentShader
             || roundedVertexShader == Optional(handle)
             || roundedFragmentShader == Optional(handle)
+            || glyph?.containsContextObjectHandle(handle) == true
             || handle == vertexElements
             || handle == rasterizer
             || handle == depthStencilAlpha
@@ -184,6 +325,8 @@ struct VirGLIRPipelineHandles: Equatable {
     var hasRoundedPipeline: Bool {
         roundedVertexShader != nil && roundedFragmentShader != nil
     }
+
+    var hasGlyphPipeline: Bool { glyph != nil }
 }
 
 struct VirGLIRPipelineConfiguration: Equatable {
@@ -257,7 +400,10 @@ enum VirGLIRLoweringRejection: Equatable {
     case roundedTransformSingular(commandIndex: Int)
     case roundedTransformIllConditioned(commandIndex: Int)
     case roundedGeometryNotFinite(commandIndex: Int)
-    case glyphAtlasUnsupported(commandIndex: Int)
+    case glyphPipelineUnavailable(commandIndex: Int)
+    case glyphAtlasMismatch(commandIndex: Int)
+    case glyphCoverageUnsupported(commandIndex: Int)
+    case glyphCopyUnsupported(commandIndex: Int)
     case capacityExhausted(requiredDWords: Int, availableDWords: Int)
     case encoderRejected(commandIndex: Int, rejection: VirGLEncodeRejection)
 }
@@ -277,9 +423,10 @@ private enum VirGLIRPreflightResult {
     case rejected(VirGLIRLoweringRejection)
 }
 
-private enum VirGLIRQuadPipeline: Equatable {
+private enum VirGLIRDrawPipeline: Equatable {
     case solid
     case rounded
+    case glyph
 }
 
 private struct VirGLIRRoundedGeometry {
@@ -306,9 +453,8 @@ private enum VirGLIRRoundedGeometryResult {
 
 /// Stateful because context-local pipeline objects must be created once. A
 /// clear-only command buffer does not require pipeline initialization; solid
-/// quads do. Rounded quads use a separate analytic shader pair when its handles
-/// are configured; glyphs deliberately fail closed until their atlas path is
-/// implemented.
+/// quads do. Rounded quads use a separate analytic shader pair; mask glyphs
+/// use an R8 sampler-view pipeline when those optional resources are present.
 struct VirGLIRCompiler {
     private static let color0ClearMask: UInt32 = 1 << 2
     private static let shaderTokenCapacity: UInt32 = 256
@@ -324,6 +470,8 @@ struct VirGLIRCompiler {
     private static let fragmentShaderText: StaticString = "FRAG\nDCL IN[0], COLOR, LINEAR\nDCL OUT[0], COLOR\n  0: MOV OUT[0], IN[0]\n  1: END\n\0"
     private static let roundedVertexShaderText: StaticString = "VERT\nDCL IN[0]\nDCL OUT[0], POSITION\nDCL OUT[1], COLOR\nDCL OUT[2], GENERIC[0]\nDCL CONST[0..3]\nDCL TEMP[0]\nIMM[0] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x3f800000}\n  0: MUL TEMP[0], IN[0].xxxx, CONST[0]\n  1: MAD TEMP[0], IN[0].yyyy, CONST[1], TEMP[0]\n  2: ADD OUT[0].xy, TEMP[0], CONST[2]\n  3: MOV OUT[0].zw, IMM[0]\n  4: ADD OUT[2].xy, TEMP[0].zwzw, CONST[2].zwzw\n  5: MOV OUT[2].zw, IMM[0]\n  6: MOV OUT[1], CONST[3]\n  7: END\n\0"
     private static let roundedFragmentShaderText: StaticString = "FRAG\nDCL IN[0], COLOR, LINEAR\nDCL IN[1], GENERIC[0], LINEAR\nDCL OUT[0], COLOR\nDCL CONST[0..1]\nDCL TEMP[0..4]\nIMM[0] FLT32 {0x00000000, 0x3f000000, 0x3f800000, 0x35800000}\n  0: ADD TEMP[0].xy, IN[1], -CONST[0]\n  1: CMP TEMP[1].x, -TEMP[0].xxxx, CONST[1].yyyy, CONST[1].xxxx\n  2: CMP TEMP[1].y, -TEMP[0].xxxx, CONST[1].zzzz, CONST[1].wwww\n  3: CMP TEMP[1].x, -TEMP[0].yyyy, TEMP[1].yyyy, TEMP[1].xxxx\n  4: ABS TEMP[2].xy, TEMP[0]\n  5: ADD TEMP[2].xy, TEMP[2], -CONST[0]\n  6: ADD TEMP[2].xy, TEMP[2], TEMP[1].xxxx\n  7: MAX TEMP[3].xy, TEMP[2], IMM[0].xxxx\n  8: DP2 TEMP[3].z, TEMP[3], TEMP[3]\n  9: SQRT TEMP[3].z, TEMP[3].zzzz\n 10: MAX TEMP[3].w, TEMP[2].xxxx, TEMP[2].yyyy\n 11: MIN TEMP[3].w, TEMP[3].wwww, IMM[0].xxxx\n 12: ADD TEMP[3].z, TEMP[3].zzzz, TEMP[3].wwww\n 13: ADD TEMP[3].z, TEMP[3].zzzz, -TEMP[1].xxxx\n 14: DDX TEMP[4].x, TEMP[3].zzzz\n 15: DDY TEMP[4].y, TEMP[3].zzzz\n 16: ABS TEMP[4].xy, TEMP[4]\n 17: ADD TEMP[4].x, TEMP[4].xxxx, TEMP[4].yyyy\n 18: MAX TEMP[4].x, TEMP[4].xxxx, IMM[0].wwww\n 19: RCP TEMP[4].x, TEMP[4].xxxx\n 20: MUL TEMP[4].y, -TEMP[3].zzzz, TEMP[4].xxxx\n 21: ADD TEMP[4].y, TEMP[4].yyyy, IMM[0].yyyy\n 22: MAX TEMP[4].y, TEMP[4].yyyy, IMM[0].xxxx\n 23: MIN TEMP[4].y, TEMP[4].yyyy, IMM[0].zzzz\n 24: MUL OUT[0], IN[0], TEMP[4].yyyy\n 25: END\n\0"
+    private static let glyphVertexShaderText: StaticString = "VERT\nDCL IN[0]\nDCL OUT[0], POSITION\nDCL OUT[1], COLOR\nDCL OUT[2], GENERIC[0]\nDCL CONST[0..4]\nDCL TEMP[0]\n  0: MUL TEMP[0], IN[0].xxxx, CONST[0]\n  1: MAD TEMP[0], IN[0].yyyy, CONST[1], TEMP[0]\n  2: ADD OUT[0], TEMP[0], CONST[2]\n  3: MOV OUT[1], CONST[3]\n  4: MAD OUT[2].xy, IN[0].xyxy, CONST[4].zwzw, CONST[4].xyxy\n  5: END\n\0"
+    private static let glyphFragmentShaderText: StaticString = "FRAG\nDCL IN[0], COLOR, LINEAR\nDCL IN[1], GENERIC[0], LINEAR\nDCL OUT[0], COLOR\nDCL SAMP[0]\nDCL SVIEW[0], 2D, FLOAT\nDCL TEMP[0]\n  0: TEX TEMP[0], IN[1], SAMP[0], 2D\n  1: MUL OUT[0], IN[0], TEMP[0].xxxx\n  2: END\n\0"
 
     let configuration: VirGLIRPipelineConfiguration
     private(set) var isPipelineInitialized = false
@@ -430,8 +578,8 @@ struct VirGLIRCompiler {
 
     private var pipelineInitializationDWordCount: Int {
         // Vertex elements, rasterizer, DSA, two blend objects, and the solid
-        // shader pair. A configured analytic pair adds two shader objects.
-        // LINK_SHADER is present only when the capset advertises SSO.
+        // shader pair. Optional analytic and glyph pipelines add only their
+        // own objects. LINK_SHADER is present when the capset advertises SSO.
         var count = 6 + 10 + 6 + 12 + 12
         count += Self.shaderPacketDWordCount(Self.vertexShaderText)
         count += Self.shaderPacketDWordCount(Self.fragmentShaderText)
@@ -439,8 +587,16 @@ struct VirGLIRCompiler {
             count += Self.shaderPacketDWordCount(Self.roundedVertexShaderText)
             count += Self.shaderPacketDWordCount(Self.roundedFragmentShaderText)
         }
+        if configuration.handles.hasGlyphPipeline {
+            count += Self.shaderPacketDWordCount(Self.glyphVertexShaderText)
+            count += Self.shaderPacketDWordCount(Self.glyphFragmentShaderText)
+            // One sampler view and two clamp-edge sampler-state objects.
+            count += 7 + 10 + 10
+        }
         if configuration.capabilities.supportsShaderLink {
-            count += configuration.handles.hasRoundedPipeline ? 14 : 7
+            count += 7
+            if configuration.handles.hasRoundedPipeline { count += 7 }
+            if configuration.handles.hasGlyphPipeline { count += 7 }
         }
         return count
     }
@@ -456,8 +612,10 @@ struct VirGLIRCompiler {
         var insidePass = false
         var transform = GPUTransform2D.identity
         var pipelineBound = false
-        var boundPipeline: VirGLIRQuadPipeline?
+        var boundPipeline: VirGLIRDrawPipeline?
         var boundBlend: GPUBlendMode?
+        var glyphSamplerViewBound = false
+        var boundGlyphFilter: GPUTextureFilter?
 
         var index = 0
         while index < commandBuffer.commandCount {
@@ -527,6 +685,8 @@ struct VirGLIRCompiler {
                 pipelineBound = false
                 boundPipeline = nil
                 boundBlend = nil
+                glyphSamplerViewBound = false
+                boundGlyphFilter = nil
                 passCount += 1
 
             case .setScissor:
@@ -556,7 +716,7 @@ struct VirGLIRCompiler {
                         .pipelineNotInitialized(commandIndex: index)
                     )
                 }
-                let requestedPipeline: VirGLIRQuadPipeline
+                let requestedPipeline: VirGLIRDrawPipeline
                 if quad.isRounded {
                     guard configuration.handles.hasRoundedPipeline else {
                         return .rejected(
@@ -599,7 +759,7 @@ struct VirGLIRCompiler {
                     pipelineBound = true
                     boundPipeline = requestedPipeline
                 } else if boundPipeline != requestedPipeline {
-                    // Switching analytic/solid programs rebinds both stages.
+                    // Switching drawing programs rebinds both stages.
                     required += 6
                     boundPipeline = requestedPipeline
                 }
@@ -612,13 +772,61 @@ struct VirGLIRCompiler {
                 required += requestedPipeline == .rounded ? 43 : 32
                 drawCount += 1
 
-            case .drawGlyph:
+            case .drawGlyph(let glyph):
                 guard insidePass else {
                     return .rejected(
                         .malformedCommandStream(commandIndex: index)
                     )
                 }
-                return .rejected(.glyphAtlasUnsupported(commandIndex: index))
+                guard isPipelineInitialized else {
+                    return .rejected(
+                        .pipelineNotInitialized(commandIndex: index)
+                    )
+                }
+                guard let glyphPipeline = configuration.handles.glyph else {
+                    return .rejected(
+                        .glyphPipelineUnavailable(commandIndex: index)
+                    )
+                }
+                guard glyph.atlas == glyphPipeline.textureID else {
+                    return .rejected(
+                        .glyphAtlasMismatch(commandIndex: index)
+                    )
+                }
+                guard glyph.coverage == .mask else {
+                    return .rejected(
+                        .glyphCoverageUnsupported(commandIndex: index)
+                    )
+                }
+                guard glyph.blendMode == .sourceOver else {
+                    return .rejected(
+                        .glyphCopyUnsupported(commandIndex: index)
+                    )
+                }
+                if !pipelineBound {
+                    required += 16
+                    pipelineBound = true
+                    boundPipeline = .glyph
+                } else if boundPipeline != .glyph {
+                    required += 6
+                    boundPipeline = .glyph
+                }
+                if !glyphSamplerViewBound {
+                    // SET_SAMPLER_VIEWS and BIND_SAMPLER_STATES, one slot each.
+                    required += 8
+                    glyphSamplerViewBound = true
+                    boundGlyphFilter = glyph.filter
+                } else if boundGlyphFilter != glyph.filter {
+                    required += 4
+                    boundGlyphFilter = glyph.filter
+                }
+                if boundBlend != glyph.blendMode {
+                    required += 2
+                    boundBlend = glyph.blendMode
+                }
+                // Five vertex vec4 constants (23) plus DRAW_VBO (13).
+                required += 36
+                drawCount += 1
 
             case .endRenderPass:
                 guard insidePass else {
@@ -833,6 +1041,75 @@ struct VirGLIRCompiler {
             }
         }
 
+        if let glyph = handles.glyph {
+            let glyphVertexBytes = UnsafeRawBufferPointer(
+                start: Self.glyphVertexShaderText.utf8Start,
+                count: Self.glyphVertexShaderText.utf8CodeUnitCount
+            )
+            if let rejection = Self.rejection(
+                arena.encodeCreateShaderObjectFragment(
+                    handle: glyph.vertexShader,
+                    stage: .vertex,
+                    tokenCount: Self.shaderTokenCapacity,
+                    totalByteCount: UInt32(glyphVertexBytes.count),
+                    fragmentOffset: 0,
+                    bytes: glyphVertexBytes
+                )
+            ) {
+                return rejection
+            }
+
+            let glyphFragmentBytes = UnsafeRawBufferPointer(
+                start: Self.glyphFragmentShaderText.utf8Start,
+                count: Self.glyphFragmentShaderText.utf8CodeUnitCount
+            )
+            if let rejection = Self.rejection(
+                arena.encodeCreateShaderObjectFragment(
+                    handle: glyph.fragmentShader,
+                    stage: .fragment,
+                    tokenCount: Self.shaderTokenCapacity,
+                    totalByteCount: UInt32(glyphFragmentBytes.count),
+                    fragmentOffset: 0,
+                    bytes: glyphFragmentBytes
+                )
+            ) {
+                return rejection
+            }
+
+            guard let view = VirGLTextureSamplerView(
+                      format: .r8UNorm,
+                      swizzle: .maskCoverage
+                  )
+            else {
+                return .invalidState
+            }
+            if let rejection = Self.rejection(
+                arena.encodeCreateSamplerView(
+                    handle: glyph.samplerView,
+                    resourceHandle: glyph.textureResource,
+                    view: view
+                )
+            ) {
+                return rejection
+            }
+            if let rejection = Self.rejection(
+                arena.encodeCreateSamplerState(
+                    handle: glyph.nearestSampler,
+                    state: .clampToEdgeNoMip(filter: .nearest)
+                )
+            ) {
+                return rejection
+            }
+            if let rejection = Self.rejection(
+                arena.encodeCreateSamplerState(
+                    handle: glyph.linearSampler,
+                    state: .clampToEdgeNoMip(filter: .linear)
+                )
+            ) {
+                return rejection
+            }
+        }
+
         if configuration.capabilities.supportsShaderLink {
             guard let program = VirGLShaderProgramHandles(
                 vertex: handles.vertexShader,
@@ -865,6 +1142,22 @@ struct VirGLIRCompiler {
                     return rejection
                 }
             }
+            if let glyph = handles.glyph {
+                guard let glyphProgram = VirGLShaderProgramHandles(
+                    vertex: glyph.vertexShader,
+                    fragment: glyph.fragmentShader
+                ) else {
+                    return .invalidState
+                }
+                if let rejection = Self.rejection(
+                    arena.encodeLinkShader(
+                        capabilities: configuration.capabilities,
+                        program: glyphProgram
+                    )
+                ) {
+                    return rejection
+                }
+            }
         }
         return nil
     }
@@ -878,8 +1171,10 @@ struct VirGLIRCompiler {
         var activeDescriptor: GPURenderPassDescriptor?
         var transform = GPUTransform2D.identity
         var pipelineBound = false
-        var boundPipeline: VirGLIRQuadPipeline?
+        var boundPipeline: VirGLIRDrawPipeline?
         var boundBlend: GPUBlendMode?
+        var glyphSamplerViewBound = false
+        var boundGlyphFilter: GPUTextureFilter?
 
         var index = 0
         while index < commandBuffer.commandCount {
@@ -893,6 +1188,8 @@ struct VirGLIRCompiler {
                 pipelineBound = false
                 boundPipeline = nil
                 boundBlend = nil
+                glyphSamplerViewBound = false
+                boundGlyphFilter = nil
 
                 var colorSurface = renderTarget.surfaceHandle
                 let framebufferResult = withUnsafePointer(to: &colorSurface) {
@@ -965,7 +1262,7 @@ struct VirGLIRCompiler {
                 guard let descriptor = activeDescriptor else {
                     return .malformedCommandStream(commandIndex: index)
                 }
-                let requestedPipeline: VirGLIRQuadPipeline = quad.isRounded
+                let requestedPipeline: VirGLIRDrawPipeline = quad.isRounded
                     ? .rounded
                     : .solid
                 if !pipelineBound {
@@ -1050,6 +1347,11 @@ struct VirGLIRCompiler {
                             rejection: rejection
                         )
                     }
+                case .glyph:
+                    return .encoderRejected(
+                        commandIndex: index,
+                        rejection: .invalidState
+                    )
                 }
                 let draw = VirGLDrawDescriptor(
                     start: 0,
@@ -1072,8 +1374,111 @@ struct VirGLIRCompiler {
                     )
                 }
 
-            case .drawGlyph:
-                return .glyphAtlasUnsupported(commandIndex: index)
+            case .drawGlyph(let glyph):
+                guard let descriptor = activeDescriptor,
+                      let glyphPipeline = configuration.handles.glyph
+                else {
+                    return .glyphPipelineUnavailable(commandIndex: index)
+                }
+                if !pipelineBound {
+                    if let rejection = encodePipelineBindings(
+                        .glyph,
+                        into: &arena
+                    ) {
+                        return .encoderRejected(
+                            commandIndex: index,
+                            rejection: rejection
+                        )
+                    }
+                    pipelineBound = true
+                    boundPipeline = .glyph
+                } else if boundPipeline != .glyph {
+                    if let rejection = encodeShaderBindings(
+                        .glyph,
+                        into: &arena
+                    ) {
+                        return .encoderRejected(
+                            commandIndex: index,
+                            rejection: rejection
+                        )
+                    }
+                    boundPipeline = .glyph
+                }
+                if !glyphSamplerViewBound {
+                    var viewHandle = glyphPipeline.samplerView
+                    let viewResult = withUnsafePointer(to: &viewHandle) {
+                        pointer in
+                        arena.encodeSetSamplerViews(
+                            stage: .fragment,
+                            startSlot: 0,
+                            viewHandles: UnsafeBufferPointer(
+                                start: pointer,
+                                count: 1
+                            )
+                        )
+                    }
+                    if let rejection = Self.rejection(viewResult) {
+                        return .encoderRejected(
+                            commandIndex: index,
+                            rejection: rejection
+                        )
+                    }
+                    glyphSamplerViewBound = true
+                }
+                if boundGlyphFilter != glyph.filter {
+                    var samplerHandle = glyph.filter == .nearest
+                        ? glyphPipeline.nearestSampler
+                        : glyphPipeline.linearSampler
+                    let samplerResult = withUnsafePointer(to: &samplerHandle) {
+                        pointer in
+                        arena.encodeBindSamplerStates(
+                            stage: .fragment,
+                            startSlot: 0,
+                            stateHandles: UnsafeBufferPointer(
+                                start: pointer,
+                                count: 1
+                            )
+                        )
+                    }
+                    if let rejection = Self.rejection(samplerResult) {
+                        return .encoderRejected(
+                            commandIndex: index,
+                            rejection: rejection
+                        )
+                    }
+                    boundGlyphFilter = glyph.filter
+                }
+                if boundBlend != glyph.blendMode {
+                    if let rejection = Self.rejection(
+                        arena.encodeBindObject(
+                            type: .blend,
+                            handle: configuration.handles.sourceOverBlend
+                        )
+                    ) {
+                        return .encoderRejected(
+                            commandIndex: index,
+                            rejection: rejection
+                        )
+                    }
+                    boundBlend = glyph.blendMode
+                }
+                if let rejection = encodeGlyphConstants(
+                    glyph,
+                    transform: transform,
+                    extent: descriptor.extent,
+                    into: &arena
+                ) {
+                    return .encoderRejected(
+                        commandIndex: index,
+                        rejection: rejection
+                    )
+                }
+                if let rejection = encodeUnitQuadDraw(into: &arena) {
+                    return .encoderRejected(
+                        commandIndex: index,
+                        rejection: rejection
+                    )
+                }
 
             case .endRenderPass:
                 activeDescriptor = nil
@@ -1085,7 +1490,7 @@ struct VirGLIRCompiler {
 
     @_optimize(none)
     private func encodePipelineBindings(
-        _ pipeline: VirGLIRQuadPipeline,
+        _ pipeline: VirGLIRDrawPipeline,
         into arena: inout VirGLDWordArena
     ) -> VirGLEncodeRejection? {
         let handles = configuration.handles
@@ -1124,7 +1529,7 @@ struct VirGLIRCompiler {
 
     @_optimize(none)
     private func encodeShaderBindings(
-        _ pipeline: VirGLIRQuadPipeline,
+        _ pipeline: VirGLIRDrawPipeline,
         into arena: inout VirGLDWordArena
     ) -> VirGLEncodeRejection? {
         let vertexHandle: UInt32
@@ -1142,6 +1547,12 @@ struct VirGLIRCompiler {
             }
             vertexHandle = roundedVertex
             fragmentHandle = roundedFragment
+        case .glyph:
+            guard let glyph = configuration.handles.glyph else {
+                return .invalidState
+            }
+            vertexHandle = glyph.vertexShader
+            fragmentHandle = glyph.fragmentShader
         }
         if let rejection = Self.rejection(
             arena.encodeBindShader(
@@ -1278,6 +1689,83 @@ struct VirGLIRCompiler {
                 )
             )
         }
+    }
+
+    @_optimize(none)
+    private func encodeGlyphConstants(
+        _ glyph: GPUGlyphAtlasInstance,
+        transform: GPUTransform2D,
+        extent: GPUPixelExtent,
+        into arena: inout VirGLDWordArena
+    ) -> VirGLEncodeRejection? {
+        let x = Self.float(glyph.bounds.x)
+        let y = Self.float(glyph.bounds.y)
+        let width = Self.float(glyph.bounds.width)
+        let height = Self.float(glyph.bounds.height)
+        let m11 = Self.float(transform.m11)
+        let m12 = Self.float(transform.m12)
+        let m21 = Self.float(transform.m21)
+        let m22 = Self.float(transform.m22)
+        let translationX = Self.float(transform.translationX)
+        let translationY = Self.float(transform.translationY)
+        let scaleX = Float(2) / Float(extent.width)
+        let scaleY = Float(2) / Float(extent.height)
+
+        let basisXX = m11 * width * scaleX
+        let basisXY = -(m12 * width * scaleY)
+        let basisYX = m21 * height * scaleX
+        let basisYY = -(m22 * height * scaleY)
+        let originX = ((m11 * x + m21 * y + translationX) * scaleX) - 1
+        let originY = 1 - ((m12 * x + m22 * y + translationY) * scaleY)
+
+        let colorScale = Float(1) / Float(UInt16.max)
+        let color = glyph.color
+        let textureScale = Float(1) / Float(GPUTextureRegion.unitRawValue)
+        let texture = glyph.textureRegion
+        let minimumU = Float(texture.minimumU) * textureScale
+        let minimumV = Float(texture.minimumV) * textureScale
+        let widthU = Float(texture.maximumU - texture.minimumU) * textureScale
+        let heightV = Float(texture.maximumV - texture.minimumV) * textureScale
+        var constants = (
+            basisXX.bitPattern, basisXY.bitPattern, UInt32(0), UInt32(0),
+            basisYX.bitPattern, basisYY.bitPattern, UInt32(0), UInt32(0),
+            originX.bitPattern, originY.bitPattern, UInt32(0), Float(1).bitPattern,
+            (Float(color.red) * colorScale).bitPattern,
+            (Float(color.green) * colorScale).bitPattern,
+            (Float(color.blue) * colorScale).bitPattern,
+            (Float(color.alpha) * colorScale).bitPattern,
+            minimumU.bitPattern, minimumV.bitPattern,
+            widthU.bitPattern, heightV.bitPattern
+        )
+        return withUnsafeBytes(of: &constants) { bytes in
+            Self.rejection(
+                arena.encodeSetConstantBuffer(
+                    stage: .vertex,
+                    index: 0,
+                    dwords: bytes.bindMemory(to: UInt32.self)
+                )
+            )
+        }
+    }
+
+    private func encodeUnitQuadDraw(
+        into arena: inout VirGLDWordArena
+    ) -> VirGLEncodeRejection? {
+        let draw = VirGLDrawDescriptor(
+            start: 0,
+            count: 6,
+            topology: .triangles,
+            indexed: false,
+            instanceCount: 1,
+            indexBias: 0,
+            startInstance: 0,
+            primitiveRestartEnabled: false,
+            restartIndex: 0,
+            minimumIndex: 0,
+            maximumIndex: 5,
+            countFromStreamOutputHandle: nil
+        )
+        return Self.rejection(arena.encodeDrawVBO(draw))
     }
 
     @_optimize(none)

@@ -3,14 +3,17 @@ struct VirGLIRCompilerTests {
     static func main() {
         validatesResourceContracts()
         initializesPipelineTransactionally()
+        initializesGlyphPipelineObjects()
         lowersGPUClearWithoutShaderPipeline()
         lowersTransformedScissoredSolidQuads()
         lowersAnalyticRoundedQuads()
         validatesRoundedTransformsAndRollback()
+        lowersMaskGlyphsAndSamplerTransitions()
+        rejectsInvalidGlyphContractsTransactionally()
         rejectsUnsupportedDrawsBeforeEncoding()
         rejectsInvalidPassContracts()
         rejectsShortArenaWithoutPartialPublication()
-        print("VirGL IR compiler host tests: 9 groups passed")
+        print("VirGL IR compiler host tests: 12 groups passed")
     }
 
     private static func validatesResourceContracts() {
@@ -79,6 +82,71 @@ struct VirGLIRCompilerTests {
                 unitQuadVertexResource: 0
             ) == nil,
             "zero vertex resource accepted"
+        )
+        expect(
+            VirGLIRGlyphPipeline(
+                textureID: textureID(0x90),
+                textureResource: 0x90,
+                vertexShader: 10,
+                fragmentShader: 10,
+                samplerView: 12,
+                nearestSampler: 13,
+                linearSampler: 14
+            ) == nil,
+            "duplicate glyph handles accepted"
+        )
+        validatesRemainingResourceContracts()
+    }
+
+    private static func validatesRemainingResourceContracts() {
+        let glyph = requireGlyphPipeline()
+        expect(
+            VirGLIRPipelineHandles(
+                vertexShader: 1,
+                fragmentShader: 2,
+                roundedVertexShader: 8,
+                roundedFragmentShader: 9,
+                glyph: VirGLIRGlyphPipeline(
+                    textureID: textureID(0x90),
+                    textureResource: 0x90,
+                    vertexShader: 10,
+                    fragmentShader: 2,
+                    samplerView: 12,
+                    nearestSampler: 13,
+                    linearSampler: 14
+                ),
+                vertexElements: 3,
+                rasterizer: 4,
+                depthStencilAlpha: 5,
+                copyBlend: 6,
+                sourceOverBlend: 7,
+                unitQuadVertexResource: 0x80
+            ) == nil,
+            "glyph/base object collision accepted"
+        )
+        expect(
+            VirGLIRPipelineHandles(
+                vertexShader: 1,
+                fragmentShader: 2,
+                roundedVertexShader: 8,
+                roundedFragmentShader: 9,
+                glyph: VirGLIRGlyphPipeline(
+                    textureID: glyph.textureID,
+                    textureResource: 0x80,
+                    vertexShader: glyph.vertexShader,
+                    fragmentShader: glyph.fragmentShader,
+                    samplerView: glyph.samplerView,
+                    nearestSampler: glyph.nearestSampler,
+                    linearSampler: glyph.linearSampler
+                ),
+                vertexElements: 3,
+                rasterizer: 4,
+                depthStencilAlpha: 5,
+                copyBlend: 6,
+                sourceOverBlend: 7,
+                unitQuadVertexResource: 0x80
+            ) == nil,
+            "glyph/unit-quad resource alias accepted"
         )
         expect(
             VirGLIRRenderTarget(
@@ -173,6 +241,71 @@ struct VirGLIRCompilerTests {
             )
             expect(arena.dwordCount == 0, "short init advanced cursor")
             expect(storage[0] == 0xa5a5_a5a5, "short init touched storage")
+        }
+    }
+
+    private static func initializesGlyphPipelineObjects() {
+        var requiredDWords = 0
+        withArena(capacity: 1_024) { arena, _ in
+            var compiler = makeCompiler(
+                supportsShaderLink: true,
+                glyphPipeline: true
+            )
+            guard case .initialized(let start, let count) =
+                    compiler.initializePipeline(into: &arena)
+            else {
+                fatalError("glyph pipeline initialization rejected")
+            }
+            expect(start == 0 && count == arena.dwordCount, "glyph init size")
+            requiredDWords = count
+
+            let starts = packetStarts(arena)
+            expect(starts.count == 17, "glyph pipeline packet count")
+            expect(packetObjectType(arena, starts[9]) == 4, "glyph VS object")
+            expect(packetObjectType(arena, starts[10]) == 4, "glyph FS object")
+            expect(arena.dword(at: starts[9] + 1) == 10, "glyph VS handle")
+            expect(arena.dword(at: starts[10] + 1) == 11, "glyph FS handle")
+            expect(arena.dword(at: starts[9] + 2) == 0, "glyph VS stage")
+            expect(arena.dword(at: starts[10] + 2) == 1, "glyph FS stage")
+            expect(shaderTerminalByte(arena, start: starts[9]) == 0, "glyph VS NUL")
+            expect(shaderTerminalByte(arena, start: starts[10]) == 0, "glyph FS NUL")
+
+            expect(packetObjectType(arena, starts[11]) == 6, "sampler view object")
+            expect(arena.dword(at: starts[11] + 1) == 12, "sampler view handle")
+            expect(arena.dword(at: starts[11] + 2) == 0x90, "atlas resource")
+            expect(arena.dword(at: starts[11] + 3) == 64, "R8 view format")
+            expect(arena.dword(at: starts[11] + 6) == 0, "mask swizzle")
+            expect(packetObjectType(arena, starts[12]) == 7, "nearest sampler")
+            expect(packetObjectType(arena, starts[13]) == 7, "linear sampler")
+            expect(arena.dword(at: starts[12] + 1) == 13, "nearest handle")
+            expect(arena.dword(at: starts[13] + 1) == 14, "linear handle")
+            expect(arena.dword(at: starts[12] + 2) == 0x1092, "nearest state")
+            expect(arena.dword(at: starts[13] + 2) == 0x3292, "linear state")
+
+            expect(packetCommand(arena, starts[14]) == 52, "solid link")
+            expect(packetCommand(arena, starts[15]) == 52, "rounded link")
+            expect(packetCommand(arena, starts[16]) == 52, "glyph link")
+            expect(arena.dword(at: starts[16] + 1) == 10, "glyph link VS")
+            expect(arena.dword(at: starts[16] + 2) == 11, "glyph link FS")
+        }
+
+        withArena(capacity: requiredDWords - 1) { arena, storage in
+            var compiler = makeCompiler(
+                supportsShaderLink: true,
+                glyphPipeline: true
+            )
+            expect(
+                compiler.initializePipeline(into: &arena)
+                    == .rejected(
+                        .capacityExhausted(
+                            requiredDWords: requiredDWords,
+                            availableDWords: requiredDWords - 1
+                        )
+                    ),
+                "short glyph initialization"
+            )
+            expect(arena.dwordCount == 0, "short glyph init cursor")
+            expect(storage[0] == 0xa5a5_a5a5, "short glyph init touched storage")
         }
     }
 
@@ -648,6 +781,209 @@ struct VirGLIRCompilerTests {
         }
     }
 
+    private static func lowersMaskGlyphsAndSamplerTransitions() {
+        withArena(capacity: 1_024) { arena, _ in
+            var compiler = makeCompiler(glyphPipeline: true)
+            _ = compiler.initializePipeline(into: &arena)
+            arena.reset()
+
+            let region = textureRegion(
+                minimumU: 16_384,
+                minimumV: 8_192,
+                maximumU: 32_768,
+                maximumV: 24_576
+            )
+            let single = commandBuffer(
+                id: 11,
+                commands: [
+                    .beginRenderPass(pass(width: 100, height: 100)),
+                    .drawGlyph(
+                        requireGlyph(
+                            x: 10,
+                            y: 20,
+                            width: 8,
+                            height: 12,
+                            region: region
+                        )
+                    ),
+                    .endRenderPass,
+                ]
+            )
+            expect(
+                compiler.lower(
+                    single,
+                    renderTarget: renderTarget(width: 100, height: 100),
+                    into: &arena
+                ) == .lowered(
+                    startDWord: 0,
+                    dwordCount: 78,
+                    renderPassCount: 1,
+                    drawCount: 1
+                ),
+                "single mask glyph lowering"
+            )
+            expect(arena.dword(at: 22) == 0x0002_001f, "glyph VS bind")
+            expect(arena.dword(at: 23) == 10, "glyph VS bound handle")
+            expect(arena.dword(at: 25) == 0x0002_001f, "glyph FS bind")
+            expect(arena.dword(at: 26) == 11, "glyph FS bound handle")
+            expect(arena.dword(at: 32) == 0x0003_000a, "glyph view bind")
+            expect(arena.dword(at: 35) == 12, "glyph view handle")
+            expect(arena.dword(at: 36) == 0x0003_0012, "glyph sampler bind")
+            expect(arena.dword(at: 39) == 13, "nearest sampler handle")
+            expect(arena.dword(at: 40) == 0x0001_0102, "glyph blend bind")
+            expect(arena.dword(at: 41) == 7, "glyph source-over handle")
+            expect(arena.dword(at: 42) == 0x0016_000c, "glyph constants")
+            expectClose(floatDWord(arena, 45), 0.16, "glyph basis x")
+            expectClose(floatDWord(arena, 50), -0.24, "glyph basis y")
+            expectClose(floatDWord(arena, 53), -0.8, "glyph origin x")
+            expectClose(floatDWord(arena, 54), 0.6, "glyph origin y")
+            expectClose(floatDWord(arena, 61), 0.25, "glyph minimum U")
+            expectClose(floatDWord(arena, 62), 0.125, "glyph minimum V")
+            expectClose(floatDWord(arena, 63), 0.25, "glyph width U")
+            expectClose(floatDWord(arena, 64), 0.25, "glyph height V")
+            expect(arena.dword(at: 65) == 0x000c_0008, "glyph draw packet")
+        }
+
+        withArena(capacity: 1_024) { arena, _ in
+            var compiler = makeCompiler(glyphPipeline: true)
+            _ = compiler.initializePipeline(into: &arena)
+            arena.reset()
+            let nearest = requireGlyph(filter: .nearest)
+            let linear = requireGlyph(filter: .linear)
+            let buffer = commandBuffer(
+                id: 12,
+                commands: [
+                    .beginRenderPass(pass(width: 100, height: 100)),
+                    .drawGlyph(nearest),
+                    .drawGlyph(nearest),
+                    .drawGlyph(linear),
+                    .drawQuad(requireQuad()),
+                    .drawGlyph(linear),
+                    .endRenderPass,
+                ]
+            )
+            expect(
+                compiler.lower(
+                    buffer,
+                    renderTarget: renderTarget(width: 100, height: 100),
+                    into: &arena
+                ) == .lowered(
+                    startDWord: 0,
+                    dwordCount: 234,
+                    renderPassCount: 1,
+                    drawCount: 5
+                ),
+                "glyph filter and shader transitions"
+            )
+            var shaderHandles: [UInt32] = []
+            var viewBindCount = 0
+            var samplerHandles: [UInt32] = []
+            for start in packetStarts(arena) {
+                switch packetCommand(arena, start) {
+                case 31:
+                    shaderHandles.append(requireDWord(arena, start + 1))
+                case 10:
+                    viewBindCount += 1
+                case 18:
+                    samplerHandles.append(requireDWord(arena, start + 3))
+                default:
+                    break
+                }
+            }
+            expect(
+                shaderHandles == [10, 11, 1, 2, 10, 11],
+                "glyph shader transition sequence"
+            )
+            expect(viewBindCount == 1, "redundant atlas view bind")
+            expect(samplerHandles == [13, 14], "filter sampler sequence")
+        }
+    }
+
+    private static func rejectsInvalidGlyphContractsTransactionally() {
+        var compiler = makeCompiler(glyphPipeline: true)
+        withArena(capacity: 1_024) { arena, _ in
+            _ = compiler.initializePipeline(into: &arena)
+        }
+        withArena(capacity: 256) { arena, _ in
+            appendTestClear(to: &arena)
+            let originalCount = arena.dwordCount
+            let originalPrefix = (0..<originalCount).map {
+                requireDWord(arena, $0)
+            }
+
+            func expectGlyphRejection(
+                _ glyph: GPUGlyphAtlasInstance,
+                _ rejection: VirGLIRLoweringRejection,
+                _ message: String
+            ) {
+                let buffer = commandBuffer(
+                    id: 13,
+                    commands: [
+                        .beginRenderPass(pass(width: 100, height: 100)),
+                        .drawGlyph(glyph),
+                        .endRenderPass,
+                    ]
+                )
+                expect(
+                    compiler.lower(
+                        buffer,
+                        renderTarget: renderTarget(width: 100, height: 100),
+                        into: &arena
+                    ) == .rejected(rejection),
+                    message
+                )
+                expect(arena.dwordCount == originalCount, "glyph rejection cursor")
+                expect(
+                    (0..<originalCount).map { requireDWord(arena, $0) }
+                        == originalPrefix,
+                    "glyph rejection changed prefix"
+                )
+            }
+
+            expectGlyphRejection(
+                requireGlyph(atlas: 0x91),
+                .glyphAtlasMismatch(commandIndex: 1),
+                "unknown glyph atlas"
+            )
+            expectGlyphRejection(
+                requireGlyph(coverage: .signedDistance),
+                .glyphCoverageUnsupported(commandIndex: 1),
+                "unsupported signed-distance glyph"
+            )
+            expectGlyphRejection(
+                requireGlyph(blend: .copy),
+                .glyphCopyUnsupported(commandIndex: 1),
+                "glyph copy blend"
+            )
+        }
+
+        withArena(capacity: 77) { arena, storage in
+            let buffer = commandBuffer(
+                id: 14,
+                commands: [
+                    .beginRenderPass(pass(width: 100, height: 100)),
+                    .drawGlyph(requireGlyph()),
+                    .endRenderPass,
+                ]
+            )
+            expect(
+                compiler.lower(
+                    buffer,
+                    renderTarget: renderTarget(width: 100, height: 100),
+                    into: &arena
+                ) == .rejected(
+                    .capacityExhausted(
+                        requiredDWords: 78,
+                        availableDWords: 77
+                    )
+                ),
+                "short glyph arena"
+            )
+            expect(arena.dwordCount == 0, "short glyph cursor")
+            expect(storage[0] == 0xa5a5_a5a5, "short glyph touched storage")
+        }
+    }
+
     private static func rejectsUnsupportedDrawsBeforeEncoding() {
         withArena(capacity: 256) { arena, _ in
             var compiler = makeCompiler(roundedPipeline: false)
@@ -672,7 +1008,7 @@ struct VirGLIRCompilerTests {
                     glyph,
                     renderTarget: renderTarget(width: 100, height: 100),
                     into: &arena
-                ) == .rejected(.glyphAtlasUnsupported(commandIndex: 1)),
+                ) == .rejected(.glyphPipelineUnavailable(commandIndex: 1)),
                 "glyph exact rejection"
             )
             expect(arena.dwordCount == originalCount, "glyph rejection cursor")
@@ -707,7 +1043,7 @@ struct VirGLIRCompilerTests {
 
     private static func rejectsInvalidPassContracts() {
         withArena(capacity: 128) { arena, _ in
-            var compiler = makeCompiler()
+            var compiler = makeCompiler(glyphPipeline: true)
             let base = commandBuffer(
                 id: 6,
                 commands: [
@@ -819,6 +1155,18 @@ struct VirGLIRCompilerTests {
                 ) == .rejected(.surfaceHandleCollision(commandIndex: 0)),
                 "surface/rounded-shader handle collision accepted"
             )
+            expect(
+                compiler.lower(
+                    base,
+                    renderTarget: renderTarget(
+                        width: 20,
+                        height: 10,
+                        surfaceHandle: 12
+                    ),
+                    into: &arena
+                ) == .rejected(.surfaceHandleCollision(commandIndex: 0)),
+                "surface/glyph-view handle collision accepted"
+            )
 
             let discard = commandBuffer(
                 id: 8,
@@ -898,7 +1246,8 @@ struct VirGLIRCompilerTests {
     private static func makeCompiler(
         explicitShaderBinding: Bool = true,
         supportsShaderLink: Bool = false,
-        roundedPipeline: Bool = true
+        roundedPipeline: Bool = true,
+        glyphPipeline: Bool = false
     ) -> VirGLIRCompiler {
         let caps = VirGLContextCapabilities(
             capsetID: explicitShaderBinding ? 2 : 1,
@@ -913,6 +1262,7 @@ struct VirGLIRCompilerTests {
             fragmentShader: 2,
             roundedVertexShader: roundedPipeline ? 8 : nil,
             roundedFragmentShader: roundedPipeline ? 9 : nil,
+            glyph: glyphPipeline ? requireGlyphPipeline() : nil,
             vertexElements: 3,
             rasterizer: 4,
             depthStencilAlpha: 5,
@@ -1002,6 +1352,13 @@ struct VirGLIRCompilerTests {
     private static func targetID(_ raw: UInt32) -> GPURenderTargetID {
         guard let result = GPURenderTargetID(rawValue: raw) else {
             fatalError("test target ID")
+        }
+        return result
+    }
+
+    private static func textureID(_ raw: UInt32) -> GPUTextureID {
+        guard let result = GPUTextureID(rawValue: raw) else {
+            fatalError("test texture ID")
         }
         return result
     }
@@ -1118,16 +1475,60 @@ struct VirGLIRCompilerTests {
         return result
     }
 
-    private static func requireGlyph() -> GPUGlyphAtlasInstance {
-        guard let texture = GPUTextureID(rawValue: 1) else {
-            fatalError("test texture")
+    private static func requireGlyphPipeline() -> VirGLIRGlyphPipeline {
+        guard let result = VirGLIRGlyphPipeline(
+                  textureID: textureID(0x90),
+                  textureResource: 0x90,
+                  vertexShader: 10,
+                  fragmentShader: 11,
+                  samplerView: 12,
+                  nearestSampler: 13,
+                  linearSampler: 14
+              )
+        else {
+            fatalError("test glyph pipeline")
         }
+        return result
+    }
+
+    private static func requireGlyph(
+        atlas: UInt32 = 0x90,
+        x: Int = 0,
+        y: Int = 0,
+        width: Int = 8,
+        height: Int = 12,
+        region: GPUTextureRegion = .complete,
+        coverage: GPUGlyphCoverage = .mask,
+        filter: GPUTextureFilter = .nearest,
+        blend: GPUBlendMode = .sourceOver
+    ) -> GPUGlyphAtlasInstance {
         return GPUGlyphAtlasInstance(
-            atlas: texture,
-            bounds: fixedRectangle(x: 0, y: 0, width: 8, height: 12),
-            textureRegion: .complete,
-            color: .opaqueWhite
+            atlas: textureID(atlas),
+            bounds: fixedRectangle(x: x, y: y, width: width, height: height),
+            textureRegion: region,
+            color: .opaqueWhite,
+            coverage: coverage,
+            filter: filter,
+            blendMode: blend
         )
+    }
+
+    private static func textureRegion(
+        minimumU: UInt32,
+        minimumV: UInt32,
+        maximumU: UInt32,
+        maximumV: UInt32
+    ) -> GPUTextureRegion {
+        guard let result = GPUTextureRegion(
+                  minimumU: minimumU,
+                  minimumV: minimumV,
+                  maximumU: maximumU,
+                  maximumV: maximumV
+              )
+        else {
+            fatalError("test texture region")
+        }
+        return result
     }
 
     private static func scissor(
