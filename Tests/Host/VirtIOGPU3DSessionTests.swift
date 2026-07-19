@@ -279,6 +279,9 @@ struct VirtIOMMIOTransport {
         var surfaceCount = 0
         var framebufferCount = 0
         var clearCount = 0
+        var scissorCount = 0
+        var sawFullScissor = false
+        var sawLogicalScissor = false
         var vertexBufferCount = 0
         var drawCount = 0
         var inlineWriteCount = 0
@@ -324,6 +327,19 @@ struct VirtIOMMIOTransport {
                 }
             case 9:
                 inlineWriteCount += 1
+            case 15:
+                scissorCount += 1
+                let minimum = PhysicalBytes.readLE32(at: packet + 8)
+                let maximum = PhysicalBytes.readLE32(at: packet + 12)
+                sawFullScissor = sawFullScissor
+                    || (minimum == 0
+                        && maximum
+                            == UInt32(1_920) | (UInt32(1_080) << 16))
+                sawLogicalScissor = sawLogicalScissor
+                    || (minimum
+                            == UInt32(560) | (UInt32(240) << 16)
+                        && maximum
+                            == UInt32(1_360) | (UInt32(840) << 16))
             default:
                 break
             }
@@ -331,8 +347,11 @@ struct VirtIOMMIOTransport {
         }
         return offset == commandByteCount
             && surfaceCount == 1
-            && framebufferCount == 2
+            && framebufferCount == 1
             && clearCount == 1
+            && scissorCount == 2
+            && sawFullScissor
+            && sawLogicalScissor
             && vertexBufferCount == 1
             && drawCount == 5
             && inlineWriteCount == 0
@@ -446,7 +465,7 @@ struct VirtIOMMIOTransport {
 @main
 struct VirtIOGPU3DSessionTests {
     static func main() {
-        testGPUClearCrossing()
+        testGPURetainedDesktopCrossing()
         testFeatureAndMemoryRejections()
         testTransportFailureIsExact()
         testFencedResponseIsRequired()
@@ -455,7 +474,7 @@ struct VirtIOGPU3DSessionTests {
         print("VirtIO-GPU 3D session host tests: 6 groups passed")
     }
 
-    private static func testGPUClearCrossing() {
+    private static func testGPURetainedDesktopCrossing() {
         withMappings { command, request, response, queue in
             var session = makeSession(
                 command: command,
@@ -464,9 +483,9 @@ struct VirtIOGPU3DSessionTests {
                 queue: queue,
                 behavior: .normal
             )
-            let result = session.configureAndRenderDesktop(color: testColor)
+            let result = session.configureAndRenderDesktop()
             guard case .configured(let configured) = result else {
-                fatalError("valid GPU clear crossing failed: \(result)")
+                fatalError("valid retained GPU desktop failed: \(result)")
             }
             expect(configured.scanoutID == 0, "wrong scanout selected")
             expect(
@@ -490,7 +509,7 @@ struct VirtIOGPU3DSessionTests {
             )
             expect(session.isConfigured, "configured state was not published")
             expect(
-                session.configureAndRenderDesktop(color: testColor)
+                session.configureAndRenderDesktop()
                     == .failed(.alreadyConfigured),
                 "configured session accepted a second bootstrap"
             )
@@ -508,7 +527,7 @@ struct VirtIOGPU3DSessionTests {
                 negotiatedFeatures: 0
             )
             expect(
-                missingFeature.configureAndRenderDesktop(color: testColor)
+                missingFeature.configureAndRenderDesktop()
                     == .failed(.invalidNegotiatedFeatures),
                 "session accepted a transport without VIRGL"
             )
@@ -521,7 +540,7 @@ struct VirtIOGPU3DSessionTests {
                 behavior: .normal
             )
             expect(
-                overlapping.configureAndRenderDesktop(color: testColor)
+                overlapping.configureAndRenderDesktop()
                     == .failed(.invalidMemoryLayout),
                 "session accepted aliased command and request arenas"
             )
@@ -538,7 +557,7 @@ struct VirtIOGPU3DSessionTests {
                 behavior: .timeoutAt(step: 9)
             )
             expect(
-                session.configureAndRenderDesktop(color: testColor)
+                session.configureAndRenderDesktop()
                     == .failed(.transport(.timedOut)),
                 "unit-quad SUBMIT_3D timeout lost its transport error"
             )
@@ -556,7 +575,7 @@ struct VirtIOGPU3DSessionTests {
                 behavior: .wrongFenceAt(step: 12)
             )
             expect(
-                session.configureAndRenderDesktop(color: testColor)
+                session.configureAndRenderDesktop()
                     == .failed(.malformedResponse(
                         commandType: VirtIOGPUControlType.resourceFlush
                     )),
@@ -576,7 +595,7 @@ struct VirtIOGPU3DSessionTests {
                 behavior: .noEnabledScanout
             )
             expect(
-                session.configureAndRenderDesktop(color: testColor)
+                session.configureAndRenderDesktop()
                     == .failed(.noEnabledScanout),
                 "disabled display was selected for scanout"
             )
@@ -592,9 +611,7 @@ struct VirtIOGPU3DSessionTests {
                 queue: queue,
                 behavior: .normal
             )
-            guard case .configured = session.configureAndRenderDesktop(
-                      color: testColor
-                  ),
+            guard case .configured = session.configureAndRenderDesktop(),
                   let target = GPURenderTargetID(rawValue: 1),
                   let extent = GPUPixelExtent(width: 1_920, height: 1_080),
                   let commandID = GPUCommandBufferID(rawValue: 2),
@@ -627,15 +644,6 @@ struct VirtIOGPU3DSessionTests {
             )
             expect(session.isConfigured, "successful frame invalidated session")
         }
-    }
-
-    private static var testColor: VirtIOGPU3DClearColor {
-        VirtIOGPU3DClearColor(
-            redBits: 0x3e80_0000,
-            greenBits: 0x3f00_0000,
-            blueBits: 0x3f40_0000,
-            alphaBits: 0x3f80_0000
-        )
     }
 
     private static func makeSession(

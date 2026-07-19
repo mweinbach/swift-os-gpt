@@ -388,6 +388,21 @@ host-test:
 	$(BUILD_DIR)/gpu-retained-scene-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayViewport.swift \
+		Kernel/Graphics/DamageRegion.swift \
+		Kernel/Graphics/RetainedLayerTree.swift \
+		Kernel/Graphics/GPU/GPUPrimitives.swift \
+		Kernel/Graphics/GPU/GPURenderCommands.swift \
+		Kernel/Graphics/GPU/GPUCommandBuffer.swift \
+		Kernel/Graphics/GPU/GPURetainedSceneCompiler.swift \
+		Kernel/Graphics/GPU/GPUDesktopScene.swift \
+		Tests/Host/GPUDesktopSceneTests.swift \
+		-o $(BUILD_DIR)/gpu-desktop-scene-host-tests
+	$(BUILD_DIR)/gpu-desktop-scene-host-tests
+	$(SWIFTC) -parse-as-library \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Core/PhysicalBytes.swift \
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/DisplayMemory.swift \
@@ -433,9 +448,15 @@ host-test:
 		Kernel/Graphics/DisplayMode.swift \
 		Kernel/Graphics/DisplayMemory.swift \
 		Kernel/Graphics/DamageRectangle.swift \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/DisplayViewport.swift \
+		Kernel/Graphics/DamageRegion.swift \
+		Kernel/Graphics/RetainedLayerTree.swift \
 		Kernel/Graphics/GPU/GPUPrimitives.swift \
 		Kernel/Graphics/GPU/GPURenderCommands.swift \
 		Kernel/Graphics/GPU/GPUCommandBuffer.swift \
+		Kernel/Graphics/GPU/GPURetainedSceneCompiler.swift \
+		Kernel/Graphics/GPU/GPUDesktopScene.swift \
 		Kernel/Drivers/VirtIO/VirtIOGPU.swift \
 		Kernel/Drivers/VirtIO/VirtIOGPU3DProtocol.swift \
 		Kernel/Drivers/VirtIO/VirtIOGPUDeviceConfiguration.swift \

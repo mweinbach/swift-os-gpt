@@ -291,13 +291,7 @@ private func activateVirtIOGPU3D(
             responseMapping: workspace.response,
             protectedQueueMapping: queueMapping
         )
-        let clear = VirtIOGPU3DClearColor(
-            redBits: 0x3d23_d70a,
-            greenBits: 0x3d75_c28f,
-            blueBits: 0x3df5_c28f,
-            alphaBits: 0x3f80_0000
-        )
-        switch session.configureAndRenderDesktop(color: clear) {
+        switch session.configureAndRenderDesktop() {
         case .configured(let configuration):
             activeVirtIOGPU3DAllocation = allocation
             activeVirtIOGPU3DSession = session

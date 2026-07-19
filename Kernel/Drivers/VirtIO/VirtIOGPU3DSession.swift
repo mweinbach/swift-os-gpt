@@ -4,13 +4,6 @@
 // resource out. Every controlq operation is fenced and completed before
 // dependent state is published.
 
-struct VirtIOGPU3DClearColor: Equatable {
-    let redBits: UInt32
-    let greenBits: UInt32
-    let blueBits: UInt32
-    let alphaBits: UInt32
-}
-
 struct VirtIOGPU3DSessionConfiguration: Equatable {
     let scanoutID: UInt32
     let width: UInt32
@@ -32,6 +25,7 @@ enum VirtIOGPU3DSessionError: Equatable {
     case protocolEncoding(commandType: UInt32)
     case commandEncoding(VirGLEncodeRejection)
     case pipelineInitialization(VirGLIRPipelineInitializationRejection)
+    case desktopScene(GPUDesktopSceneRejection)
     case renderLowering(VirGLIRLoweringRejection)
     case transport(VirtIOMMIORequestResult)
     case malformedResponse(commandType: UInt32)
@@ -61,6 +55,11 @@ private enum VirtIOGPU3DTransactionResult {
     case failed(VirtIOGPU3DSessionError)
 }
 
+private enum VirtIOGPU3DDesktopSubmissionResult {
+    case submitted(presentationDamage: GPUScissorRectangle)
+    case failed(VirtIOGPU3DSessionError)
+}
+
 private struct VirtIOGPU3DScanoutMode {
     let id: UInt32
     let width: UInt32
@@ -83,7 +82,6 @@ struct VirtIOGPU3DSession {
     private static let renderTargetBind: UInt32 = 1 << 1
     private static let vertexBufferBind: UInt32 = 1 << 4
     private static let scanoutBind: UInt32 = 1 << 18
-    private static let colorAttachmentZeroMask: UInt32 = 1 << 2
     private static let maximumRendererCoordinate: UInt32 = 32_767
     private static let unitQuadByteCount: UInt32 = 48
     private static let inlineWriteUsage: UInt32 = 0x82
@@ -133,9 +131,7 @@ struct VirtIOGPU3DSession {
         self.protectedQueueMapping = protectedQueueMapping
     }
 
-    mutating func configureAndRenderDesktop(
-        color: VirtIOGPU3DClearColor
-    ) -> VirtIOGPU3DSessionResult {
+    mutating func configureAndRenderDesktop() -> VirtIOGPU3DSessionResult {
         guard !isConfigured else { return .failed(.alreadyConfigured) }
         guard memoryLayoutIsValid() else {
             return .failed(.invalidMemoryLayout)
@@ -266,15 +262,20 @@ struct VirtIOGPU3DSession {
             return abort(error)
         }
 
+        let presentationDamage: VirtIOGPURectangle
         switch encodeAndSubmitDesktopFrame(
-            color: color,
             scanout: scanout,
             capabilities: capabilities,
             features: features
         ) {
-        case .success:
-            break
-        case .failure(let error):
+        case .submitted(let damage):
+            presentationDamage = VirtIOGPURectangle(
+                x: damage.x,
+                y: damage.y,
+                width: damage.width,
+                height: damage.height
+            )
+        case .failed(let error):
             return abort(error)
         }
 
@@ -293,7 +294,7 @@ struct VirtIOGPU3DSession {
         case .failure(let error):
             return abort(error)
         }
-        switch flush(rectangle: rectangle) {
+        switch flush(rectangle: presentationDamage) {
         case .success:
             break
         case .failure(let error):
@@ -825,13 +826,12 @@ struct VirtIOGPU3DSession {
     }
 
     private mutating func encodeAndSubmitDesktopFrame(
-        color: VirtIOGPU3DClearColor,
         scanout: VirtIOGPU3DScanoutMode,
         capabilities: VirGLRendererCapabilities,
         features: VirtIOGPU3DFeatures
-    ) -> OperationResult {
+    ) -> VirtIOGPU3DDesktopSubmissionResult {
         guard var arena = makeCommandArena() else {
-            return .failure(.invalidMemoryLayout)
+            return .failed(.invalidMemoryLayout)
         }
         switch arena.encodeCreateSurface(
             handle: Self.colorSurfaceHandle,
@@ -842,37 +842,7 @@ struct VirtIOGPU3DSession {
         case .encoded:
             break
         case .rejected(let rejection):
-            return .failure(.commandEncoding(rejection))
-        }
-
-        var surfaceHandle = Self.colorSurfaceHandle
-        let framebufferResult = withUnsafePointer(to: &surfaceHandle) {
-            pointer in
-            arena.encodeSetFramebuffer(
-                colorSurfaceHandles: UnsafeBufferPointer(
-                    start: pointer,
-                    count: 1
-                ),
-                depthStencilSurfaceHandle: nil
-            )
-        }
-        if case .rejected(let rejection) = framebufferResult {
-            return .failure(.commandEncoding(rejection))
-        }
-        guard let clear = VirGLClearValue(
-                  bufferMask: Self.colorAttachmentZeroMask,
-                  color0Bits: color.redBits,
-                  color1Bits: color.greenBits,
-                  color2Bits: color.blueBits,
-                  color3Bits: color.alphaBits,
-                  depthBits: 0,
-                  stencil: 0
-              )
-        else {
-            return .failure(.commandEncoding(.invalidState))
-        }
-        if case .rejected(let rejection) = arena.encodeClear(clear) {
-            return .failure(.commandEncoding(rejection))
+            return .failed(.commandEncoding(rejection))
         }
 
         guard let handles = VirGLIRPipelineHandles(
@@ -886,7 +856,7 @@ struct VirtIOGPU3DSession {
                   unitQuadVertexResource: Self.unitQuadResourceID
               )
         else {
-            return .failure(.commandStreamInvariant)
+            return .failed(.commandStreamInvariant)
         }
         let contextCapabilities = VirGLContextCapabilities(
             capsetID: capabilities.capset.kind.rawValue,
@@ -905,18 +875,29 @@ struct VirtIOGPU3DSession {
         case .initialized:
             break
         case .rejected(let rejection):
-            return .failure(.pipelineInitialization(rejection))
+            return .failed(.pipelineInitialization(rejection))
         }
         guard let renderTarget = makeRenderTarget(
                   width: scanout.width,
                   height: scanout.height
               ),
-              let commandBuffer = makeInitialDesktopCommandBuffer(
-                  width: scanout.width,
-                  height: scanout.height
-              )
+              let commandID = GPUCommandBufferID(rawValue: 1)
         else {
-            return .failure(.commandStreamInvariant)
+            return .failed(.commandStreamInvariant)
+        }
+        let commandBuffer: GPURenderCommandBuffer
+        let presentationDamage: GPUScissorRectangle
+        switch GPUDesktopScene.makeInitialFrame(
+            physicalWidth: scanout.width,
+            physicalHeight: scanout.height,
+            target: renderTarget.id,
+            commandBufferID: commandID
+        ) {
+        case .frame(let frame):
+            commandBuffer = frame.commandBuffer
+            presentationDamage = frame.presentationDamage
+        case .rejected(let rejection):
+            return .failed(.desktopScene(rejection))
         }
         switch compiler.lower(
             commandBuffer,
@@ -926,14 +907,14 @@ struct VirtIOGPU3DSession {
         case .lowered:
             break
         case .rejected(let rejection):
-            return .failure(.renderLowering(rejection))
+            return .failed(.renderLowering(rejection))
         }
         switch submit(arena: arena, features: features) {
         case .success:
             renderer = compiler
-            return .success
+            return .submitted(presentationDamage: presentationDamage)
         case .failure(let error):
-            return .failure(error)
+            return .failed(error)
         }
     }
 
@@ -1040,157 +1021,6 @@ struct VirtIOGPU3DSession {
             format: .bgra8UNormSRGB,
             virglSurfaceFormat: Self.b8g8r8a8SRGB
         )
-    }
-
-    private func makeInitialDesktopCommandBuffer(
-        width: UInt32,
-        height: UInt32
-    ) -> GPURenderCommandBuffer? {
-        guard width >= 320,
-              height >= 200,
-              let targetID = GPURenderTargetID(rawValue: Self.resourceID),
-              let extent = GPUPixelExtent(width: width, height: height),
-              let commandID = GPUCommandBufferID(rawValue: 1),
-              var recorder = GPUCommandRecorder(id: commandID, capacity: 7)
-        else {
-            return nil
-        }
-        let pass = GPURenderPassDescriptor(
-            target: targetID,
-            extent: extent,
-            format: .bgra8UNormSRGB,
-            loadAction: .load,
-            storeAction: .store
-        )
-        guard Self.record(.beginRenderPass(pass), into: &recorder) else {
-            return nil
-        }
-
-        let topBarHeight = height / 18
-        let panelX = width / 12
-        let panelY = height / 7
-        let panelWidth = width - panelX * 2
-        let panelHeight = height - panelY - height / 9
-        let sidebarWidth = panelWidth / 4
-        let innerMargin = panelWidth / 40
-        let cardX = panelX + sidebarWidth + innerMargin
-        let cardWidth = panelWidth - sidebarWidth - innerMargin * 2
-        let cardHeight = panelHeight / 5
-        let dockWidth = width / 3
-        let dockHeight = height / 18
-        let dockX = (width - dockWidth) / 2
-        let dockY = height - dockHeight - height / 30
-
-        guard let topBar = Self.quad(
-                  x: 0,
-                  y: 0,
-                  width: width,
-                  height: topBarHeight,
-                  red: 0x0800,
-                  green: 0x0c00,
-                  blue: 0x1800,
-                  alpha: 0xe000
-              ),
-              let panel = Self.quad(
-                  x: panelX,
-                  y: panelY,
-                  width: panelWidth,
-                  height: panelHeight,
-                  red: 0x1200,
-                  green: 0x1800,
-                  blue: 0x2800,
-                  alpha: 0xf000
-              ),
-              let sidebar = Self.quad(
-                  x: panelX,
-                  y: panelY,
-                  width: sidebarWidth,
-                  height: panelHeight,
-                  red: 0x0800,
-                  green: 0x1000,
-                  blue: 0x2000,
-                  alpha: 0xd800
-              ),
-              let accentCard = Self.quad(
-                  x: cardX,
-                  y: panelY + innerMargin,
-                  width: cardWidth,
-                  height: cardHeight,
-                  red: 0x1000,
-                  green: 0x7000,
-                  blue: 0x9000,
-                  alpha: 0xf000
-              ),
-              let dock = Self.quad(
-                  x: dockX,
-                  y: dockY,
-                  width: dockWidth,
-                  height: dockHeight,
-                  red: 0x1800,
-                  green: 0x2000,
-                  blue: 0x3400,
-                  alpha: 0xd000
-              )
-        else {
-            return nil
-        }
-        guard Self.record(.drawQuad(topBar), into: &recorder),
-              Self.record(.drawQuad(panel), into: &recorder),
-              Self.record(.drawQuad(sidebar), into: &recorder),
-              Self.record(.drawQuad(accentCard), into: &recorder),
-              Self.record(.drawQuad(dock), into: &recorder),
-              Self.record(.endRenderPass, into: &recorder)
-        else {
-            return nil
-        }
-        guard case .sealed(let commandBuffer) = recorder.seal() else {
-            return nil
-        }
-        return commandBuffer
-    }
-
-    private static func quad(
-        x: UInt32,
-        y: UInt32,
-        width: UInt32,
-        height: UInt32,
-        red: UInt16,
-        green: UInt16,
-        blue: UInt16,
-        alpha: UInt16
-    ) -> GPUQuadInstance? {
-        guard let fixedX = GPUFixed16(whole: Int(x)),
-              let fixedY = GPUFixed16(whole: Int(y)),
-              let fixedWidth = GPUFixed16(whole: Int(width)),
-              let fixedHeight = GPUFixed16(whole: Int(height)),
-              let bounds = GPUFixedRectangle(
-                  x: fixedX,
-                  y: fixedY,
-                  width: fixedWidth,
-                  height: fixedHeight
-              ),
-              let color = GPUPremultipliedColor(
-                  red: red,
-                  green: green,
-                  blue: blue,
-                  alpha: alpha
-              )
-        else {
-            return nil
-        }
-        return GPUQuadInstance(
-            bounds: bounds,
-            color: color,
-            blendMode: .sourceOver
-        )
-    }
-
-    private static func record(
-        _ command: GPURenderCommand,
-        into recorder: inout GPUCommandRecorder
-    ) -> Bool {
-        if case .recorded = recorder.record(command) { return true }
-        return false
     }
 
     private func damageFits(

@@ -83,6 +83,7 @@ def main() -> int:
         "VirtIOGPU3DSession.readyMarker",
         "SWIFTOS:GPU_FRAME_READY",
         "VirGLIRCompiler",
+        "GPUDesktopScene.makeInitialFrame",
         "encodeResourceInlineWrite",
         "b8g8r8a8SRGB",
         "unitQuadResourceID",
