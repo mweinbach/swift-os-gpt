@@ -35,6 +35,58 @@ private struct DeviceTreeSearchResult {
     let heightInPixels: UInt32?
     let bytesPerRow: UInt32?
     let framebufferFormat: SimpleFramebufferFormat?
+    let matchedPropertyCells: DeviceTreePropertyCells?
+}
+
+/// A deliberately small, allocation-free view of one Device Tree property
+/// containing big-endian 32-bit cells. Platform discovery uses this for short
+/// hardware specifiers such as `interrupts`; larger or byte-oriented
+/// properties fail closed instead of being silently truncated.
+struct DeviceTreePropertyCells: Equatable {
+    static let maximumCellCount = 8
+
+    private var cell0: UInt32 = 0
+    private var cell1: UInt32 = 0
+    private var cell2: UInt32 = 0
+    private var cell3: UInt32 = 0
+    private var cell4: UInt32 = 0
+    private var cell5: UInt32 = 0
+    private var cell6: UInt32 = 0
+    private var cell7: UInt32 = 0
+
+    private(set) var count = 0
+
+    init() {}
+
+    mutating func append(_ value: UInt32) -> Bool {
+        guard count < Self.maximumCellCount else { return false }
+        switch count {
+        case 0: cell0 = value
+        case 1: cell1 = value
+        case 2: cell2 = value
+        case 3: cell3 = value
+        case 4: cell4 = value
+        case 5: cell5 = value
+        case 6: cell6 = value
+        default: cell7 = value
+        }
+        count += 1
+        return true
+    }
+
+    func cell(at index: Int) -> UInt32? {
+        guard index >= 0, index < count else { return nil }
+        switch index {
+        case 0: return cell0
+        case 1: return cell1
+        case 2: return cell2
+        case 3: return cell3
+        case 4: return cell4
+        case 5: return cell5
+        case 6: return cell6
+        default: return cell7
+        }
+    }
 }
 
 /// One address in a Device Tree bus address space. Two-cell buses use only
@@ -229,6 +281,44 @@ struct FlattenedDeviceTree {
             remainingMatches: &remainingMatches,
             registerIndex: registerIndex
         )?.resource
+    }
+
+    func propertyCells(
+        compatibleWith compatibility: StaticString,
+        nodeIndex: Int = 0,
+        property: StaticString
+    ) -> DeviceTreePropertyCells? {
+        guard nodeIndex >= 0,
+              let target = resource(
+                  compatibleWith: compatibility,
+                  nodeIndex: nodeIndex
+              )
+        else {
+            return nil
+        }
+
+        // A search requiring `property` has its own node-index space. Match
+        // the translated resource so a compatible node that omits the
+        // property cannot shift metadata onto a different device.
+        var propertyIndex = 0
+        while propertyIndex < 64 {
+            var remainingMatches = propertyIndex
+            guard let result = search(
+                compatibleWith: compatibility,
+                deviceType: nil,
+                reservedMemory: false,
+                remainingMatches: &remainingMatches,
+                registerIndex: 0,
+                matchingPropertyName: property
+            ) else {
+                return nil
+            }
+            if result.resource == target {
+                return result.matchedPropertyCells
+            }
+            propertyIndex += 1
+        }
+        return nil
     }
 
     func simpleFramebuffer(nodeIndex: Int = 0)
@@ -442,6 +532,7 @@ struct FlattenedDeviceTree {
         var heightInPixels: UInt32?
         var bytesPerRow: UInt32?
         var framebufferFormat: SimpleFramebufferFormat?
+        var matchedPropertyCells: DeviceTreePropertyCells?
         var rangesOffset: UInt?
         var rangesLength: UInt = 0
 
@@ -612,6 +703,10 @@ struct FlattenedDeviceTree {
                     } else {
                         propertyMatches = true
                     }
+                    matchedPropertyCells = decodePropertyCells(
+                        at: valueOffset,
+                        length: valueLength
+                    )
                 }
 
             case Self.endNode:
@@ -626,7 +721,8 @@ struct FlattenedDeviceTree {
                             widthInPixels: widthInPixels,
                             heightInPixels: heightInPixels,
                             bytesPerRow: bytesPerRow,
-                            framebufferFormat: framebufferFormat
+                            framebufferFormat: framebufferFormat,
+                            matchedPropertyCells: matchedPropertyCells
                         )
                     }
                     remainingMatches -= 1
@@ -644,6 +740,29 @@ struct FlattenedDeviceTree {
             }
         }
         return nil
+    }
+
+    private func decodePropertyCells(
+        at offset: UInt,
+        length: UInt
+    ) -> DeviceTreePropertyCells? {
+        guard length > 0,
+              length & 0x3 == 0,
+              length / 4 <= UInt(DeviceTreePropertyCells.maximumCellCount)
+        else {
+            return nil
+        }
+        var result = DeviceTreePropertyCells()
+        var cellOffset: UInt = 0
+        while cellOffset < length {
+            guard let value = readStructureWord(at: offset + cellOffset),
+                  result.append(value)
+            else {
+                return nil
+            }
+            cellOffset += 4
+        }
+        return result
     }
 
     private func decodeResource(

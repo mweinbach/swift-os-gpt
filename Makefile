@@ -55,7 +55,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test virtio-net-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test virtio-net-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -521,7 +521,20 @@ virtio-net-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/virtio-network-bootstrap-memory-host-tests
 	$(BUILD_DIR)/virtio-network-bootstrap-memory-host-tests
 
-host-test: debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test virtio-net-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
+platform-network-discovery-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Platform/FlattenedDeviceTree.swift \
+		Kernel/Platform/Platform.swift \
+		Kernel/Platform/PlatformNetworkResources.swift \
+		Tests/Host/PlatformNetworkDiscoveryTests.swift \
+		-o $(BUILD_DIR)/platform-network-discovery-host-tests
+	$(BUILD_DIR)/platform-network-discovery-host-tests
+
+host-test: debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test virtio-net-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
@@ -933,6 +946,24 @@ rpi5-fdt-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/libRaspberryPi5DeviceTreeProbe.dylib
 	$(PYTHON) Tests/Host/rpi5_fdt_probe.py \
 		$(BUILD_DIR)/libRaspberryPi5DeviceTreeProbe.dylib $(RPI5_DTB)
+
+platform-network-pinned-fdt-test: | $(BUILD_DIR)
+	@test -n "$(RPI5_DTB)" || \
+		(echo "RPI5_DTB must name a Raspberry Pi 5 firmware DTB" >&2; exit 2)
+	$(QEMU) -machine virt,gic-version=3,dumpdtb=$(BUILD_DIR)/qemu-virt.dtb \
+		-cpu cortex-a72 -m 512M -display none -monitor none -serial none
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(MACOS_SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Platform/FlattenedDeviceTree.swift \
+		Kernel/Platform/Platform.swift \
+		Kernel/Platform/PlatformNetworkResources.swift \
+		Tests/Host/PlatformNetworkPinnedDeviceTreeTests.swift \
+		-o $(BUILD_DIR)/platform-network-pinned-dtb-tests
+	$(BUILD_DIR)/platform-network-pinned-dtb-tests \
+		$(BUILD_DIR)/qemu-virt.dtb $(RPI5_DTB)
 
 inspect: build
 	LLVM_NM=$(LLVM_NM) LLVM_OBJDUMP=$(LLVM_OBJDUMP) \
