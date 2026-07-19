@@ -63,6 +63,9 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     private var endpointZeroInQueuedByteCount: UInt16 = 0
     private var endpointZeroInNeedsZeroLengthPacket = false
     private var endpointZeroInQueuedZeroLengthPacket = false
+    private var endpointZeroPendingDisplayOpenState: Bool?
+    private var displayEndpointOpen = false
+    private var displaySessionResetPending = false
     private var displayTransferInFlight = false
     private(set) var state: USBDebugGadgetState = .attached
 
@@ -131,6 +134,8 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             controlEndpoint.busReset()
             displayTransmitter.resetSession(requestFullFrame: true)
             resetEndpointZeroTransaction()
+            displayEndpointOpen = false
+            displaySessionResetPending = false
             displayTransferInFlight = false
             state = .attached
             event = .busReset
@@ -141,6 +146,8 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             controlEndpoint = USBControlEndpoint(
                 speed: controller.busSpeed == .high ? .high : .full
             )
+            displayEndpointOpen = false
+            displaySessionResetPending = false
             state = .enumerated
             event = .enumerated(controller.busSpeed)
         }
@@ -239,7 +246,14 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             controller.acknowledgeGlobalInterrupts(acknowledged)
         }
 
-        if state == .configured && !displayTransferInFlight {
+        if displaySessionResetPending && !displayTransferInFlight {
+            displayTransmitter.resetSession(requestFullFrame: true)
+            displaySessionResetPending = false
+        }
+
+        if state == .configured,
+           displayEndpointOpen,
+           !displayTransferInFlight {
             let packet = displayPacketBuffer
             let transmitResult = displayTransmitter.prepareNextPacket(
                 into: packet
@@ -294,6 +308,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             endpointZeroRequestedByteCount = setup.length
             let reply = controlReplyBuffer
             let action = controlEndpoint.handle(setup, reply: reply)
+            stageDisplayOpenState(setup: setup, action: action)
             return performControlAction(action)
 
         case .outDataReceived:
@@ -399,11 +414,14 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             }
 
         case .statusIn:
+            let pendingDisplayOpenState =
+                endpointZeroPendingDisplayOpenState
             let commit = controlEndpoint.completeStatusStage(succeeded: true)
             if case .deviceAddress(let address) = commit {
                 controller.setDeviceAddress(address)
             }
             resetEndpointZeroTransaction()
+            commitDisplayOpenState(pendingDisplayOpenState)
             guard controller.armEndpoint0ForSetup() else { return fail() }
             guard let configurationEvent = synchronizeConfiguration() else {
                 return nil
@@ -473,34 +491,64 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     private mutating func resetEndpointZeroTransaction() {
         endpointZeroTransaction = .idle
         endpointZeroRequestedByteCount = 0
+        endpointZeroPendingDisplayOpenState = nil
         resetEndpointZeroInState()
+    }
+
+    private mutating func stageDisplayOpenState(
+        setup: USBSetupPacket,
+        action: USBControlAction
+    ) {
+        guard setup.requestType.kind == .class,
+              setup.requestType.direction == .hostToDevice,
+              setup.requestType.recipient == .interface,
+              setup.request == USBCDCRequest.setControlLineState,
+              case .statusIn = action
+        else { return }
+        endpointZeroPendingDisplayOpenState =
+            controlEndpoint.controlLineState & 1 != 0
+    }
+
+    private mutating func commitDisplayOpenState(_ isOpen: Bool?) {
+        guard let isOpen else { return }
+        let wasOpen = displayEndpointOpen
+        displayEndpointOpen = isOpen
+        if isOpen && !wasOpen {
+            displaySessionResetPending = true
+        }
     }
 
     private mutating func synchronizeConfiguration() -> USBDebugGadgetEvent? {
         if controlEndpoint.state == .configured {
-            if controller.state != .configured {
-                guard controller.configureCompositeEndpoints(),
-                      controller.armOutTransfer(
-                          endpoint: 2,
-                          byteCount: UInt32(
-                              controller.busSpeed.bulkMaximumPacketSize
-                          )
-                      ) == .queued,
-                      controller.armOutTransfer(
-                          endpoint: 3,
-                          byteCount: UInt32(
-                              controller.busSpeed.bulkMaximumPacketSize
-                          )
-                      ) == .queued
-                else { return fail() }
+            guard controller.state != .configured else {
+                state = .configured
+                return USBDebugGadgetEvent.none
             }
+            guard controller.configureCompositeEndpoints(),
+                  controller.armOutTransfer(
+                      endpoint: 2,
+                      byteCount: UInt32(
+                          controller.busSpeed.bulkMaximumPacketSize
+                      )
+                  ) == .queued,
+                  controller.armOutTransfer(
+                      endpoint: 3,
+                      byteCount: UInt32(
+                          controller.busSpeed.bulkMaximumPacketSize
+                      )
+                  ) == .queued
+            else { return fail() }
             displayTransmitter.resetSession(requestFullFrame: true)
+            displayEndpointOpen = controlEndpoint.controlLineState & 1 != 0
+            displaySessionResetPending = false
             displayTransferInFlight = false
             state = .configured
             return .configured
         }
         if controller.state == .configured {
             controller.deconfigureCompositeEndpoints()
+            displayEndpointOpen = false
+            displaySessionResetPending = false
             displayTransferInFlight = false
             state = .enumerated
             return .deconfigured
@@ -584,6 +632,8 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         controller.disconnect()
         state = .faulted
         resetEndpointZeroTransaction()
+        displayEndpointOpen = false
+        displaySessionResetPending = false
         displayTransferInFlight = false
         return .faulted
     }

@@ -192,6 +192,23 @@ struct DWC2USBDebugGadgetTests {
                     "configuration did not activate data endpoints"
                 )
                 expect(gadget.state == .configured, "wrong gadget state")
+                let endpointTwoTransferSize = Int(
+                    DWC2RegisterLayout.inEndpointTransferSize(2)! / 4
+                )
+                expect(
+                    bank.words[endpointTwoTransferSize] == 0,
+                    "display streamed before the CDC tty was opened"
+                )
+
+                setControlLineState(
+                    1,
+                    bank: bank,
+                    gadget: &gadget
+                )
+                expect(
+                    bank.words[endpointTwoTransferSize] != 0,
+                    "DTR did not start the display handshake"
+                )
 
                 var completedFrame: UInt64 = 0
                 var completionCount = 0
@@ -203,9 +220,55 @@ struct DWC2USBDebugGadgetTests {
                     completionCount += 1
                 }
                 expect(completedFrame == 1, "initial USB frame did not complete")
+
+                setControlLineState(
+                    0,
+                    bank: bank,
+                    gadget: &gadget
+                )
+                setControlLineState(
+                    1,
+                    bank: bank,
+                    gadget: &gadget
+                )
+                completedFrame = 0
+                completionCount = 0
+                while completedFrame == 0 && completionCount < 16 {
+                    bank.injectInCompletion(2)
+                    if case .frameCompleted(let frameID) = gadget.service() {
+                        completedFrame = frameID
+                    }
+                    completionCount += 1
+                }
+                expect(
+                    completedFrame == 1,
+                    "DTR reopen did not restart a full display session"
+                )
                 expect(gadget.isOperational, "successful stream faulted")
             }
         }
+    }
+
+    private static func setControlLineState(
+        _ value: UInt16,
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        injectSetup(
+            [
+                0x21,
+                USBCDCRequest.setControlLineState,
+                UInt8(truncatingIfNeeded: value),
+                UInt8(truncatingIfNeeded: value >> 8),
+                USBDebugDeviceIdentity.cdcControlInterface,
+                0,
+                0,
+                0,
+            ],
+            bank: bank,
+            gadget: &gadget
+        )
+        completeEndpointZero(bank: bank, gadget: &gadget)
     }
 
     private static func requestFullConfigurationDescriptor(
