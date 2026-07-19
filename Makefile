@@ -337,8 +337,33 @@ swiftos-control-host-test: | $(BUILD_DIR)
 		Tests/Host/SDBGHostClientTests.swift \
 		-o $(BUILD_DIR)/swiftos-sdbg-host-client-tests
 	$(BUILD_DIR)/swiftos-sdbg-host-client-tests
+	$(MACOS_SWIFTC) -parse-as-library -swift-version 5 -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Debug/BootIdentity.swift \
+		Kernel/Debug/DebugStatusSnapshot.swift \
+		Kernel/Debug/KernelLogRing.swift \
+		Kernel/Debug/SDBGProtocol.swift \
+		Kernel/Debug/SDBGStreamDecoder.swift \
+		Kernel/Debug/SDBGTypedPayload.swift \
+		Kernel/Debug/SDBGService.swift \
+		tools/SwiftOSControl/SDBGHostTypedPayload.swift \
+		tools/SwiftOSControl/SDBGHostStreamClient.swift \
+		tools/SwiftOSControl/SDBGSerialSession.swift \
+		Tests/Host/SDBGSerialSessionTests.swift \
+		-o $(BUILD_DIR)/swiftos-sdbg-serial-session-tests
+	$(BUILD_DIR)/swiftos-sdbg-serial-session-tests
 
 $(SWIFTOS_CONTROL): \
+		Kernel/Debug/BootIdentity.swift \
+		Kernel/Debug/DebugStatusSnapshot.swift \
+		Kernel/Debug/KernelLogRing.swift \
+		Kernel/Debug/SDBGProtocol.swift \
+		Kernel/Debug/SDBGStreamDecoder.swift \
+		Kernel/Debug/SDBGTypedPayload.swift \
+		Kernel/Debug/SDBGService.swift \
+		tools/SwiftOSControl/SDBGHostTypedPayload.swift \
+		tools/SwiftOSControl/SDBGHostStreamClient.swift \
+		tools/SwiftOSControl/SDBGSerialSession.swift \
 		tools/SwiftOSControl/SwiftOSDiscovery.swift \
 		tools/SwiftOSControl/SwiftOSControlCLI.swift | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/swiftos-control-module-cache
@@ -434,7 +459,7 @@ network-wire-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/network-wire-codec-host-tests
 	$(BUILD_DIR)/network-wire-codec-host-tests
 
-host-test: debug-observability-host-test sdbg-protocol-host-test network-wire-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-update-host-test swiftos-control-host-test
+host-test: debug-observability-host-test sdbg-protocol-host-test network-wire-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
