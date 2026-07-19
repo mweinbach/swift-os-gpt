@@ -207,6 +207,7 @@ struct VirtIOInputDevice<Registers: VirtIOInputRegisterAccess> {
     private var translator: VirtIOInputEventTranslator
     private var state: VirtIOInputDeviceState = .cold
     private var usedIndex: UInt16 = 0
+    private var validatedUsedIndex: UInt16 = 0
     private var availableIndex: UInt16 = 0
     /// One bit per descriptor currently published to the device. A completed
     /// ID is removed before decoding and restored only after the recycled
@@ -365,7 +366,10 @@ struct VirtIOInputDevice<Registers: VirtIOInputRegisterAccess> {
             at: queue.cpuPhysicalAddress + layout.usedOffset + 2
         )
         let pending = observedUsedIndex &- usedIndex
-        guard pending <= layout.size else {
+        let previouslyValidated = validatedUsedIndex &- usedIndex
+        guard pending <= layout.size,
+              previouslyValidated <= pending
+        else {
             faultDevice()
             return .deviceFault
         }
@@ -375,11 +379,21 @@ struct VirtIOInputDevice<Registers: VirtIOInputRegisterAccess> {
         }
         registers.synchronizeDMA()
 
-        let count = pending < maximumEvents ? pending : maximumEvents
+        // Validate every newly observed used element, even when the caller's
+        // processing budget is smaller. Otherwise two duplicate IDs already
+        // present in the used ring could straddle polls and look legitimate
+        // after the first descriptor was recycled.
+        let unvalidated = observedUsedIndex &- validatedUsedIndex
+        guard unvalidated <= layout.size - previouslyValidated else {
+            faultDevice()
+            return .deviceFault
+        }
         var validatedOwnership = deviceOwnedDescriptorMask
         var validated: UInt16 = 0
-        while validated < count {
-            let usedSlot = UInt64((usedIndex &+ validated) % layout.size)
+        while validated < unvalidated {
+            let usedSlot = UInt64(
+                (validatedUsedIndex &+ validated) % layout.size
+            )
             let usedElement = queue.cpuPhysicalAddress
                 + layout.usedOffset + 4 + usedSlot * 8
             let descriptorID = PhysicalBytes.readLE32(at: usedElement)
@@ -399,7 +413,9 @@ struct VirtIOInputDevice<Registers: VirtIOInputRegisterAccess> {
             validated &+= 1
         }
         deviceOwnedDescriptorMask = validatedOwnership
+        validatedUsedIndex = observedUsedIndex
 
+        let count = pending < maximumEvents ? pending : maximumEvents
         var processed: UInt16 = 0
         var recycledDescriptorMask: UInt64 = 0
         var translation = VirtIOInputTranslationSummary()
@@ -494,7 +510,32 @@ struct VirtIOInputDevice<Registers: VirtIOInputRegisterAccess> {
         )
     }
 
-    private func readCapabilities() -> VirtIOInputCapabilities? {
+    private func readCapabilities(
+        maximumAttempts: Int = 8
+    ) -> VirtIOInputCapabilities? {
+        guard maximumAttempts > 0 else { return nil }
+        var attempt = 0
+        while attempt < maximumAttempts {
+            let generationBefore = configurationGeneration
+            guard let snapshot = readCapabilitySnapshot() else { return nil }
+            let generationAfter = configurationGeneration
+            if generationBefore == generationAfter {
+                return snapshot
+            }
+            attempt += 1
+        }
+        return nil
+    }
+
+    private var configurationGeneration: UInt8 {
+        UInt8(
+            truncatingIfNeeded: registers.read32(
+                at: VirtIOInputMMIORegisterLayout.configurationGeneration
+            )
+        )
+    }
+
+    private func readCapabilitySnapshot() -> VirtIOInputCapabilities? {
         guard case .value(let keyA) = configurationBitmapContains(
                   eventType: VirtIOInputEventType.key,
                   code: 30
@@ -554,18 +595,14 @@ struct VirtIOInputDevice<Registers: VirtIOInputRegisterAccess> {
         let bit = UInt8(1) << UInt8(code % 8)
         var attempt = 0
         while attempt < maximumAttempts {
-            let generationBefore = registers.read32(
-                at: VirtIOInputMMIORegisterLayout.configurationGeneration
-            ) & 0xff
+            let generationBefore = configurationGeneration
             let size = registers.read8(at: configuration + 2)
             guard size <= 128 else { return .invalid }
             let supported = byteIndex < UInt(size)
                 && registers.read8(
                     at: configuration + 8 + byteIndex
                 ) & bit != 0
-            let generationAfter = registers.read32(
-                at: VirtIOInputMMIORegisterLayout.configurationGeneration
-            ) & 0xff
+            let generationAfter = configurationGeneration
             if generationBefore == generationAfter {
                 return .value(supported)
             }
@@ -602,6 +639,7 @@ struct VirtIOInputDevice<Registers: VirtIOInputRegisterAccess> {
         }
         availableIndex = layout.size
         usedIndex = 0
+        validatedUsedIndex = 0
         registers.synchronizeDMA()
         registers.storeDMAUInt16(
             availableIndex,

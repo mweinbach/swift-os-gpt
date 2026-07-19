@@ -601,9 +601,13 @@ struct VirtIOInputDeviceTests {
             + duplicateDMA.storage.eventQueueLayout.availableOffset + 2
         var duplicateSink = VirtIOInputRecordingSink()
         expect(
-            duplicateDevice.poll(timestampTicks: 2, into: &duplicateSink)
+            duplicateDevice.poll(
+                timestampTicks: 2,
+                maximumEvents: 1,
+                into: &duplicateSink
+            )
                 == .deviceFault,
-            "duplicate descriptor completion was accepted"
+            "duplicate descriptor completion across a poll bound was accepted"
         )
         expect(
             PhysicalBytes.readLE16(at: duplicateAvailableIndex) == 64
