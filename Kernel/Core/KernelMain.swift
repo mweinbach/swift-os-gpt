@@ -6,6 +6,10 @@ private nonisolated(unsafe) var activeVirtIOGPU3DAllocation:
     ClassifiedPageAllocationToken?
 private nonisolated(unsafe) var activeKernelUpdateAllocation:
     ClassifiedPageAllocationToken?
+private nonisolated(unsafe) var activeVirtIONetworkAllocation:
+    ClassifiedPageAllocationToken?
+private nonisolated(unsafe) var activeVirtIONetworkService:
+    PollingNetworkService<VirtIONetworkMMIODevice>?
 
 @_cdecl("swiftos_main")
 func swiftOSMain(_ deviceTreeAddress: UInt64) {
@@ -184,11 +188,212 @@ private func runRaspberryPiUSBDesktop(
     )
 }
 
+/// Brings up the optional QEMU VirtIO Ethernet device without making network
+/// presence part of the existing boot contract. Candidate inspection is
+/// read-only until a modern network device is identified, so GPU and empty
+/// VirtIO MMIO transports are not reset or negotiated by this path.
+private func activateQEMUVirtIONetwork(
+    console: EarlyConsole,
+    platform: Platform
+) {
+    guard activeVirtIONetworkAllocation == nil,
+          activeVirtIONetworkService == nil,
+          let description = qemuVirtIONetworkDescription(platform: platform)
+    else {
+        return
+    }
+
+    let requiredCapabilities = PhysicalMemoryCapabilities.cpuAccessible
+        .union(.deviceAccessible)
+        .union(.cacheCoherent)
+    let allocationResult = KernelMemoryRuntime.allocateClassifiedPages(
+        ClassifiedPageAllocationConstraints(
+            pageCount: VirtIONetworkBootstrapMemory.pageCount,
+            requiredCapabilities: requiredCapabilities,
+            domainSelection: .preferred(
+                KernelMemoryRuntime.defaultSystemMemoryDomain,
+                fallback: .disallowed
+            )
+        )
+    )
+    guard case .allocated(let allocation) = allocationResult else {
+        console.write("SWIFTOS:VIRTIO_NET_MEMORY_UNAVAILABLE\n")
+        return
+    }
+    guard let workspace = VirtIONetworkBootstrapMemory(
+              allocation: allocation,
+              deviceBaseAddress: allocation.range.baseAddress,
+              deviceAddressWidth: .bits64,
+              coherency: .hardwareCoherent
+          ), var device = VirtIONetworkMMIODevice(
+              resource: description.registers,
+              storage: workspace.storage
+          )
+    else {
+        _ = KernelMemoryRuntime.releaseClassifiedPages(allocation)
+        console.write("SWIFTOS:VIRTIO_NET_MEMORY_INVALID\n")
+        return
+    }
+
+    let initialization = device.initialize()
+    guard initialization == .ready else {
+        switch initialization {
+        case .invalidState, .invalidPollLimit, .wrongDevice, .legacyTransport:
+            _ = KernelMemoryRuntime.releaseClassifiedPages(allocation)
+        case .ready:
+            break
+        case .deviceResetFailed, .missingRequiredFeature,
+             .featureNegotiationFailed, .queueUnavailable,
+             .invalidDeviceConfiguration:
+            // Initialization may already have published one queue address.
+            // Keep the allocator capability alive so memory potentially
+            // retained by the device is never returned to another owner.
+            activeVirtIONetworkAllocation = allocation
+        }
+        console.write("SWIFTOS:VIRTIO_NET_INIT_FAILED\n")
+        return
+    }
+
+    let frequency = AArch64.counterFrequency
+    guard frequency > 0, frequency <= UInt64.max / 300 else {
+        activeVirtIONetworkAllocation = allocation
+        console.write("SWIFTOS:VIRTIO_NET_CLOCK_INVALID\n")
+        return
+    }
+    let startTicks = AArch64.counterValue
+    let packedMAC = packedMACAddress(device.macAddress)
+    let transactionIdentifier = UInt32(
+        truncatingIfNeeded: startTicks ^ packedMAC ^ (packedMAC >> 32)
+    )
+    let retryTicks = max(frequency / 10, 1)
+    let maximumRetryTicks = max(frequency, retryTicks)
+    guard var service = PollingNetworkService(
+              link: device,
+              receiveScratchAddress: workspace.receiveScratchAddress,
+              transmitScratchAddress: workspace.transmitScratchAddress,
+              scratchByteCount: workspace.scratchByteCount,
+              dhcpTransactionIdentifier: transactionIdentifier,
+              timing: IPv4PollingStackTiming(
+                  arpEntryLifetimeTicks: frequency * 300,
+                  arpProbeIntervalTicks: frequency,
+                  dhcpRetryPolicy: DHCPv4RetryPolicy(
+                      initialRetryTicks: retryTicks,
+                      maximumRetryTicks: maximumRetryTicks
+                  )
+              ),
+              startAtTicks: startTicks
+          )
+    else {
+        activeVirtIONetworkAllocation = allocation
+        console.write("SWIFTOS:VIRTIO_NET_SERVICE_INVALID\n")
+        return
+    }
+
+    // This bounded bootstrap poll proves the link and DHCP path. The retained
+    // service is the ownership foundation for a later scheduled network
+    // worker; this boot milestone does not claim continuous lease servicing.
+    console.write("SWIFTOS:VIRTIO_NET_BOOT_POLLING\n")
+    console.write("SWIFTOS:VIRTIO_NET_READY\n")
+    console.write("SWIFTOS:VIRTIO_NET_MAC=")
+    console.writeHex(packedMAC)
+    console.write("\n")
+
+    let deadlineDelta = frequency * 3
+    var fatalFailure = false
+    while AArch64.counterValue &- startTicks < deadlineDelta {
+        let event = service.poll(nowTicks: AArch64.counterValue)
+        if service.networkConfiguration != nil {
+            break
+        }
+        switch event {
+        case .deviceFault:
+            console.write("SWIFTOS:VIRTIO_NET_DEVICE_FAULT\n")
+            fatalFailure = true
+        case .linkIdentityMismatch:
+            console.write("SWIFTOS:VIRTIO_NET_IDENTITY_FAULT\n")
+            fatalFailure = true
+        case .receiveScratchTooSmall, .transmitScratchTooSmall:
+            console.write("SWIFTOS:VIRTIO_NET_SCRATCH_FAULT\n")
+            fatalFailure = true
+        case .transmitFailed(let failure):
+            switch failure {
+            case .sent:
+                break
+            case .linkDown:
+                console.write("SWIFTOS:VIRTIO_NET_TX_LINK_DOWN\n")
+                fatalFailure = true
+            case .invalidFrame:
+                console.write("SWIFTOS:VIRTIO_NET_TX_FRAME_INVALID\n")
+                fatalFailure = true
+            case .timedOut:
+                console.write("SWIFTOS:VIRTIO_NET_TX_TIMEOUT\n")
+                fatalFailure = true
+            case .deviceFault:
+                console.write("SWIFTOS:VIRTIO_NET_TX_DEVICE_FAULT\n")
+                fatalFailure = true
+            }
+        default:
+            break
+        }
+        if fatalFailure { break }
+        AArch64.spinHint()
+    }
+
+    activeVirtIONetworkAllocation = allocation
+    activeVirtIONetworkService = service
+    if let configuration = service.networkConfiguration {
+        console.write("SWIFTOS:DHCP_BOUND\n")
+        console.write("SWIFTOS:VIRTIO_NET_IPV4=")
+        console.writeHex(UInt64(configuration.address.rawValue))
+        console.write("\n")
+    } else if fatalFailure {
+        console.write("SWIFTOS:VIRTIO_NET_FAULT\n")
+    } else {
+        console.write("SWIFTOS:DHCP_TIMEOUT\n")
+    }
+}
+
+private func qemuVirtIONetworkDescription(
+    platform: Platform
+) -> PlatformNetworkDeviceDescription? {
+    var index = 0
+    while index < PlatformNetworkDeviceDiscovery.maximumCandidateCount {
+        defer { index += 1 }
+        guard let description = platform.networkDeviceCandidate(at: index),
+              description.controller == .virtioMMIOCandidate,
+              description.dma.addressing == .directSystemPhysical,
+              description.dma.coherency == .hardwareCoherent,
+              let transport = VirtIOMMIOTransport(
+                  resource: description.registers
+              ),
+              transport.hasVirtIOMagic,
+              transport.identity.version == VirtIOMMIOTransport.modernVersion,
+              transport.identity.deviceID
+                == VirtIONetworkMMIODevice.networkDeviceID
+        else {
+            continue
+        }
+        return description
+    }
+    return nil
+}
+
+private func packedMACAddress(_ address: MACAddress) -> UInt64 {
+    UInt64(address.octet0) << 40
+        | UInt64(address.octet1) << 32
+        | UInt64(address.octet2) << 24
+        | UInt64(address.octet3) << 16
+        | UInt64(address.octet4) << 8
+        | UInt64(address.octet5)
+}
+
 private func runQEMUDesktop(
     console: EarlyConsole,
     platform: Platform,
     memory: KernelMemoryActivation
 ) -> Never {
+    activateQEMUVirtIONetwork(console: console, platform: platform)
+
     switch activateVirtIOGPU3D(platform: platform) {
     case .ready(let configuration):
         runQEMUAcceleratedDesktop(

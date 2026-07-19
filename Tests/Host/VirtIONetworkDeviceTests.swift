@@ -7,7 +7,7 @@ private final class VirtIONetworkTestHardware {
         | VirtIONetworkFeature.status
         | VirtIONetworkFeature.mtu
         | (UInt64(1) << 0)   // VIRTIO_NET_F_CSUM, intentionally unsupported.
-        | (UInt64(1) << 15)  // VIRTIO_NET_F_MRG_RXBUF, intentionally unsupported.
+        | VirtIONetworkFeature.mergeableReceiveBuffers
         | (UInt64(1) << 28)  // VIRTIO_F_RING_INDIRECT_DESC, not used here.
     var driverFeatures: UInt64 = 0
     var deviceFeatureSelection: UInt32 = 0
@@ -342,7 +342,8 @@ struct VirtIONetworkDeviceTests {
                     == VirtIOTransportFeature.version1
                         | VirtIONetworkFeature.mac
                         | VirtIONetworkFeature.status
-                        | VirtIONetworkFeature.mtu,
+                        | VirtIONetworkFeature.mtu
+                        | VirtIONetworkFeature.mergeableReceiveBuffers,
                 "unrequested or missing features were acknowledged"
             )
             require(
@@ -381,6 +382,7 @@ struct VirtIONetworkDeviceTests {
         withFixture(configure: { hardware in
             hardware.offeredFeatures = VirtIOTransportFeature.version1
                 | VirtIONetworkFeature.mac
+                | VirtIONetworkFeature.mergeableReceiveBuffers
             hardware.setLink(up: false)
             hardware.setMTU(0)
         }) { device, hardware, _ in
@@ -396,7 +398,8 @@ struct VirtIONetworkDeviceTests {
             require(
                 hardware.driverFeatures
                     == VirtIOTransportFeature.version1
-                        | VirtIONetworkFeature.mac,
+                        | VirtIONetworkFeature.mac
+                        | VirtIONetworkFeature.mergeableReceiveBuffers,
                 "minimal feature selection changed"
             )
         }
@@ -559,6 +562,23 @@ struct VirtIONetworkDeviceTests {
             require(hardware.status & 128 != 0, "feature rejection did not fail device")
         }
         withFixture(configure: { hardware in
+            hardware.offeredFeatures = VirtIOTransportFeature.version1
+                | VirtIONetworkFeature.mac
+        }) { device, hardware, _ in
+            require(
+                device.initialize() == .missingRequiredFeature,
+                "device without mergeable RX headers was accepted"
+            )
+            require(
+                hardware.driverFeatures == 0,
+                "missing mergeable RX feature was partially negotiated"
+            )
+            require(
+                hardware.status & 128 != 0,
+                "missing mergeable RX feature did not fail device"
+            )
+        }
+        withFixture(configure: { hardware in
             hardware.rejectFeatures = true
         }) { device, _, _ in
             require(
@@ -618,6 +638,27 @@ struct VirtIONetworkDeviceTests {
                 "unsupported RX offload header was accepted"
             )
             require(device.linkState == .faulted, "malformed RX did not fault device")
+        }
+        withFixture { device, hardware, storage in
+            require(device.initialize() == .ready, "fixture did not initialize")
+            let frame = [UInt8](repeating: 0x55, count: 60)
+            injectReceivePacket(
+                descriptorID: 0,
+                frame: frame,
+                storage: storage,
+                hardware: hardware,
+                headerBufferCount: 2
+            )
+            var output = [UInt8](repeating: 0, count: 60)
+            require(
+                output.withUnsafeMutableBytes { device.pollReceive(into: $0) }
+                    == .malformedFrame,
+                "multi-buffer RX unsupported by this queue was accepted"
+            )
+            require(
+                device.linkState == .faulted,
+                "multi-buffer RX did not fault device"
+            )
         }
         withFixture(maximumPollCount: 3, configure: { hardware in
             hardware.completeTransmits = false
@@ -709,7 +750,8 @@ struct VirtIONetworkDeviceTests {
         frame: [UInt8],
         storage: VirtIONetworkDMAStorage,
         hardware: VirtIONetworkTestHardware,
-        headerFlags: UInt8 = 0
+        headerFlags: UInt8 = 0,
+        headerBufferCount: UInt16 = 1
     ) {
         let packet = storage.receiveBuffers.cpuPhysicalAddress
             + UInt64(descriptorID) * 1_536
@@ -719,7 +761,7 @@ struct VirtIONetworkDeviceTests {
             index += 1
         }
         PhysicalBytes.write8(headerFlags, at: packet)
-        PhysicalBytes.writeLE16(1, at: packet + 10)
+        PhysicalBytes.writeLE16(headerBufferCount, at: packet + 10)
         index = 0
         while index < frame.count {
             PhysicalBytes.write8(frame[index], at: packet + 12 + UInt64(index))

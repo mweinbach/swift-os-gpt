@@ -55,7 +55,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test virtio-net-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke smp-el0-smoke cpu-config-smoke test host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test virtio-net-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -989,6 +989,10 @@ virtio-gpu-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/virtio_gpu_smoke.py \
 		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-virtio-gpu.ppm
 
+virtio-net-smoke: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/virtio_network_smoke.py \
+		$(KERNEL_BIN)
+
 smp-el0-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py $(KERNEL_BIN)
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
@@ -998,7 +1002,7 @@ cpu-config-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
 		$(KERNEL_BIN) --cpu cortex-a76 --cpus 2
 
-test: toolchain-check source-check host-test userland-test qemu-fdt-test rpi5-package-test inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke rpi5-inspect
+test: toolchain-check source-check host-test userland-test qemu-fdt-test rpi5-package-test inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke smp-el0-smoke cpu-config-smoke rpi5-inspect
 
 clean:
 	rm -rf $(BUILD_DIR)

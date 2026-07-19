@@ -70,6 +70,7 @@ private enum VirtIONetworkDeviceState: UInt8 {
 enum VirtIONetworkFeature {
     static let mtu: UInt64 = 1 << 3
     static let mac: UInt64 = 1 << 5
+    static let mergeableReceiveBuffers: UInt64 = 1 << 15
     static let status: UInt64 = 1 << 16
 }
 
@@ -78,8 +79,10 @@ enum VirtIONetworkConfiguration {
     static let minimumSupportedMTU: UInt16 = 68
     static let maximumSupportedMTU: UInt16 = 1_500
     static let ethernetHeaderByteCount = 14
-    // Modern VirtIO always includes num_buffers. Only a legacy transport may
-    // omit those final two bytes when mergeable receive buffers are disabled.
+    // SwiftOS requires VIRTIO_NET_F_MRG_RXBUF so `num_buffers` is present.
+    // A 1,536-byte buffer holds the largest supported Ethernet frame and its
+    // header, so a conforming device must complete each supported frame in one
+    // descriptor; larger or multi-buffer packets are rejected explicitly.
     static let virtioHeaderByteCount = 12
     static let packetBufferByteCount: UInt64 = 1_536
 }
@@ -341,7 +344,9 @@ struct VirtIONetworkDevice<Registers: VirtIONetworkRegisterAccess>: NetworkLink 
 
         let offered = readDeviceFeatures()
         offeredFeatures = offered
-        let required = VirtIOTransportFeature.version1 | VirtIONetworkFeature.mac
+        let required = VirtIOTransportFeature.version1
+            | VirtIONetworkFeature.mac
+            | VirtIONetworkFeature.mergeableReceiveBuffers
         let optional = VirtIONetworkFeature.status | VirtIONetworkFeature.mtu
         guard let selection = VirtIOFeatureSelection.select(
                   offered: offered,
