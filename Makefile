@@ -51,7 +51,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test usb-gadget-host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke smp-el0-smoke cpu-config-smoke test host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -160,7 +160,57 @@ usb-gadget-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/usb-gadget-protocol-host-tests
 	$(BUILD_DIR)/usb-gadget-protocol-host-tests
 
-host-test: usb-gadget-host-test
+usb-dwc2-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Drivers/USB/DWC2ControllerModel.swift \
+		Tests/Host/DWC2ControllerModelTests.swift \
+		-o $(BUILD_DIR)/dwc2-controller-model-host-tests
+	$(BUILD_DIR)/dwc2-controller-model-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Drivers/USB/DWC2ControllerModel.swift \
+		Kernel/Drivers/USB/DWC2DeviceController.swift \
+		Tests/Host/DWC2DeviceControllerTests.swift \
+		-o $(BUILD_DIR)/dwc2-device-controller-host-tests
+	$(BUILD_DIR)/dwc2-device-controller-host-tests
+
+usb-debug-display-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Drivers/USB/USBDebugDisplayProtocol.swift \
+		Tests/Host/USBDebugDisplayProtocolTests.swift \
+		-o $(BUILD_DIR)/usb-debug-display-protocol-host-tests
+	$(BUILD_DIR)/usb-debug-display-protocol-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DamageRectangle.swift \
+		Kernel/Drivers/USB/USBDebugDisplayProtocol.swift \
+		Kernel/Drivers/USB/USBDebugDisplayTransmitter.swift \
+		Tests/Host/USBDebugDisplayTransmitterTests.swift \
+		-o $(BUILD_DIR)/usb-debug-display-transmitter-host-tests
+	$(BUILD_DIR)/usb-debug-display-transmitter-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Graphics/DamageRectangle.swift \
+		Kernel/Drivers/USB/DWC2ControllerModel.swift \
+		Kernel/Drivers/USB/DWC2DeviceController.swift \
+		Kernel/Drivers/USB/USBSetupPacket.swift \
+		Kernel/Drivers/USB/USBDebugDescriptors.swift \
+		Kernel/Drivers/USB/USBControlEndpoint.swift \
+		Kernel/Drivers/USB/USBDebugDisplayProtocol.swift \
+		Kernel/Drivers/USB/USBDebugDisplayTransmitter.swift \
+		Kernel/Drivers/USB/DWC2USBDebugGadget.swift \
+		Tests/Host/DWC2USBDebugGadgetTests.swift \
+		-o $(BUILD_DIR)/dwc2-usb-debug-gadget-host-tests
+	$(BUILD_DIR)/dwc2-usb-debug-gadget-host-tests
+
+host-test: usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
