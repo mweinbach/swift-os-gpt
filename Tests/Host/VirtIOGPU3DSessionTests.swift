@@ -17,6 +17,7 @@ enum AArch64 {
 struct VirtIOMMIOTransport {
     enum Behavior: Equatable {
         case normal
+        case batchedFrame
         case timeoutAt(step: Int)
         case wrongFenceAt(step: Int)
         case noEnabledScanout
@@ -151,7 +152,7 @@ struct VirtIOMMIOTransport {
             expectedByteCount = 48
         case 18:
             expectedType = VirtIOGPU3DControlType.submit3D
-            expectedByteCount = 132
+            expectedByteCount = behavior == .batchedFrame ? nil : 132
         case 19:
             expectedType = VirtIOGPUControlType.resourceFlush
             expectedByteCount = 48
@@ -265,12 +266,20 @@ struct VirtIOMMIOTransport {
                 && PhysicalBytes.readLE32(at: address + 40) == 1
                 && PhysicalBytes.readLE32(at: address + 44) == 0
         case 18:
+            if behavior == .batchedFrame {
+                return batchedRenderCommandStreamIsValid(
+                    at: address,
+                    requestByteCount: byteCount
+                )
+            }
             return subsequentRenderCommandStreamIsValid(
                 at: address,
                 requestByteCount: byteCount
             )
         case 19:
-            return rectangleIsFullDisplay(at: address + 24)
+            return (behavior == .batchedFrame
+                    ? rectangleIsBatchDamage(at: address + 24)
+                    : rectangleIsFullDisplay(at: address + 24))
                 && PhysicalBytes.readLE32(at: address + 40) == 1
                 && PhysicalBytes.readLE32(at: address + 44) == 0
         default:
@@ -606,11 +615,56 @@ struct VirtIOMMIOTransport {
             && PhysicalBytes.readLE32(at: stream + 64) == 0x0008_0007
     }
 
+    private func batchedRenderCommandStreamIsValid(
+        at address: UInt64,
+        requestByteCount: UInt32
+    ) -> Bool {
+        guard requestByteCount > 32,
+              PhysicalBytes.readLE32(at: address + 16) == 1,
+              PhysicalBytes.readLE32(at: address + 24)
+                == requestByteCount - 32
+        else {
+            return false
+        }
+        let stream = address + 32
+        let commandByteCount = requestByteCount - 32
+        var offset: UInt32 = 0
+        var framebufferCount = 0
+        var clearCount = 0
+        while offset < commandByteCount {
+            let packet = stream + UInt64(offset)
+            let header = PhysicalBytes.readLE32(at: packet)
+            let payloadDWords = header >> 16
+            let packetByteCount = (payloadDWords + 1) * 4
+            guard packetByteCount > 4,
+                  packetByteCount <= commandByteCount - offset
+            else {
+                return false
+            }
+            switch UInt8(truncatingIfNeeded: header) {
+            case 5: framebufferCount += 1
+            case 7: clearCount += 1
+            default: break
+            }
+            offset += packetByteCount
+        }
+        return offset == commandByteCount
+            && framebufferCount == 2
+            && clearCount == 1
+    }
+
     private func rectangleIsFullDisplay(at address: UInt64) -> Bool {
         PhysicalBytes.readLE32(at: address) == 0
             && PhysicalBytes.readLE32(at: address + 4) == 0
             && PhysicalBytes.readLE32(at: address + 8) == 1_920
             && PhysicalBytes.readLE32(at: address + 12) == 1_080
+    }
+
+    private func rectangleIsBatchDamage(at address: UInt64) -> Bool {
+        PhysicalBytes.readLE32(at: address) == 10
+            && PhysicalBytes.readLE32(at: address + 4) == 20
+            && PhysicalBytes.readLE32(at: address + 8) == 300
+            && PhysicalBytes.readLE32(at: address + 12) == 200
     }
 
     private func writeResponse(
@@ -705,7 +759,8 @@ struct VirtIOGPU3DSessionTests {
         testFencedResponseIsRequired()
         testEnabledScanoutIsRequired()
         testReusableFrameSubmission()
-        print("VirtIO-GPU 3D session host tests: 6 groups passed")
+        testBatchedFrameSubmissionPresentsOnce()
+        print("VirtIO-GPU 3D session host tests: 7 groups passed")
     }
 
     private static func testGPURetainedDesktopCrossing() {
@@ -878,6 +933,83 @@ struct VirtIOGPU3DSessionTests {
                 "reusable GPU frame was not submitted and flushed"
             )
             expect(session.isConfigured, "successful frame invalidated session")
+        }
+    }
+
+    private static func testBatchedFrameSubmissionPresentsOnce() {
+        withMappings { command, request, response, queue in
+            var session = makeSession(
+                command: command,
+                request: request,
+                response: response,
+                queue: queue,
+                behavior: .batchedFrame
+            )
+            guard case .configured = session.configureAndRenderDesktop(),
+                  let target = GPURenderTargetID(rawValue: 1),
+                  let extent = GPUPixelExtent(width: 1_920, height: 1_080),
+                  let firstID = GPUCommandBufferID(rawValue: 41),
+                  let secondID = GPUCommandBufferID(rawValue: 42),
+                  var firstRecorder = GPUCommandRecorder(
+                      id: firstID,
+                      capacity: 2
+                  ),
+                  var secondRecorder = GPUCommandRecorder(
+                      id: secondID,
+                      capacity: 2
+                  )
+            else {
+                fatalError("batched session bootstrap")
+            }
+            let firstPass = GPURenderPassDescriptor(
+                target: target,
+                extent: extent,
+                format: .bgra8UNormSRGB,
+                loadAction: .clear(.opaqueBlack),
+                storeAction: .store
+            )
+            let secondPass = GPURenderPassDescriptor(
+                target: target,
+                extent: extent,
+                format: .bgra8UNormSRGB,
+                loadAction: .load,
+                storeAction: .store
+            )
+            expect(
+                firstRecorder.record(.beginRenderPass(firstPass))
+                    == .recorded(index: 0),
+                "record first batch pass"
+            )
+            expect(
+                firstRecorder.record(.endRenderPass) == .recorded(index: 1),
+                "record first batch end"
+            )
+            expect(
+                secondRecorder.record(.beginRenderPass(secondPass))
+                    == .recorded(index: 0),
+                "record second batch pass"
+            )
+            expect(
+                secondRecorder.record(.endRenderPass) == .recorded(index: 1),
+                "record second batch end"
+            )
+            guard case .sealed(let first) = firstRecorder.seal(),
+                  case .sealed(let second) = secondRecorder.seal()
+            else {
+                fatalError("seal batch buffers")
+            }
+            let damage = VirtIOGPURectangle(
+                x: 10,
+                y: 20,
+                width: 300,
+                height: 200
+            )
+            expect(
+                session.renderBatch(first, then: second, damage: damage)
+                    == .presented(completionFenceID: 20),
+                "batch was not one submission followed by one flush"
+            )
+            expect(session.isConfigured, "successful batch invalidated session")
         }
     }
 

@@ -10,7 +10,7 @@ struct VirtIOGPU3DBootstrapMemoryTests {
 
     private static func testPartitionsTranslatedCoherentMemory() {
         let token = makeToken(
-            pageCount: 3,
+            pageCount: VirtIOGPU3DBootstrapMemory.pageCount,
             capabilities: .cpuAccessible
                 .union(.deviceAccessible)
                 .union(.cacheCoherent)
@@ -30,18 +30,24 @@ struct VirtIOGPU3DBootstrapMemoryTests {
             "command CPU address"
         )
         expect(
-            workspace.request.cpuPhysicalAddress == 0x1000_1000,
+            workspace.request.cpuPhysicalAddress == 0x1000_2000,
             "request CPU address"
         )
         expect(
-            workspace.response.cpuPhysicalAddress == 0x1000_2000,
+            workspace.response.cpuPhysicalAddress == 0x1000_4000,
             "response CPU address"
         )
         expect(
             workspace.commandArena.deviceAddress == 0x4000_0000
-                && workspace.request.deviceAddress == 0x4000_1000
-                && workspace.response.deviceAddress == 0x4000_2000,
+                && workspace.request.deviceAddress == 0x4000_2000
+                && workspace.response.deviceAddress == 0x4000_4000,
             "translated device partitions"
+        )
+        expect(
+            workspace.commandArena.byteCount == MemoryPageGeometry.pageSize * 2
+                && workspace.request.byteCount
+                    == MemoryPageGeometry.pageSize * 2,
+            "batched render arenas"
         )
         expect(
             workspace.response.byteCount == MemoryPageGeometry.pageSize,
@@ -54,18 +60,18 @@ struct VirtIOGPU3DBootstrapMemoryTests {
             .union(.deviceAccessible)
             .union(.cacheCoherent)
         expect(
-            makeWorkspace(makeToken(pageCount: 2, capabilities: capabilities))
+            makeWorkspace(makeToken(pageCount: 4, capabilities: capabilities))
                 == nil,
             "short allocation was accepted"
         )
         expect(
-            makeWorkspace(makeToken(pageCount: 4, capabilities: capabilities))
+            makeWorkspace(makeToken(pageCount: 6, capabilities: capabilities))
                 == nil,
             "ambiguous oversized allocation was accepted"
         )
         let zeroIdentifier = makeToken(
             identifier: 0,
-            pageCount: 3,
+            pageCount: VirtIOGPU3DBootstrapMemory.pageCount,
             capabilities: capabilities
         )
         expect(makeWorkspace(zeroIdentifier) == nil, "unowned range was accepted")
@@ -73,13 +79,13 @@ struct VirtIOGPU3DBootstrapMemoryTests {
 
     private static func testRejectsMissingAccessCapabilities() {
         let cpuOnly = makeToken(
-            pageCount: 3,
+            pageCount: VirtIOGPU3DBootstrapMemory.pageCount,
             capabilities: .cpuAccessible.union(.cacheCoherent)
         )
         expect(makeWorkspace(cpuOnly) == nil, "CPU-only memory was accepted")
 
         let noncoherent = makeToken(
-            pageCount: 3,
+            pageCount: VirtIOGPU3DBootstrapMemory.pageCount,
             capabilities: .cpuAccessible.union(.deviceAccessible)
         )
         expect(
@@ -99,7 +105,7 @@ struct VirtIOGPU3DBootstrapMemoryTests {
 
     private static func testRejectsInvalidDeviceWindow() {
         let token = makeToken(
-            pageCount: 3,
+            pageCount: VirtIOGPU3DBootstrapMemory.pageCount,
             capabilities: .cpuAccessible
                 .union(.deviceAccessible)
                 .union(.cacheCoherent)

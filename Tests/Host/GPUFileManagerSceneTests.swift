@@ -120,6 +120,7 @@ struct GPUFileManagerSceneTests {
                     == GPUMaskFontAtlasLayout.glyph(for: 0xfffd).maskTextureRegion,
                 "non-ASCII name did not use replacement glyph"
             )
+            expectSceneLowersAsOneBatch(frame)
         }
     }
 
@@ -307,6 +308,99 @@ struct GPUFileManagerSceneTests {
 
     private static func commandID(_ rawValue: UInt64) -> GPUCommandBufferID {
         GPUCommandBufferID(rawValue: rawValue)!
+    }
+
+    private static func expectSceneLowersAsOneBatch(
+        _ frame: GPUFileManagerSceneFrame
+    ) {
+        var initializationStorage = [UInt32](repeating: 0, count: 2_048)
+        var renderStorage = [UInt32](repeating: 0, count: 2_040)
+        initializationStorage.withUnsafeMutableBufferPointer { storage in
+            guard var initializationArena = VirGLDWordArena(storage: storage)
+            else {
+                fail("initialization arena rejected")
+            }
+            var compiler = makeVirGLCompiler()
+            guard case .initialized = compiler.initializePipeline(
+                      into: &initializationArena
+                  )
+            else {
+                fail("VirGL pipeline initialization rejected")
+            }
+            renderStorage.withUnsafeMutableBufferPointer { renderBytes in
+                guard var renderArena = VirGLDWordArena(storage: renderBytes),
+                      let target = VirGLIRRenderTarget(
+                          id: target(1),
+                          surfaceHandle: 0x100,
+                          extent: GPUPixelExtent(
+                              width: 1_920,
+                              height: 1_080
+                          )!,
+                          format: .bgra8UNormSRGB,
+                          virglSurfaceFormat:
+                            VirGLIRRenderTarget.b8g8r8a8SRGBFormat
+                      )
+                else {
+                    fail("VirGL render batch setup rejected")
+                }
+                guard case .lowered = compiler.lower(
+                          frame.chromeCommandBuffer,
+                          renderTarget: target,
+                          into: &renderArena
+                      ), case .lowered = compiler.lower(
+                          frame.textCommandBuffer,
+                          renderTarget: target,
+                          into: &renderArena
+                      )
+                else {
+                    fail("file-manager batch exceeded its GPU arena")
+                }
+                expect(
+                    renderArena.dwordCount <= 1_600,
+                    "file-manager batch consumed its reserved arena margin"
+                )
+            }
+        }
+    }
+
+    private static func makeVirGLCompiler() -> VirGLIRCompiler {
+        let capabilities = VirGLContextCapabilities(
+            capsetID: 2,
+            capsetVersion: 2,
+            capabilityBits: 0,
+            capabilityBitsV2: 0
+        )
+        guard let glyph = VirGLIRGlyphPipeline(
+                  textureID: texture(7),
+                  textureResource: 3,
+                  vertexShader: 0x10a,
+                  fragmentShader: 0x10b,
+                  samplerView: 0x10c,
+                  nearestSampler: 0x10d,
+                  linearSampler: 0x10e
+              ), let handles = VirGLIRPipelineHandles(
+                  vertexShader: 0x101,
+                  fragmentShader: 0x102,
+                  roundedVertexShader: 0x108,
+                  roundedFragmentShader: 0x109,
+                  glyph: glyph,
+                  vertexElements: 0x103,
+                  rasterizer: 0x104,
+                  depthStencilAlpha: 0x105,
+                  copyBlend: 0x106,
+                  sourceOverBlend: 0x107,
+                  unitQuadVertexResource: 2
+              )
+        else {
+            fail("VirGL file-manager pipeline handles rejected")
+        }
+        return VirGLIRCompiler(
+            configuration: VirGLIRPipelineConfiguration(
+                capabilities: capabilities,
+                handles: handles,
+                unitQuadVertexLayout: .r32g32Float
+            )
+        )
     }
 
     private static func fixed(_ whole: Int) -> GPUFixed16 {

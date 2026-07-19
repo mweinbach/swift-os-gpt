@@ -376,6 +376,34 @@ struct VirtIOGPU3DSession {
         _ commandBuffer: GPURenderCommandBuffer,
         damage requestedDamage: VirtIOGPURectangle? = nil
     ) -> VirtIOGPU3DFrameResult {
+        renderCommands(
+            first: commandBuffer,
+            second: nil,
+            damage: requestedDamage
+        )
+    }
+
+    /// Lowers two ordered command buffers into one VirGL submission and then
+    /// performs one resource flush. This is the bounded crossing used by
+    /// retained chrome followed by a `.load` text pass: no chrome-only frame
+    /// becomes visible between the two buffers.
+    mutating func renderBatch(
+        _ firstCommandBuffer: GPURenderCommandBuffer,
+        then secondCommandBuffer: GPURenderCommandBuffer,
+        damage requestedDamage: VirtIOGPURectangle? = nil
+    ) -> VirtIOGPU3DFrameResult {
+        renderCommands(
+            first: firstCommandBuffer,
+            second: secondCommandBuffer,
+            damage: requestedDamage
+        )
+    }
+
+    private mutating func renderCommands(
+        first firstCommandBuffer: GPURenderCommandBuffer,
+        second secondCommandBuffer: GPURenderCommandBuffer?,
+        damage requestedDamage: VirtIOGPURectangle?
+    ) -> VirtIOGPU3DFrameResult {
         guard isConfigured,
               let configuration = activeConfiguration,
               let features = activeFeatures,
@@ -403,7 +431,7 @@ struct VirtIOGPU3DSession {
             return failFrame(.commandStreamInvariant)
         }
         switch activeRenderer.lower(
-            commandBuffer,
+            firstCommandBuffer,
             renderTarget: target,
             into: &arena
         ) {
@@ -411,6 +439,18 @@ struct VirtIOGPU3DSession {
             break
         case .rejected(let rejection):
             return failFrame(.renderLowering(rejection))
+        }
+        if let secondCommandBuffer {
+            switch activeRenderer.lower(
+                secondCommandBuffer,
+                renderTarget: target,
+                into: &arena
+            ) {
+            case .lowered:
+                break
+            case .rejected(let rejection):
+                return failFrame(.renderLowering(rejection))
+            }
         }
         switch submit(arena: arena, features: features) {
         case .success:

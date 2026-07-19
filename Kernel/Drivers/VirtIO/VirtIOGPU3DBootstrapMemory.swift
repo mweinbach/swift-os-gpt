@@ -4,7 +4,12 @@
 /// an identity device address, while a future translated transport can provide
 /// a contiguous IOVA without changing the session.
 struct VirtIOGPU3DBootstrapMemory: Equatable {
-    static let pageCount: UInt64 = 3
+    static let commandArenaPageCount: UInt64 = 2
+    static let requestPageCount: UInt64 = 2
+    static let responsePageCount: UInt64 = 1
+    static let pageCount = commandArenaPageCount
+        + requestPageCount
+        + responsePageCount
 
     let allocation: ClassifiedPageAllocationToken
     let commandArena: DMAMapping
@@ -35,11 +40,13 @@ struct VirtIOGPU3DBootstrapMemory: Equatable {
 
         let pageSize = MemoryPageGeometry.pageSize
         let cpuBase = allocation.range.baseAddress
+        let commandByteCount = pageSize * Self.commandArenaPageCount
+        let requestByteCount = pageSize * Self.requestPageCount
         let requestDeviceAddress = deviceBaseAddress.addingReportingOverflow(
-            pageSize
+            commandByteCount
         )
         let responseDeviceAddress = deviceBaseAddress.addingReportingOverflow(
-            pageSize * 2
+            commandByteCount + requestByteCount
         )
         guard !requestDeviceAddress.overflow,
               !responseDeviceAddress.overflow
@@ -49,19 +56,20 @@ struct VirtIOGPU3DBootstrapMemory: Equatable {
         guard let command = DMAMapping(
                   cpuPhysicalAddress: cpuBase,
                   deviceAddress: deviceBaseAddress,
-                  byteCount: pageSize,
+                  byteCount: commandByteCount,
                   deviceAddressWidth: deviceAddressWidth,
                   coherency: coherency
               ),
               let request = DMAMapping(
-                  cpuPhysicalAddress: cpuBase + pageSize,
+                  cpuPhysicalAddress: cpuBase + commandByteCount,
                   deviceAddress: requestDeviceAddress.partialValue,
-                  byteCount: pageSize,
+                  byteCount: requestByteCount,
                   deviceAddressWidth: deviceAddressWidth,
                   coherency: coherency
               ),
               let response = DMAMapping(
-                  cpuPhysicalAddress: cpuBase + pageSize * 2,
+                  cpuPhysicalAddress:
+                    cpuBase + commandByteCount + requestByteCount,
                   deviceAddress: responseDeviceAddress.partialValue,
                   byteCount: pageSize,
                   deviceAddressWidth: deviceAddressWidth,
