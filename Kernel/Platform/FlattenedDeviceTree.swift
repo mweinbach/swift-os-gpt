@@ -30,12 +30,19 @@ struct SimpleFramebufferDescription: Equatable {
 }
 
 private struct DeviceTreeSearchResult {
+    let nodeOffset: UInt
     let resource: DeviceResource?
     let widthInPixels: UInt32?
     let heightInPixels: UInt32?
     let bytesPerRow: UInt32?
     let framebufferFormat: SimpleFramebufferFormat?
     let matchedPropertyCells: DeviceTreePropertyCells?
+    let matchedPropertyBytes: DeviceTreePropertyBytes?
+}
+
+private struct DeviceTreePropertyLocation {
+    let offset: UInt
+    let length: UInt
 }
 
 /// A deliberately small, allocation-free view of one Device Tree property
@@ -86,6 +93,117 @@ struct DeviceTreePropertyCells: Equatable {
         case 6: return cell6
         default: return cell7
         }
+    }
+}
+
+/// A bounded, allocation-free copy of one opaque Device Tree property. The
+/// FDT remains firmware-owned, so platform descriptions copy short byte and
+/// string-list values before retaining them. Properties larger than this
+/// deliberately fail closed instead of exposing an unbounded raw pointer.
+struct DeviceTreePropertyBytes: Equatable {
+    static let maximumByteCount = 64
+
+    private var word0: UInt64 = 0
+    private var word1: UInt64 = 0
+    private var word2: UInt64 = 0
+    private var word3: UInt64 = 0
+    private var word4: UInt64 = 0
+    private var word5: UInt64 = 0
+    private var word6: UInt64 = 0
+    private var word7: UInt64 = 0
+
+    private(set) var count = 0
+
+    init() {}
+
+    mutating func append(_ value: UInt8) -> Bool {
+        guard count < Self.maximumByteCount else { return false }
+        let wordIndex = count >> 3
+        let shift = UInt64((count & 7) << 3)
+        let encoded = UInt64(value) << shift
+        switch wordIndex {
+        case 0: word0 |= encoded
+        case 1: word1 |= encoded
+        case 2: word2 |= encoded
+        case 3: word3 |= encoded
+        case 4: word4 |= encoded
+        case 5: word5 |= encoded
+        case 6: word6 |= encoded
+        default: word7 |= encoded
+        }
+        count += 1
+        return true
+    }
+
+    func byte(at index: Int) -> UInt8? {
+        guard index >= 0, index < count else { return nil }
+        let word: UInt64
+        switch index >> 3 {
+        case 0: word = word0
+        case 1: word = word1
+        case 2: word = word2
+        case 3: word = word3
+        case 4: word = word4
+        case 5: word = word5
+        case 6: word = word6
+        default: word = word7
+        }
+        return UInt8((word >> UInt64((index & 7) << 3)) & 0xff)
+    }
+
+    /// Returns the number of well-formed, non-empty C strings. A string list
+    /// without a final NUL, or one containing an empty item, is malformed.
+    var cStringCount: Int? {
+        guard count > 0, byte(at: count - 1) == 0 else { return nil }
+        var strings = 0
+        var itemLength = 0
+        var index = 0
+        while index < count {
+            guard let value = byte(at: index) else { return nil }
+            if value == 0 {
+                guard itemLength > 0 else { return nil }
+                strings += 1
+                itemLength = 0
+            } else {
+                itemLength += 1
+            }
+            index += 1
+        }
+        return strings
+    }
+
+    func cString(at itemIndex: Int, equals expected: StaticString) -> Bool {
+        guard itemIndex >= 0, cStringCount != nil else { return false }
+        var currentItem = 0
+        var start = 0
+        var index = 0
+        while index < count {
+            guard let value = byte(at: index) else { return false }
+            if value == 0 {
+                if currentItem == itemIndex {
+                    let length = index - start
+                    return expected.withUTF8Buffer { expectedBytes in
+                        guard expectedBytes.count == length else {
+                            return false
+                        }
+                        var byteIndex = 0
+                        while byteIndex < length {
+                            guard byte(at: start + byteIndex)
+                                    == expectedBytes[byteIndex]
+                            else {
+                                return false
+                            }
+                            byteIndex += 1
+                        }
+                        return true
+                    }
+                }
+                currentItem += 1
+                start = index + 1
+            }
+            index += 1
+        }
+        return false
     }
 }
 
@@ -289,36 +407,56 @@ struct FlattenedDeviceTree {
         property: StaticString
     ) -> DeviceTreePropertyCells? {
         guard nodeIndex >= 0,
-              let target = resource(
-                  compatibleWith: compatibility,
+              let nodeOffset = compatibleNodeOffset(
+                  compatibility,
                   nodeIndex: nodeIndex
               )
-        else {
+        else { return nil }
+        return propertyCells(atNode: nodeOffset, property: property)
+    }
+
+    func propertyBytes(
+        compatibleWith compatibility: StaticString,
+        nodeIndex: Int = 0,
+        property: StaticString
+    ) -> DeviceTreePropertyBytes? {
+        guard nodeIndex >= 0,
+              let nodeOffset = compatibleNodeOffset(
+                  compatibility,
+                  nodeIndex: nodeIndex
+              )
+        else { return nil }
+        return propertyBytes(atNode: nodeOffset, property: property)
+    }
+
+    /// Resolves a short cell property through a unique Device Tree phandle.
+    /// Both standard `phandle` and legacy `linux,phandle` spellings are
+    /// accepted when they agree. Duplicate owners or conflicting spellings
+    /// fail closed.
+    func propertyCells(
+        nodePhandle phandle: UInt32,
+        property: StaticString
+    ) -> DeviceTreePropertyCells? {
+        guard let nodeOffset = uniqueNodeOffset(forPhandle: phandle) else {
             return nil
         }
+        return propertyCells(atNode: nodeOffset, property: property)
+    }
 
-        // A search requiring `property` has its own node-index space. Match
-        // the translated resource so a compatible node that omits the
-        // property cannot shift metadata onto a different device.
-        var propertyIndex = 0
-        while propertyIndex < 64 {
-            var remainingMatches = propertyIndex
-            guard let result = search(
-                compatibleWith: compatibility,
-                deviceType: nil,
-                reservedMemory: false,
-                remainingMatches: &remainingMatches,
-                registerIndex: 0,
-                matchingPropertyName: property
-            ) else {
-                return nil
-            }
-            if result.resource == target {
-                return result.matchedPropertyCells
-            }
-            propertyIndex += 1
-        }
-        return nil
+    /// Whether an enabled compatible node contains a property, independent
+    /// of whether that property's value can be decoded into cells or bytes.
+    func hasProperty(
+        compatibleWith compatibility: StaticString,
+        nodeIndex: Int = 0,
+        property: StaticString
+    ) -> Bool {
+        guard nodeIndex >= 0,
+              let nodeOffset = compatibleNodeOffset(
+                  compatibility,
+                  nodeIndex: nodeIndex
+              )
+        else { return false }
+        return propertyLocation(atNode: nodeOffset, property: property) != nil
     }
 
     func simpleFramebuffer(nodeIndex: Int = 0)
@@ -453,6 +591,168 @@ struct FlattenedDeviceTree {
         return nil
     }
 
+    private func compatibleNodeOffset(
+        _ compatibility: StaticString,
+        nodeIndex: Int
+    ) -> UInt? {
+        var remainingMatches = nodeIndex
+        return search(
+            compatibleWith: compatibility,
+            deviceType: nil,
+            reservedMemory: false,
+            remainingMatches: &remainingMatches,
+            registerIndex: 0
+        )?.nodeOffset
+    }
+
+    private func propertyCells(
+        atNode nodeOffset: UInt,
+        property: StaticString
+    ) -> DeviceTreePropertyCells? {
+        guard let location = propertyLocation(
+                  atNode: nodeOffset,
+                  property: property
+              )
+        else { return nil }
+        return decodePropertyCells(
+            at: location.offset,
+            length: location.length
+        )
+    }
+
+    private func propertyBytes(
+        atNode nodeOffset: UInt,
+        property: StaticString
+    ) -> DeviceTreePropertyBytes? {
+        guard let location = propertyLocation(
+                  atNode: nodeOffset,
+                  property: property
+              )
+        else { return nil }
+        return decodePropertyBytes(
+            at: location.offset,
+            length: location.length
+        )
+    }
+
+    /// Finds a property on exactly one node without descending into children.
+    /// Duplicate properties are malformed under DTSpec and are rejected.
+    private func propertyLocation(
+        atNode nodeOffset: UInt,
+        property: StaticString
+    ) -> DeviceTreePropertyLocation? {
+        guard readStructureWord(at: nodeOffset) == Self.beginNode else {
+            return nil
+        }
+        var cursor = nodeOffset + 4
+        guard skipNodeName(cursor: &cursor) else { return nil }
+        var match: DeviceTreePropertyLocation?
+
+        while cursor < structureEnd {
+            guard let token = readStructureWord(at: cursor) else { return nil }
+            cursor += 4
+            switch token {
+            case Self.property:
+                guard let rawLength = readStructureWord(at: cursor),
+                      let rawNameOffset = readStructureWord(at: cursor + 4)
+                else { return nil }
+                cursor += 8
+                let length = UInt(rawLength)
+                let valueOffset = cursor
+                guard Self.range(
+                          offset: valueOffset,
+                          length: length,
+                          fits: structureEnd
+                      ), let next = Self.align4(valueOffset + length),
+                      next <= structureEnd
+                else { return nil }
+                cursor = next
+                if propertyName(
+                    at: UInt(rawNameOffset),
+                    equals: property
+                ) {
+                    guard match == nil else { return nil }
+                    match = DeviceTreePropertyLocation(
+                        offset: valueOffset,
+                        length: length
+                    )
+                }
+            case Self.noOperation:
+                continue
+            case Self.beginNode, Self.endNode:
+                return match
+            default:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    private func uniqueNodeOffset(forPhandle phandle: UInt32) -> UInt? {
+        guard phandle != 0 else { return nil }
+        var match: UInt?
+        guard collectNodeOffset(
+                  forPhandle: phandle,
+                  property: "phandle",
+                  match: &match
+              ), collectNodeOffset(
+                  forPhandle: phandle,
+                  property: "linux,phandle",
+                  match: &match
+              ), let match
+        else { return nil }
+
+        let standardPresent = propertyLocation(
+            atNode: match,
+            property: "phandle"
+        ) != nil
+        let legacyPresent = propertyLocation(
+            atNode: match,
+            property: "linux,phandle"
+        ) != nil
+        let standard = propertyCells(atNode: match, property: "phandle")
+        let legacy = propertyCells(atNode: match, property: "linux,phandle")
+        if standardPresent {
+            guard standard?.count == 1,
+                  standard?.cell(at: 0) == phandle
+            else { return nil }
+        }
+        if legacyPresent {
+            guard legacy?.count == 1,
+                  legacy?.cell(at: 0) == phandle
+            else { return nil }
+        }
+        return match
+    }
+
+    private func collectNodeOffset(
+        forPhandle phandle: UInt32,
+        property: StaticString,
+        match: inout UInt?
+    ) -> Bool {
+        var propertyIndex = 0
+        while propertyIndex < 4_096 {
+            var remainingMatches = propertyIndex
+            guard let result = search(
+                      compatibleWith: nil,
+                      deviceType: nil,
+                      reservedMemory: false,
+                      remainingMatches: &remainingMatches,
+                      registerIndex: 0,
+                      matchingPropertyName: property
+                  )
+            else { return true }
+            if result.matchedPropertyCells?.count == 1,
+               result.matchedPropertyCells?.cell(at: 0) == phandle {
+                if let match, match != result.nodeOffset { return false }
+                match = result.nodeOffset
+            }
+            propertyIndex += 1
+        }
+        // Refuse a blob whose property-bearing node count exceeds the bound.
+        return false
+    }
+
     private func search(
         compatibleWith compatibility: StaticString?,
         deviceType: StaticString?,
@@ -533,6 +833,7 @@ struct FlattenedDeviceTree {
         var bytesPerRow: UInt32?
         var framebufferFormat: SimpleFramebufferFormat?
         var matchedPropertyCells: DeviceTreePropertyCells?
+        var matchedPropertyBytes: DeviceTreePropertyBytes?
         var rangesOffset: UInt?
         var rangesLength: UInt = 0
 
@@ -707,6 +1008,10 @@ struct FlattenedDeviceTree {
                         at: valueOffset,
                         length: valueLength
                     )
+                    matchedPropertyBytes = decodePropertyBytes(
+                        at: valueOffset,
+                        length: valueLength
+                    )
                 }
 
             case Self.endNode:
@@ -717,12 +1022,14 @@ struct FlattenedDeviceTree {
                     && reservedMemoryMatches {
                     if remainingMatches == 0 {
                         return DeviceTreeSearchResult(
+                            nodeOffset: nodeNameOffset - 4,
                             resource: resource,
                             widthInPixels: widthInPixels,
                             heightInPixels: heightInPixels,
                             bytesPerRow: bytesPerRow,
                             framebufferFormat: framebufferFormat,
-                            matchedPropertyCells: matchedPropertyCells
+                            matchedPropertyCells: matchedPropertyCells,
+                            matchedPropertyBytes: matchedPropertyBytes
                         )
                     }
                     remainingMatches -= 1
@@ -761,6 +1068,24 @@ struct FlattenedDeviceTree {
                 return nil
             }
             cellOffset += 4
+        }
+        return result
+    }
+
+    private func decodePropertyBytes(
+        at offset: UInt,
+        length: UInt
+    ) -> DeviceTreePropertyBytes? {
+        guard length <= UInt(DeviceTreePropertyBytes.maximumByteCount),
+              Self.range(offset: offset, length: length, fits: structureEnd)
+        else { return nil }
+        var result = DeviceTreePropertyBytes()
+        var byteOffset: UInt = 0
+        while byteOffset < length {
+            guard let value = readByte(at: offset + byteOffset),
+                  result.append(value)
+            else { return nil }
+            byteOffset += 1
         }
         return result
     }

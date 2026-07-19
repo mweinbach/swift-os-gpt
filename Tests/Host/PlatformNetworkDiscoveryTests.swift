@@ -1,6 +1,21 @@
 private enum SyntheticNetworkBoard {
     case qemu(interruptBytes: [UInt8], enabled: Bool)
-    case raspberryPi(interruptBytes: [UInt8], dmaCoherent: Bool)
+    case raspberryPi(
+        interruptBytes: [UInt8],
+        dmaCoherent: Bool,
+        malformation: SyntheticRP1Malformation
+    )
+}
+
+private enum SyntheticRP1Malformation {
+    case none
+    case shortLocalMAC
+    case oversizedLocalMAC
+    case reorderedClockNames
+    case unsupportedPHYMode
+    case missingResetDuration
+    case unsupportedResetFlags
+    case duplicatePHYPhandle
 }
 
 @main
@@ -12,12 +27,13 @@ struct PlatformNetworkDiscoveryTests {
         testRaspberryPiTranslatedCandidate()
         testPropertyCellsStayAttachedToTheirNode()
         testMalformedInterruptsFailClosed()
+        testMalformedRP1BoardMetadataFailsClosed()
         testDisabledNodeIsNotDiscoverable()
 
         guard failures == 0 else {
             fatalError("\(failures) platform network discovery test(s) failed")
         }
-        print("platform network discovery host tests passed (5 groups)")
+        print("platform network discovery host tests passed (6 groups)")
     }
 
     private static func testQEMUTranslatedCandidate() {
@@ -68,6 +84,10 @@ struct PlatformNetworkDiscoveryTests {
                 "QEMU DMA contract"
             )
             expect(
+                description.boardResources == nil,
+                "QEMU candidate inherited board-specific resources"
+            )
+            expect(
                 PlatformNetworkDeviceDiscovery.candidate(
                     in: tree,
                     board: .qemuVirt,
@@ -83,7 +103,8 @@ struct PlatformNetworkDiscoveryTests {
             makeTree(
                 .raspberryPi(
                     interruptBytes: words([6, 4]),
-                    dmaCoherent: false
+                    dmaCoherent: false,
+                    malformation: .none
                 )
             )
         ) { tree in
@@ -122,6 +143,82 @@ struct PlatformNetworkDiscoveryTests {
                 ),
                 "RP1 DMA contract"
             )
+            guard let boardResources = description.boardResources,
+                  case .rp1GEM(let rp1) = boardResources
+            else {
+                fail("RP1 board bootstrap resources missing")
+                return
+            }
+            expect(
+                rp1.gemRegisters == description.registers,
+                "RP1 board resources lost GEM aperture"
+            )
+            expect(
+                rp1.ethernetConfigurationRegisters == DeviceResource(
+                    baseAddress: 0x1f_0010_4000,
+                    length: 0x4_000
+                ),
+                "RP1 ETH_CFG aperture"
+            )
+            expect(
+                rp1.clocks == RP1GEMClockResources(
+                    controllerPhandle: 2,
+                    controllerRegisters: DeviceResource(
+                        baseAddress: 0x1f_0001_8000,
+                        length: 0x1_0038
+                    ),
+                    peripheralClockID: 12,
+                    hostClockID: 12,
+                    timestampClockID: 29,
+                    transmitClockID: 16
+                ),
+                "RP1 GEM clock-provider metadata"
+            )
+            expect(
+                rp1.phy == PlatformNetworkPHYDescription(
+                    clause22Address: 1,
+                    mode: .rgmiiID
+                ),
+                "RP1 PHY metadata"
+            )
+            expect(
+                rp1.phyReset == PlatformPHYResetDescription(
+                    gpioControllerPhandle: 0x2e,
+                    gpioRegisters: RP1GPIORegisterResources(
+                        ioBank: DeviceResource(
+                            baseAddress: 0x1f_000d_0000,
+                            length: 0xc_000
+                        ),
+                        rio: DeviceResource(
+                            baseAddress: 0x1f_000e_0000,
+                            length: 0xc_000
+                        ),
+                        padsBank: DeviceResource(
+                            baseAddress: 0x1f_000f_0000,
+                            length: 0xc_000
+                        )
+                    ),
+                    line: 32,
+                    assertedLevel: .low,
+                    durationMilliseconds: 5
+                ),
+                "RP1 PHY reset GPIO metadata"
+            )
+            expect(
+                rp1.localMACAddress == PlatformMACAddressBytes(
+                    byte0: 0x02,
+                    byte1: 0x53,
+                    byte2: 0x57,
+                    byte3: 0x49,
+                    byte4: 0x46,
+                    byte5: 0x54
+                ),
+                "RP1 firmware local MAC bytes"
+            )
+            expect(
+                rp1.localMACAddress?.isUsableUnicast == true,
+                "RP1 valid local MAC was not marked usable"
+            )
             expect(
                 PlatformNetworkDeviceDiscovery.candidate(
                     in: tree,
@@ -136,7 +233,8 @@ struct PlatformNetworkDiscoveryTests {
             makeTree(
                 .raspberryPi(
                     interruptBytes: words([6, 4]),
-                    dmaCoherent: true
+                    dmaCoherent: true,
+                    malformation: .none
                 )
             )
         ) { tree in
@@ -211,7 +309,8 @@ struct PlatformNetworkDiscoveryTests {
             makeTree(
                 .raspberryPi(
                     interruptBytes: words([64, 4]),
-                    dmaCoherent: false
+                    dmaCoherent: false,
+                    malformation: .none
                 )
             )
         ) { tree in
@@ -223,6 +322,38 @@ struct PlatformNetworkDiscoveryTests {
                 ) == nil,
                 "out-of-domain RP1 vector accepted"
             )
+        }
+    }
+
+    private static func testMalformedRP1BoardMetadataFailsClosed() {
+        let malformed: [SyntheticRP1Malformation] = [
+            .shortLocalMAC,
+            .oversizedLocalMAC,
+            .reorderedClockNames,
+            .unsupportedPHYMode,
+            .missingResetDuration,
+            .unsupportedResetFlags,
+            .duplicatePHYPhandle,
+        ]
+        for malformation in malformed {
+            withTree(
+                makeTree(
+                    .raspberryPi(
+                        interruptBytes: words([6, 4]),
+                        dmaCoherent: false,
+                        malformation: malformation
+                    )
+                )
+            ) { tree in
+                expect(
+                    PlatformNetworkDeviceDiscovery.candidate(
+                        in: tree,
+                        board: .raspberryPi5,
+                        at: 0
+                    ) == nil,
+                    "malformed RP1 board metadata accepted"
+                )
+            }
         }
     }
 
@@ -281,7 +412,10 @@ struct PlatformNetworkDiscoveryTests {
 private func makeTree(_ board: SyntheticNetworkBoard) -> [UInt8] {
     let names = [
         "#address-cells", "#size-cells", "compatible", "ranges", "reg",
-        "interrupts", "dma-coherent", "status",
+        "interrupts", "dma-coherent", "status", "clocks", "clock-names",
+        "phandle", "#clock-cells", "phy-mode", "local-mac-address",
+        "phy-handle", "phy-reset-gpios", "phy-reset-duration",
+        "gpio-controller", "#gpio-cells",
     ]
     let strings = makeStrings(names)
     let offsets = strings.offsets
@@ -311,7 +445,11 @@ private func makeTree(_ board: SyntheticNetworkBoard) -> [UInt8] {
         endNode(&structure)
         endNode(&structure)
 
-    case .raspberryPi(let interruptBytes, let dmaCoherent):
+    case .raspberryPi(
+        let interruptBytes,
+        let dmaCoherent,
+        let malformation
+    ):
         beginNode("axi", &structure)
         property(offsets["#address-cells"]!, words([2]), &structure)
         property(offsets["#size-cells"]!, words([2]), &structure)
@@ -339,6 +477,37 @@ private func makeTree(_ board: SyntheticNetworkBoard) -> [UInt8] {
                 + be64(0x41_0000),
             &structure
         )
+        beginNode("clocks@18000", &structure)
+        property(
+            offsets["compatible"]!,
+            cStrings(["raspberrypi,rp1-clocks"]),
+            &structure
+        )
+        property(
+            offsets["reg"]!,
+            be64(0xc0_4001_8000) + be64(0x1_0038),
+            &structure
+        )
+        property(offsets["#clock-cells"]!, words([1]), &structure)
+        property(offsets["phandle"]!, words([2]), &structure)
+        endNode(&structure)
+        beginNode("gpio@d0000", &structure)
+        property(
+            offsets["compatible"]!,
+            cStrings(["raspberrypi,rp1-gpio"]),
+            &structure
+        )
+        property(
+            offsets["reg"]!,
+            be64(0xc0_400d_0000) + be64(0xc_000)
+                + be64(0xc0_400e_0000) + be64(0xc_000)
+                + be64(0xc0_400f_0000) + be64(0xc_000),
+            &structure
+        )
+        property(offsets["gpio-controller"]!, [], &structure)
+        property(offsets["#gpio-cells"]!, words([2]), &structure)
+        property(offsets["phandle"]!, words([0x2e]), &structure)
+        endNode(&structure)
         beginNode("ethernet@100000", &structure)
         property(
             offsets["compatible"]!,
@@ -351,10 +520,71 @@ private func makeTree(_ board: SyntheticNetworkBoard) -> [UInt8] {
             &structure
         )
         property(offsets["interrupts"]!, interruptBytes, &structure)
+        property(
+            offsets["clocks"]!,
+            words([2, 12, 2, 12, 2, 29, 2, 16]),
+            &structure
+        )
+        property(
+            offsets["clock-names"]!,
+            malformation == .reorderedClockNames
+                ? cStrings(["hclk", "pclk", "tsu_clk", "tx_clk"])
+                : cStrings(["pclk", "hclk", "tsu_clk", "tx_clk"]),
+            &structure
+        )
+        property(offsets["#address-cells"]!, words([1]), &structure)
+        property(offsets["#size-cells"]!, words([0]), &structure)
+        property(
+            offsets["phy-mode"]!,
+            malformation == .unsupportedPHYMode
+                ? cStrings(["rgmii"])
+                : cStrings(["rgmii-id"]),
+            &structure
+        )
+        let localMAC: [UInt8]
+        switch malformation {
+        case .shortLocalMAC:
+            localMAC = [0x02, 0x53, 0x57, 0x49, 0x46]
+        case .oversizedLocalMAC:
+            localMAC = [UInt8](repeating: 0x02, count: 65)
+        default:
+            localMAC = [0x02, 0x53, 0x57, 0x49, 0x46, 0x54]
+        }
+        property(
+            offsets["local-mac-address"]!,
+            localMAC,
+            &structure
+        )
+        property(offsets["phy-handle"]!, words([0x3f]), &structure)
+        property(
+            offsets["phy-reset-gpios"]!,
+            words([
+                0x2e,
+                32,
+                malformation == .unsupportedResetFlags ? 2 : 1,
+            ]),
+            &structure
+        )
+        if malformation != .missingResetDuration {
+            property(
+                offsets["phy-reset-duration"]!,
+                words([5]),
+                &structure
+            )
+        }
         if dmaCoherent {
             property(offsets["dma-coherent"]!, [], &structure)
         }
+        beginNode("ethernet-phy@1", &structure)
+        property(offsets["reg"]!, words([1]), &structure)
+        property(offsets["phandle"]!, words([0x3f]), &structure)
         endNode(&structure)
+        endNode(&structure)
+        if malformation == .duplicatePHYPhandle {
+            beginNode("conflicting-phy", &structure)
+            property(offsets["phandle"]!, words([0x3f]), &structure)
+            endNode(&structure)
+        }
         endNode(&structure)
         endNode(&structure)
         endNode(&structure)

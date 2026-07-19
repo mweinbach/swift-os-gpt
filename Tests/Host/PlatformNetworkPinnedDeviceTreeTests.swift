@@ -77,6 +77,58 @@ struct PlatformNetworkPinnedDeviceTreeTests {
                       addressing: .translatedByParentBus,
                       coherency: .softwareManaged
                   ),
+                  let boardResources = description.boardResources,
+                  case .rp1GEM(let rp1) = boardResources,
+                  rp1.gemRegisters == description.registers,
+                  rp1.ethernetConfigurationRegisters == DeviceResource(
+                      baseAddress: 0x1f_0010_4000,
+                      length: 0x4_000
+                  ),
+                  rp1.clocks == RP1GEMClockResources(
+                      controllerPhandle: 2,
+                      controllerRegisters: DeviceResource(
+                          baseAddress: 0x1f_0001_8000,
+                          length: 0x1_0038
+                      ),
+                      peripheralClockID: 12,
+                      hostClockID: 12,
+                      timestampClockID: 29,
+                      transmitClockID: 16
+                  ),
+                  rp1.phy == PlatformNetworkPHYDescription(
+                      clause22Address: 1,
+                      mode: .rgmiiID
+                  ),
+                  rp1.phyReset == PlatformPHYResetDescription(
+                      gpioControllerPhandle: 0x2e,
+                      gpioRegisters: RP1GPIORegisterResources(
+                          ioBank: DeviceResource(
+                              baseAddress: 0x1f_000d_0000,
+                              length: 0xc_000
+                          ),
+                          rio: DeviceResource(
+                              baseAddress: 0x1f_000e_0000,
+                              length: 0xc_000
+                          ),
+                          padsBank: DeviceResource(
+                              baseAddress: 0x1f_000f_0000,
+                              length: 0xc_000
+                          )
+                      ),
+                      line: 32,
+                      assertedLevel: .low,
+                      durationMilliseconds: 5
+                  ),
+                  rp1.localMACAddress == PlatformMACAddressBytes(
+                      byte0: 0,
+                      byte1: 0,
+                      byte2: 0,
+                      byte3: 0,
+                      byte4: 0,
+                      byte5: 0
+                  ),
+                  rp1.localMACAddress?.isAllZero == true,
+                  rp1.localMACAddress?.isUsableUnicast == false,
                   PlatformNetworkDeviceDiscovery.candidate(
                       in: tree,
                       board: .raspberryPi5,
