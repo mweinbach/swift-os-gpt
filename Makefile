@@ -337,6 +337,13 @@ debug-observability-host-test: | $(BUILD_DIR)
 	$(BUILD_DIR)/boot-identity-host-tests
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Debug/BootIdentity.swift \
+		Kernel/Debug/KernelBootIdentityFactory.swift \
+		Tests/Host/KernelBootIdentityFactoryTests.swift \
+		-o $(BUILD_DIR)/kernel-boot-identity-factory-host-tests
+	$(BUILD_DIR)/kernel-boot-identity-factory-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Debug/KernelLogRing.swift \
 		Tests/Host/KernelLogRingTests.swift \
 		-o $(BUILD_DIR)/kernel-log-ring-host-tests
