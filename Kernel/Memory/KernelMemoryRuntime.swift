@@ -45,8 +45,10 @@ enum KernelMemoryRuntime {
         static let kernelData = 128
         static let userStacks = 704
         static let mmio = 768
-        static let guards = 1344
-        static let explicitReservations = 1536
+        // 21 MMIO mappings (five base plus sixteen driver resources) need
+        // more room than the previous twelve-resource boot contract.
+        static let guards = 1536
+        static let explicitReservations = 1792
     }
 
     private nonisolated(unsafe) static var ownedMemoryMap:

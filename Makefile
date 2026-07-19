@@ -60,7 +60,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke smp-el0-smoke cpu-config-smoke test host-test storage-host-test persistent-log-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test rp1-gem-deferred-activation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke smp-el0-smoke cpu-config-smoke test host-test storage-host-test persistent-log-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test rp1-gem-deferred-activation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test platform-storage-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -144,6 +144,8 @@ rpi5-package: rpi5-inspect
 	@test -n "$(RPI5_FIRMWARE)" || \
 		(echo "RPI5_FIRMWARE must name a pinned raspberrypi/firmware checkout" >&2; exit 2)
 	$(MAKE) rpi5-fdt-test \
+		RPI5_DTB=$(RPI5_FIRMWARE)/boot/bcm2712-rpi-5-b.dtb
+	$(MAKE) platform-storage-pinned-fdt-test \
 		RPI5_DTB=$(RPI5_FIRMWARE)/boot/bcm2712-rpi-5-b.dtb
 	Boards/RaspberryPi5/package-boot.sh $(RPI5_KERNEL_IMAGE) \
 		$(RPI5_FIRMWARE) $(RPI5_BUILD_DIR)/boot
@@ -655,6 +657,27 @@ storage-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/storage-foundation-host-tests
 	$(BUILD_DIR)/storage-foundation-host-tests
 
+sdhci-block-device-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Storage/BlockDevice.swift \
+		Kernel/Drivers/Storage/SDHCIBlockDevice.swift \
+		Tests/Host/SDHCIBlockDeviceTests.swift \
+		-o $(BUILD_DIR)/sdhci-block-device-host-tests
+	$(BUILD_DIR)/sdhci-block-device-host-tests
+
+bcm2712-sd-card-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Storage/BlockDevice.swift \
+		Kernel/Drivers/Storage/SDHCIBlockDevice.swift \
+		Kernel/Drivers/Storage/BCM2712SDCard.swift \
+		Tests/Host/BCM2712SDCardTests.swift \
+		-o $(BUILD_DIR)/bcm2712-sd-card-host-tests
+	$(BUILD_DIR)/bcm2712-sd-card-host-tests
+
 persistent-log-host-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
@@ -669,7 +692,7 @@ persistent-log-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/persistent-log-store-host-tests
 	$(BUILD_DIR)/persistent-log-store-host-tests
 
-host-test: storage-host-test persistent-log-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test rp1-gem-deferred-activation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
+host-test: storage-host-test persistent-log-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test rp1-gem-deferred-activation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
@@ -1077,6 +1100,7 @@ rpi5-fdt-test: | $(BUILD_DIR)
 		-emit-library \
 		Kernel/Platform/FlattenedDeviceTree.swift \
 		Kernel/Platform/Platform.swift \
+		Kernel/Platform/PlatformStorageResources.swift \
 		Tests/Host/RaspberryPi5DeviceTreeProbe.swift \
 		-o $(BUILD_DIR)/libRaspberryPi5DeviceTreeProbe.dylib
 	$(PYTHON) Tests/Host/rpi5_fdt_probe.py \
@@ -1108,6 +1132,25 @@ platform-network-pinned-fdt-test: $(RPI5_KERNEL_ELF) | $(BUILD_DIR)
 	$(BUILD_DIR)/platform-network-pinned-dtb-tests \
 		$(BUILD_DIR)/qemu-virt.dtb $(RPI5_DTB) \
 		"$$workspace_start" "$$workspace_end"
+
+platform-storage-pinned-fdt-test: | $(BUILD_DIR)
+	@test -n "$(RPI5_DTB)" || \
+		(echo "RPI5_DTB must name a Raspberry Pi 5 firmware DTB" >&2; exit 2)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(MACOS_SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/DisplayMode.swift \
+		Kernel/Graphics/DisplayMemory.swift \
+		Kernel/Memory/PhysicalMemory.swift \
+		Kernel/Memory/PageTables.swift \
+		Kernel/Drivers/BootDriverResources.swift \
+		Kernel/Drivers/Storage/PlatformStorageBootResources.swift \
+		Kernel/Platform/FlattenedDeviceTree.swift \
+		Kernel/Platform/Platform.swift \
+		Kernel/Platform/PlatformStorageResources.swift \
+		Tests/Host/PlatformStoragePinnedDeviceTreeTests.swift \
+		-o $(BUILD_DIR)/platform-storage-pinned-dtb-tests
+	$(BUILD_DIR)/platform-storage-pinned-dtb-tests $(RPI5_DTB)
 
 inspect: build
 	LLVM_NM=$(LLVM_NM) LLVM_OBJDUMP=$(LLVM_OBJDUMP) \

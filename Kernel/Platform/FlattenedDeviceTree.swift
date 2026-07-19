@@ -585,6 +585,19 @@ struct FlattenedDeviceTree {
         return propertyCells(atNode: nodeOffset, property: property)
     }
 
+    /// Whether the uniquely resolved phandle owner contains a property. This
+    /// is useful for boolean contracts such as `regulator-boot-on`, whose
+    /// presence is meaningful even though its value has zero cells.
+    func hasProperty(
+        nodePhandle phandle: UInt32,
+        property: StaticString
+    ) -> Bool {
+        guard let nodeOffset = uniqueNodeOffset(forPhandle: phandle) else {
+            return false
+        }
+        return propertyLocation(atNode: nodeOffset, property: property) != nil
+    }
+
     /// Whether an enabled compatible node contains a property, independent
     /// of whether that property's value can be decoded into cells or bytes.
     func hasProperty(

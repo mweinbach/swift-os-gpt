@@ -42,7 +42,10 @@ struct DriverMemoryResource: Equatable {
 /// or changes the page-table layout after the MMU switches.
 struct BootDriverResourceSet {
     static let maximumMemoryResourceCount = 8
-    static let maximumMMIOResourceCount = 12
+    // Pi 5 currently retains six base display/USB/mailbox apertures, six RP1
+    // Ethernet apertures, and two storage apertures. Leave two explicit slots
+    // for the next independently discovered driver without heap growth.
+    static let maximumMMIOResourceCount = 16
 
     private var memory0: DriverMemoryResource?
     private var memory1: DriverMemoryResource?
@@ -65,6 +68,10 @@ struct BootDriverResourceSet {
     private var mmio9: DeviceResource?
     private var mmio10: DeviceResource?
     private var mmio11: DeviceResource?
+    private var mmio12: DeviceResource?
+    private var mmio13: DeviceResource?
+    private var mmio14: DeviceResource?
+    private var mmio15: DeviceResource?
 
     private(set) var memoryResourceCount = 0
     private(set) var mmioResourceCount = 0
@@ -145,7 +152,11 @@ struct BootDriverResourceSet {
         case 8: mmio8 = resource
         case 9: mmio9 = resource
         case 10: mmio10 = resource
-        default: mmio11 = resource
+        case 11: mmio11 = resource
+        case 12: mmio12 = resource
+        case 13: mmio13 = resource
+        case 14: mmio14 = resource
+        default: mmio15 = resource
         }
         mmioResourceCount += 1
         return true
@@ -179,7 +190,11 @@ struct BootDriverResourceSet {
         case 8: return mmio8
         case 9: return mmio9
         case 10: return mmio10
-        default: return mmio11
+        case 11: return mmio11
+        case 12: return mmio12
+        case 13: return mmio13
+        case 14: return mmio14
+        default: return mmio15
         }
     }
 

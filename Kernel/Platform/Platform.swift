@@ -13,6 +13,16 @@ enum InterruptControllerDescription: Equatable {
     case gicV3(distributor: DeviceResource, redistributor: DeviceResource)
 }
 
+/// Standard Device Tree interrupt trigger encodings shared by platform-device
+/// discovery. Keeping the electrical trigger in the firmware description
+/// prevents an individual driver from guessing it from a board name.
+enum PlatformInterruptTrigger: UInt32, Equatable {
+    case edgeRising = 1
+    case edgeFalling = 2
+    case levelHigh = 4
+    case levelLow = 8
+}
+
 /// A controller that can expose SwiftOS as a USB device to a host. This is a
 /// discovery contract only: register programming, endpoint ownership, and USB
 /// protocol policy remain in separate driver layers.
@@ -105,7 +115,9 @@ struct Platform {
     let deviceTreeAddress: UInt64
     let deviceTreeSize: UInt64
 
-    private let deviceTree: FlattenedDeviceTree
+    /// Internal discovery view used by driver-specific Platform extensions.
+    /// Guest code still receives typed descriptions rather than raw DT bytes.
+    let deviceTree: FlattenedDeviceTree
 
     static func discover(deviceTreeAddress: UInt64) -> Platform? {
         guard let tree = FlattenedDeviceTree(address: deviceTreeAddress) else {

@@ -14,16 +14,6 @@ enum PlatformNetworkControllerKind: UInt8, Equatable {
     }
 }
 
-/// Standard Device Tree interrupt trigger encodings used by both supported
-/// interrupt domains. Keeping trigger policy in discovery prevents a driver
-/// from guessing electrical semantics from a board name.
-enum PlatformInterruptTrigger: UInt32, Equatable {
-    case edgeRising = 1
-    case edgeFalling = 2
-    case levelHigh = 4
-    case levelLow = 8
-}
-
 /// An interrupt remains relative to its hardware routing domain until that
 /// domain's controller is initialized. In particular, an RP1 MSI-X vector is
 /// not interchangeable with an Arm GIC interrupt ID.

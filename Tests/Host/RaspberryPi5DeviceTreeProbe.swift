@@ -107,6 +107,39 @@ public func validateRaspberryPi5DeviceTree(
     ) else {
         return 16
     }
+    guard platform.systemStorageDevice == PlatformStorageDeviceDescription(
+        controller: .bcm2712SDHCI,
+        hostRegisters: DeviceResource(
+            baseAddress: 0x10_00ff_f000,
+            length: 0x260
+        ),
+        configurationRegisters: DeviceResource(
+            baseAddress: 0x10_00ff_f400,
+            length: 0x200
+        ),
+        interrupt: PlatformStorageInterruptRoute(
+            spiNumber: 0x111,
+            trigger: .levelHigh
+        ),
+        inputClockHertz: 200_000_000,
+        busWidth: 4,
+        power: PlatformSDCardPowerResources(
+            gpioControllerPhandle: 0x0d,
+            gpioRegisters: DeviceResource(
+                baseAddress: 0x10_7d51_7c00,
+                length: 0x40
+            ),
+            ioVoltageSelectLine: 3,
+            io3V3SelectLevel: .low,
+            cardPowerEnableLine: 4,
+            cardPowerEnabledLevel: .high,
+            cardDetectLine: 5,
+            cardDetectPresentLevel: .low,
+            voltageSettlingMicroseconds: 5_000
+        )
+    ) else {
+        return 17
+    }
     return 0
 }
 

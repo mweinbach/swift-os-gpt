@@ -103,6 +103,15 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
         park()
     }
 
+    guard PlatformStorageBootResources.appendDiscoveredResources(
+              platform: platform,
+              to: &retainedDriverResources
+          )
+    else {
+        console.write("SWIFTOS:PANIC:STORAGE_RESOURCES\n")
+        park()
+    }
+
     guard let memory = KernelMemoryRuntime.activate(
         platform: platform,
         console: console,
