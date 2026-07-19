@@ -47,6 +47,15 @@ def main() -> int:
         / "VirtIO"
         / "VirGLIRCompiler.swift"
     )
+    file_manager_runtime_path = (
+        path.parents[1]
+        / "Drivers"
+        / "VirtIO"
+        / "QEMUAcceleratedFileManagerRuntime.swift"
+    )
+    file_manager_scene_path = (
+        path.parents[1] / "UI" / "GPUFileManagerSceneCompiler.swift"
+    )
     if not session_path.is_file():
         print(
             f"gpu-only path: missing accelerated session {session_path}",
@@ -59,8 +68,24 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    if not file_manager_runtime_path.is_file():
+        print(
+            "gpu-only path: missing accelerated file-manager runtime "
+            f"{file_manager_runtime_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not file_manager_scene_path.is_file():
+        print(
+            "gpu-only path: missing file-manager scene compiler "
+            f"{file_manager_scene_path}",
+            file=sys.stderr,
+        )
+        return 1
     session = session_path.read_text(encoding="utf-8")
     compiler = compiler_path.read_text(encoding="utf-8")
+    file_manager_runtime = file_manager_runtime_path.read_text(encoding="utf-8")
+    file_manager_scene = file_manager_scene_path.read_text(encoding="utf-8")
     try:
         activation = function_source(source, "activateVirtIOGPU3D")
         accelerated = function_source(source, "runQEMUAcceleratedDesktop")
@@ -68,7 +93,13 @@ def main() -> int:
         print(f"gpu-only path: {error}", file=sys.stderr)
         return 1
 
-    combined = activation + accelerated + session
+    combined = (
+        activation
+        + accelerated
+        + session
+        + file_manager_runtime
+        + file_manager_scene
+    )
     forbidden = (
         "LinearFramebuffer",
         "ScaledFramebufferCanvas",
@@ -118,6 +149,13 @@ def main() -> int:
         "glyphNearestSamplerHandle",
         "glyphLinearSamplerHandle",
         "mutating func render(",
+        "QEMUAcceleratedFileManagerRuntime.activate",
+        "QEMUVirtIOInputRuntime.serviceOnce",
+        "QEMUAcceleratedFileManagerRuntime.serviceOnce",
+        "GPUFileManagerSceneCompiler.compile",
+        "session.renderBatch",
+        "SynchronousInputEventDispatcher.install",
+        "FileManagerDirectoryLoader.load",
     )
     missing = [token for token in required if token not in combined]
     if missing:
@@ -147,8 +185,8 @@ def main() -> int:
         return 1
 
     print(
-        "gpu-only path: accelerated boot has no CPU-rasterized color "
-        "or scanout dependencies"
+        "gpu-only path: accelerated boot and file manager have no "
+        "CPU-rasterized color or scanout dependencies"
     )
     return 0
 

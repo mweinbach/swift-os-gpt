@@ -47,8 +47,8 @@ enum GPUFileManagerSceneResult {
 ///
 /// Two immutable command buffers are intentional: the retained chrome stream
 /// clears/draws the window and cursor, while the glyph stream loads the same
-/// attachment. A backend submits them in index order; the current VirtIO 3D
-/// session can do so with two ordinary `render` calls.
+/// attachment. A backend lowers them in index order; the current VirtIO 3D
+/// session batches both into one GPU submission and one damage flush.
 enum GPUFileManagerSceneCompiler {
     private static let maximumRenderedFileRows = 4
     private static let maximumGlyphCount = 28

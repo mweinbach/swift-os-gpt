@@ -578,15 +578,121 @@ private func runQEMUAcceleratedDesktop(
     console.write("x")
     console.writeHex(UInt64(configuration.height))
     console.write("\n")
+
+    let frequency = AArch64.counterFrequency
+    let activation = QEMUAcceleratedFileManagerRuntime.activate(
+        configuration: configuration,
+        counterFrequency: frequency,
+        startingAt: AArch64.counterValue
+    )
+    switch activation {
+    case .activated(
+        let fileCount,
+        let mountedFileSystem,
+        let directoryWasTruncated
+    ):
+        console.write(QEMUAcceleratedFileManagerRuntime.readyMarker)
+        console.write("SWIFTOS:QEMU_FILE_MANAGER_FILES=")
+        console.writeHex(UInt64(fileCount))
+        console.write("\n")
+        if mountedFileSystem {
+            console.write("SWIFTOS:QEMU_FILE_MANAGER_SWIFTFS\n")
+        }
+        if directoryWasTruncated {
+            console.write("SWIFTOS:QEMU_FILE_MANAGER_TRUNCATED\n")
+        }
+    case .alreadyAttempted, .inputHandlerUnavailable,
+         .invalidConfiguration, .allocationUnavailable,
+         .invalidRuntimeStorage, .fileSystemReadFailed:
+        console.write("SWIFTOS:PANIC:QEMU_FILE_MANAGER_ACTIVATION\n")
+        park()
+    }
+
+    guard var session = activeVirtIOGPU3DSession else {
+        console.write("SWIFTOS:PANIC:QEMU_FILE_MANAGER_SESSION\n")
+        park()
+    }
+    // Consume the bootstrap handoff. VirtIOGPU3DSession carries mutable queue
+    // and fence state and must never have two independently mutable owners.
+    activeVirtIOGPU3DSession = nil
+    switch QEMUAcceleratedFileManagerRuntime.serviceOnce(
+        session: &session,
+        counterTick: AArch64.counterValue
+    ) {
+    case .presented:
+        console.write(QEMUAcceleratedFileManagerRuntime.frameMarker)
+    case .inactive, .idle, .failed:
+        console.write("SWIFTOS:PANIC:QEMU_FILE_MANAGER_FIRST_FRAME\n")
+        park()
+    }
     console.write("SWIFTOS:GPU_FRAME_READY\n")
     console.write("SWIFTOS:SWIFT_OK\n")
 
     proveTimerInterrupts(console: console)
-    runScheduledOrPark(
-        console: console,
-        platform: platform,
-        memory: memory
-    )
+    if platform.processorCount > 1 {
+        // Present a sample at or beyond the opening transition's terminal
+        // state before CPU0 enters EL0. No input device is active in this mode,
+        // so the UI and filesystem are quiescent after that terminal frame.
+        let animationStart = AArch64.counterValue
+        while QEMUAcceleratedFileManagerRuntime.transitionIsActive {
+            guard AArch64.counterValue &- animationStart < frequency else {
+                console.write("SWIFTOS:PANIC:QEMU_FILE_MANAGER_TIMEOUT\n")
+                park()
+            }
+            switch QEMUAcceleratedFileManagerRuntime.serviceOnce(
+                session: &session,
+                counterTick: AArch64.counterValue
+            ) {
+            case .inactive, .failed:
+                console.write("SWIFTOS:PANIC:QEMU_FILE_MANAGER_FRAME\n")
+                park()
+            case .idle, .presented:
+                AArch64.spinHint()
+            }
+        }
+        console.write(QEMUAcceleratedFileManagerRuntime.steadyMarker)
+        runScheduledOrPark(
+            console: console,
+            platform: platform,
+            memory: memory
+        )
+    }
+
+    // VirtIO input drains and invokes its synchronous handler before this
+    // owner CPU mutates the same state for rendering. That serialized order is
+    // the runtime synchronization contract; no callback races a GPU frame.
+    console.write("SWIFTOS:READY\n")
+    var reportedSteadyFrame = false
+    var reportedInteractionFrame = false
+    while true {
+        QEMUVirtIOInputRuntime.serviceOnce()
+        switch QEMUAcceleratedFileManagerRuntime.serviceOnce(
+            session: &session,
+            counterTick: AArch64.counterValue
+        ) {
+        case .inactive, .failed:
+            console.write("SWIFTOS:PANIC:QEMU_FILE_MANAGER_FRAME\n")
+            park()
+        case .presented:
+            if !QEMUAcceleratedFileManagerRuntime.transitionIsActive {
+                if !reportedSteadyFrame {
+                    reportedSteadyFrame = true
+                    console.write(
+                        QEMUAcceleratedFileManagerRuntime.steadyMarker
+                    )
+                } else if !reportedInteractionFrame {
+                    reportedInteractionFrame = true
+                    console.write(
+                        QEMUAcceleratedFileManagerRuntime
+                            .interactionFrameMarker
+                    )
+                }
+            }
+            AArch64.spinHint()
+        case .idle:
+            AArch64.spinHint()
+        }
+    }
 }
 
 private func runPlatformDesktop(

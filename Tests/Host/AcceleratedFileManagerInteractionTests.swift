@@ -6,7 +6,9 @@ struct AcceleratedFileManagerInteractionTests {
         keyboardNavigationAndTypeaheadAreDeterministic()
         animationAndInvalidationRemainPaced()
         directoryLoadingRestartsAndCopiesBorrowedNames()
-        print("Accelerated file-manager interaction: 5 groups passed")
+        directoryCapacityProducesATruncatedPage()
+        exactDirectoryCapacityIsNotTruncated()
+        print("Accelerated file-manager interaction: 7 groups passed")
     }
 
     private static func scaledPointerMotionRetainsSubpixelRemainders() {
@@ -132,7 +134,13 @@ struct AcceleratedFileManagerInteractionTests {
                     nameScratch: nameScratch
                 )
             }
-            expect(result == .loaded(entryCount: 2), "directory load failed")
+            expect(
+                result == .loaded(
+                    entryCount: 2,
+                    directoryWasTruncated: false
+                ),
+                "directory load failed"
+            )
             expect(provider.readCount == 4, "stale enumeration did not restart")
             _ = scratch.withUnsafeMutableBytes { bytes in
                 bytes.initializeMemory(as: UInt8.self, repeating: 0)
@@ -152,11 +160,61 @@ struct AcceleratedFileManagerInteractionTests {
         }
     }
 
+    private static func directoryCapacityProducesATruncatedPage() {
+        withState(entryCapacity: 1) { state in
+            var provider = TestDirectoryProvider()
+            var scratch = [UInt8](repeating: 0, count: 255)
+            let result = scratch.withUnsafeMutableBytes { nameScratch in
+                FileManagerDirectoryLoader.load(
+                    interaction: &state,
+                    provider: &provider,
+                    root: provider.root,
+                    nameScratch: nameScratch
+                )
+            }
+            expect(
+                result == .loaded(
+                    entryCount: 1,
+                    directoryWasTruncated: true
+                ),
+                "bounded directory page became an activation failure"
+            )
+            expect(provider.readCount == 3, "loader did not bound its probe")
+        }
+    }
+
+    private static func exactDirectoryCapacityIsNotTruncated() {
+        withState(entryCapacity: 2) { state in
+            var provider = TestDirectoryProvider()
+            var scratch = [UInt8](repeating: 0, count: 255)
+            let result = scratch.withUnsafeMutableBytes { nameScratch in
+                FileManagerDirectoryLoader.load(
+                    interaction: &state,
+                    provider: &provider,
+                    root: provider.root,
+                    nameScratch: nameScratch
+                )
+            }
+            expect(
+                result == .loaded(
+                    entryCount: 2,
+                    directoryWasTruncated: false
+                ),
+                "exactly full directory was mislabeled as truncated"
+            )
+            expect(provider.readCount == 4, "exact-capacity end was not probed")
+        }
+    }
+
     private static func withState(
         pointerScale: Int = 1,
+        entryCapacity: Int = 8,
         _ body: (inout AcceleratedFileManagerInteractionState) -> Void
     ) {
-        var entries = [FileBrowserEntryRecord](repeating: .vacant, count: 8)
+        var entries = [FileBrowserEntryRecord](
+            repeating: .vacant,
+            count: entryCapacity
+        )
         var names = [UInt8](repeating: 0, count: 512)
         var windows = [UIWindowRecord](repeating: .vacant, count: 2)
         var typeahead = [UInt8](repeating: 0, count: 32)

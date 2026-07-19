@@ -1,5 +1,9 @@
 enum QEMUAcceleratedFileManagerActivationResult: Equatable {
-    case activated(fileCount: Int, mountedFileSystem: Bool)
+    case activated(
+        fileCount: Int,
+        mountedFileSystem: Bool,
+        directoryWasTruncated: Bool
+    )
     case alreadyAttempted
     case inputHandlerUnavailable
     case invalidConfiguration
@@ -140,6 +144,10 @@ enum QEMUAcceleratedFileManagerRuntime {
         "SWIFTOS:QEMU_FILE_MANAGER_READY\n"
     static let frameMarker: StaticString =
         "SWIFTOS:QEMU_FILE_MANAGER_FRAME\n"
+    static let steadyMarker: StaticString =
+        "SWIFTOS:QEMU_FILE_MANAGER_STEADY\n"
+    static let interactionFrameMarker: StaticString =
+        "SWIFTOS:QEMU_FILE_MANAGER_INTERACTION_FRAME\n"
 
     private static let statePageCount: UInt64 = 1
     private static let backingPageCount: UInt64 = 3
@@ -224,6 +232,7 @@ enum QEMUAcceleratedFileManagerRuntime {
         }
 
         let mounted = QEMUSwiftFSRuntime.mountedProvider != nil
+        var directoryWasTruncated = false
         if let provider = QEMUSwiftFSRuntime.mountedProvider {
             let root = provider.pointee.rootNodeIdentifier
             let loadResult = FileManagerDirectoryLoader.load(
@@ -232,11 +241,12 @@ enum QEMUAcceleratedFileManagerRuntime {
                 root: root,
                 nameScratch: storage.directoryName
             )
-            guard case .loaded = loadResult else {
+            guard case .loaded(_, let wasTruncated) = loadResult else {
                 storage.deinitializeRecords()
                 release(stateAllocation, backingAllocation)
                 return .fileSystemReadFailed
             }
+            directoryWasTruncated = wasTruncated
         }
         statePointer.initialize(
             to: QEMUAcceleratedFileManagerState(
@@ -257,7 +267,8 @@ enum QEMUAcceleratedFileManagerRuntime {
         )
         return .activated(
             fileCount: statePointer.pointee.interaction.browser.count,
-            mountedFileSystem: mounted
+            mountedFileSystem: mounted,
+            directoryWasTruncated: directoryWasTruncated
         )
     }
 
@@ -270,6 +281,11 @@ enum QEMUAcceleratedFileManagerRuntime {
             session: &session,
             counterTick: counterTick
         )
+    }
+
+    static var transitionIsActive: Bool {
+        guard let state = qemuFileManagerState else { return false }
+        return state.pointee.interaction.animationNeedsPresentation
     }
 
     private struct Storage {

@@ -341,7 +341,7 @@ struct AcceleratedFileManagerInteractionState {
 }
 
 enum FileManagerDirectoryLoadResult: Equatable {
-    case loaded(entryCount: Int)
+    case loaded(entryCount: Int, directoryWasTruncated: Bool)
     case failed
 }
 
@@ -366,6 +366,30 @@ enum FileManagerDirectoryLoader {
         var cookie = VFSDirectoryCookie.start
         var didRestart = false
         while remainingSteps > 0 {
+            if interaction.browser.count == capacity {
+                // Probe one result beyond the bounded page so an exactly-full
+                // directory is not mislabeled as truncated. Do not resolve
+                // metadata or append the borrowed name for that probe.
+                remainingSteps -= 1
+                switch provider.readDirectory(
+                    node: root,
+                    after: cookie,
+                    nameOutput: nameScratch
+                ) {
+                case .entry, .staleCookie:
+                    return .loaded(
+                        entryCount: interaction.browser.count,
+                        directoryWasTruncated: true
+                    )
+                case .end:
+                    return .loaded(
+                        entryCount: interaction.browser.count,
+                        directoryWasTruncated: false
+                    )
+                case .nameBufferTooSmall, .failure:
+                    return .failed
+                }
+            }
             remainingSteps -= 1
             switch provider.readDirectory(
                 node: root,
@@ -387,7 +411,10 @@ enum FileManagerDirectoryLoader {
                 }
                 cookie = nextCookie
             case .end:
-                return .loaded(entryCount: interaction.browser.count)
+                return .loaded(
+                    entryCount: interaction.browser.count,
+                    directoryWasTruncated: false
+                )
             case .staleCookie:
                 guard !didRestart, interaction.beginDirectoryReload() else {
                     return .failed

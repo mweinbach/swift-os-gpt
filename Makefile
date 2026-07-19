@@ -60,7 +60,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke virtio-input-smoke virtio-block-swiftfs-smoke smp-el0-smoke cpu-config-smoke test host-test vfs-host-test filesystem-host-test file-manager-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test virtio-block-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test platform-storage-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-gpu-3d-acceptance virtio-net-smoke virtio-input-smoke virtio-block-swiftfs-smoke smp-el0-smoke cpu-config-smoke test host-test vfs-host-test filesystem-host-test file-manager-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test rpi5-swiftfs-storage-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test virtio-block-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test platform-storage-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 all: build
 
@@ -727,6 +727,21 @@ filesystem-host-test: | $(BUILD_DIR)
 	$(BUILD_DIR)/persistent-volume-bootstrap-host-tests
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Storage/BlockDevice.swift \
+		Kernel/Storage/SwiftOSDataVolume.swift \
+		Kernel/Storage/SwiftOSDataVolumeBootstrap.swift \
+		Kernel/Storage/StorageCRC32.swift \
+		Kernel/FileSystem/VFSPath.swift \
+		Kernel/FileSystem/VFSContracts.swift \
+		Kernel/FileSystem/SwiftFSOnDisk.swift \
+		Kernel/FileSystem/SwiftFSPersistentProvider.swift \
+		Kernel/FileSystem/SwiftFSPersistentVolumeBootstrap.swift \
+		Kernel/FileSystem/SwiftFSIncrementalVolumeBootstrap.swift \
+		Tests/Host/SwiftFSIncrementalVolumeBootstrapTests.swift \
+		-o $(BUILD_DIR)/swiftfs-incremental-volume-bootstrap-host-tests
+	$(BUILD_DIR)/swiftfs-incremental-volume-bootstrap-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/FileSystem/VFSPath.swift \
 		Kernel/FileSystem/VFSContracts.swift \
 		Kernel/FileSystem/VFSHandleTable.swift \
@@ -793,6 +808,21 @@ file-manager-host-test: | $(BUILD_DIR)
 		Tests/Host/FileManagerInteractionTests.swift \
 		-o $(BUILD_DIR)/file-manager-interaction-host-tests
 	$(BUILD_DIR)/file-manager-interaction-host-tests
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/Geometry.swift \
+		Kernel/Graphics/Animation.swift \
+		Kernel/Input/InputEvent.swift \
+		Kernel/FileSystem/VFSPath.swift \
+		Kernel/FileSystem/VFSContracts.swift \
+		Kernel/UI/FileBrowserModel.swift \
+		Kernel/UI/FileManagerPresentationState.swift \
+		Kernel/UI/USKeyboardTextComposer.swift \
+		Kernel/UI/WindowInputRouter.swift \
+		Kernel/UI/AcceleratedFileManagerRuntimeState.swift \
+		Tests/Host/AcceleratedFileManagerInteractionTests.swift \
+		-o $(BUILD_DIR)/accelerated-file-manager-interaction-host-tests
+	$(BUILD_DIR)/accelerated-file-manager-interaction-host-tests
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Graphics/DisplayMode.swift \
@@ -921,7 +951,24 @@ rpi5-cooperative-policy-host-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/rpi5-cooperative-policy-host-tests
 	$(BUILD_DIR)/rpi5-cooperative-policy-host-tests
 
-host-test: vfs-host-test filesystem-host-test file-manager-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test virtio-block-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
+rpi5-swiftfs-storage-policy-host-test: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/host-module-cache
+	$(SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Storage/BlockDevice.swift \
+		Kernel/Storage/StorageCRC32.swift \
+		Kernel/Storage/SwiftOSDataVolume.swift \
+		Kernel/FileSystem/VFSPath.swift \
+		Kernel/FileSystem/VFSContracts.swift \
+		Kernel/FileSystem/SwiftFSOnDisk.swift \
+		Kernel/FileSystem/SwiftFSPersistentProvider.swift \
+		Kernel/FileSystem/SwiftOSUserFileSystemConfiguration.swift \
+		Kernel/Drivers/Storage/RaspberryPi5SwiftFSStoragePolicy.swift \
+		Tests/Host/RaspberryPi5SwiftFSStoragePolicyTests.swift \
+		-o $(BUILD_DIR)/rpi5-swiftfs-storage-policy-host-tests
+	$(BUILD_DIR)/rpi5-swiftfs-storage-policy-host-tests
+
+host-test: vfs-host-test filesystem-host-test file-manager-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test rpi5-swiftfs-storage-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test virtio-block-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \
@@ -1404,6 +1451,13 @@ animation-smoke: build
 virtio-gpu-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/virtio_gpu_smoke.py \
 		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-virtio-gpu.ppm
+
+# This is a strict acceptance gate for a VirGL-capable QEMU host. It is kept
+# separate from `test` because the bundled macOS QEMU has no GL/MMIO GPU model;
+# capability absence exits 77 and must not be mistaken for rendered evidence.
+virtio-gpu-3d-acceptance: build
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/virtio_gpu_3d_file_manager_smoke.py \
+		$(KERNEL_BIN) --output $(BUILD_DIR)/swiftos-virtio-gpu-3d.ppm
 
 virtio-net-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/virtio_network_smoke.py \
