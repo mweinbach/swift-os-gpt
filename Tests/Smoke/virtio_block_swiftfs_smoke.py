@@ -33,6 +33,25 @@ SECOND_BOOT = [
     b"SWIFTOS:READY",
 ]
 
+EL0_BOOT = [
+    b"SWIFTOS:BOOT",
+    b"SWIFTOS:VIRTIO_BLOCK_READY",
+    b"SWIFTOS:DATA_VOLUME_MOUNTED",
+    b"SWIFTOS:SWIFTFS_REMOUNTED",
+    b"SWIFTOS:SWIFTFS_DATA_OK",
+    b"SWIFTOS:EL0_SWIFTFS_SERVICE_READY",
+    b"SWIFTOS:SMP_CPU1_ONLINE",
+    b"SWIFTOS:READY",
+    b"SWIFTOS:SCHEDULER_READY",
+    b"SWIFTOS:EL0_SWIFTFS_OPEN_OK",
+    b"SWIFTOS:EL0_SWIFTFS_READ_OK",
+    b"SWIFTOS:EL0_SWIFTFS_CLOSE_OK",
+    b"SWIFTOS:EL0_FILE_IO_PROVEN",
+    b"SWIFTOS:EL0_OK",
+    b"SWIFTOS:THREADS_OK",
+    b"SWIFTOS:EL0_PREEMPTION_PROVEN",
+]
+
 FAILURE_MARKERS = [
     b"SWIFTOS:PANIC",
     b"SWIFTOS:VIRTIO_BLOCK_INIT_FAILED",
@@ -48,13 +67,15 @@ def boot(
     kernel: Path,
     disk: Path,
     timeout: float,
+    processor_count: int = 1,
+    completion_marker: bytes = b"SWIFTOS:READY",
 ) -> bytes:
     command = [
         qemu,
         "-machine", "virt,gic-version=3",
         "-cpu", "cortex-a72",
         "-accel", "tcg",
-        "-smp", "1",
+        "-smp", str(processor_count),
         "-m", "512M",
         "-device", "ramfb,id=ramfb0",
         "-global", "virtio-mmio.force-legacy=false",
@@ -86,7 +107,7 @@ def boot(
             if not chunk:
                 break
             transcript.extend(chunk)
-            if b"SWIFTOS:READY" in transcript or any(
+            if completion_marker in transcript or any(
                 marker in transcript for marker in FAILURE_MARKERS
             ):
                 break
@@ -147,13 +168,23 @@ def main() -> int:
                 arguments.timeout,
             )
             validate(second, SECOND_BOOT, "second boot")
+
+            el0 = boot(
+                qemu,
+                arguments.kernel.resolve(),
+                disk,
+                arguments.timeout,
+                processor_count=2,
+                completion_marker=b"SWIFTOS:EL0_PREEMPTION_PROVEN",
+            )
+            validate(el0, EL0_BOOT, "EL0 boot")
     except (AssertionError, OSError, subprocess.SubprocessError) as error:
         print(f"VirtIO block/SwiftFS smoke failed: {error}", file=sys.stderr)
         return 1
 
     print(
         "VirtIO block/SwiftFS smoke: blank format, durable seed, and "
-        "second-boot remount passed"
+        "second-boot remount, EL0 read, and preemption passed"
     )
     return 0
 

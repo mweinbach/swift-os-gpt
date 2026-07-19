@@ -30,7 +30,7 @@ enum KernelMemoryRuntime {
     private static let bootstrapAllocatorCapacity = 512
     private static let classifiedFreeRunCapacity = 512
     private static let classifiedActiveAllocationCapacity = 512
-    private static let kernelReadOnlyCapacity = 2
+    private static let kernelReadOnlyCapacity = 4
     private static let kernelDataCapacity = 9
         + BootDriverResourceSet.maximumMemoryResourceCount
     private static let userStackCapacity = 2
@@ -498,6 +498,10 @@ enum KernelMemoryRuntime {
                   KernelLinkerLayout.kernelReadOnlyData,
                   role: .kernelReadOnlyData
               ),
+              let userTextKernelRO = identityMapping(
+                  KernelLinkerLayout.userText,
+                  role: .kernelReadOnlyData
+              ),
               let deviceTreeRO = byteSpanIdentityMapping(
                   baseAddress: platform.deviceTreeAddress,
                   length: platform.deviceTreeSize,
@@ -510,11 +514,26 @@ enum KernelMemoryRuntime {
         var readOnlyCount = 0
         guard append(kernelRO, to: kernelReadOnly, count: &readOnlyCount),
               append(
+                  userTextKernelRO,
+                  to: kernelReadOnly,
+                  count: &readOnlyCount
+              ),
+              append(
                   deviceTreeRO,
                   to: kernelReadOnly,
                   count: &readOnlyCount
               )
         else {
+            return nil
+        }
+        if let userReadOnlyKernelRO = identityMapping(
+            KernelLinkerLayout.userReadOnlyData,
+            role: .kernelReadOnlyData
+        ), !append(
+            userReadOnlyKernelRO,
+            to: kernelReadOnly,
+            count: &readOnlyCount
+        ) {
             return nil
         }
 

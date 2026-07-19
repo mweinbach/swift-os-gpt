@@ -12,6 +12,9 @@ struct KernelEL0AddressSpaceMappings: Equatable {
     let secondThreadPointer: UInt64
 }
 
+typealias KernelEL0ExternalSystemCallHook =
+    @convention(c) (UnsafeMutableRawPointer) -> UInt64
+
 /// Binds the linker-owned userspace image and scheduler storage to the
 /// exception subsystem. The final translation table must contain the mappings
 /// returned by `addressSpaceMappings()` before `launch` is called.
@@ -41,6 +44,8 @@ enum KernelEL0Runtime {
     static let preemptionReadyMarker: StaticString = "SWIFTOS:PREEMPT_OK\n"
     static let schedulerReadyMarker: StaticString =
         "SWIFTOS:SCHEDULER_READY\n"
+    static let capabilitySystemCallNumber: UInt64 = 2
+    static let fileSystemCapability: UInt64 = 1 << 0
 
     private static let threadCount = 2
     private static let contextFrameCountIncludingLaunchScratch = 3
@@ -58,6 +63,23 @@ enum KernelEL0Runtime {
     private nonisolated(unsafe) static var el0MarkerWritten = false
     private nonisolated(unsafe) static var threadsMarkerWritten = false
     private nonisolated(unsafe) static var preemptionMarkerWritten = false
+    private nonisolated(unsafe) static var externalSystemCallHook:
+        KernelEL0ExternalSystemCallHook?
+    private nonisolated(unsafe) static var capabilityMarkerWritten = false
+    private nonisolated(unsafe) static var externalCallMarkerWritten = false
+
+    /// Installs one CPU0-serialized extension to the fixed scheduler ABI.
+    /// Installation is allowed only before EL0 launch; the hook executes from
+    /// synchronous exception context with IRQs masked and must remain bounded.
+    static func installExternalSystemCallHook(
+        _ hook: KernelEL0ExternalSystemCallHook
+    ) -> Bool {
+        guard activeScheduler == nil, externalSystemCallHook == nil else {
+            return false
+        }
+        externalSystemCallHook = hook
+        return true
+    }
 
     /// Describes the exact high-VA aliases root startup must add to its final
     /// page-table layout. The text entry preserves its offset within the linked
@@ -245,7 +267,25 @@ enum KernelEL0Runtime {
         let disposition = scheduler.handleReportSystemCall(frame: rawFrame)
         activeScheduler = scheduler
         guard disposition == .reportAccepted else {
-            return 0
+            guard disposition == .unsupported else { return 0 }
+            let frame = rawFrame.assumingMemoryBound(
+                to: AArch64ExceptionFrame.self
+            )
+            if frame.pointee.x8 == capabilitySystemCallNumber {
+                if !capabilityMarkerWritten {
+                    capabilityMarkerWritten = true
+                    activeConsole?.write("SWIFTOS:EL0_CAPABILITY_QUERY\n")
+                }
+                frame.pointee.x0 = externalSystemCallHook == nil
+                    ? 0 : fileSystemCapability
+                return 1
+            }
+            guard let externalSystemCallHook else { return 0 }
+            if !externalCallMarkerWritten {
+                externalCallMarkerWritten = true
+                activeConsole?.write("SWIFTOS:EL0_EXTERNAL_SYSCALL\n")
+            }
+            return externalSystemCallHook(rawFrame)
         }
 
         writeEvidenceMarkers(for: scheduler.evidence)
