@@ -2,6 +2,9 @@ enum DisplayBackendKind: UInt8, Equatable {
     case virtIOGPU
     case platformFramebuffer
     case firmwareRAMFramebuffer
+    /// A kernel-owned render target with no physical scanout. This keeps the
+    /// compositor and remote-display transports usable on headless machines.
+    case memorySurface
 
     fileprivate var automaticPriority: UInt8 {
         switch self {
@@ -11,6 +14,8 @@ enum DisplayBackendKind: UInt8, Equatable {
             return 1
         case .firmwareRAMFramebuffer:
             return 2
+        case .memorySurface:
+            return 3
         }
     }
 }

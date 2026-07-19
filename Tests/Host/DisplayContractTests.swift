@@ -217,6 +217,12 @@ struct DisplayContractTests {
             ) == 2,
             "automatic firmware priority"
         )
+        expect(
+            DisplayBackendSelectionPolicy.automatic.priority(
+                for: .memorySurface
+            ) == 3,
+            "automatic headless-memory priority"
+        )
 
         let preferred = DisplayBackendSelectionPolicy.prefer(
             .firmwareRAMFramebuffer

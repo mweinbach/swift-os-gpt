@@ -124,6 +124,13 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
                 driver: display
             )
         }
+        if platform.usbDeviceController != nil {
+            runRaspberryPiUSBDesktop(
+                console: console,
+                platform: platform,
+                memory: memory
+            )
+        }
         console.write("SWIFTOS:SERIAL_ONLY\n")
         console.write("SWIFTOS:SWIFT_OK\n")
         proveTimerInterrupts(console: console)
@@ -133,6 +140,44 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             memory: memory
         )
     }
+}
+
+/// Starts the same renderer and monitor used by physical scanout on a
+/// kernel-owned surface. USB device mode therefore remains independently
+/// debuggable when HDMI firmware did not hand over a simple-framebuffer.
+private func runRaspberryPiUSBDesktop(
+    console: EarlyConsole,
+    platform: Platform,
+    memory: KernelMemoryActivation
+) -> Never {
+    guard let mode = DisplayMode(
+              widthInPixels: UInt32(RamFramebuffer.width),
+              heightInPixels: UInt32(RamFramebuffer.height),
+              refreshRateMilliHertz: nil,
+              pixelFormat: .xrgb8888
+          ), let mapping = DMAMapping(
+              cpuPhysicalAddress: AArch64.framebufferAddress,
+              deviceAddress: AArch64.framebufferAddress,
+              byteCount: mode.minimumByteCount,
+              deviceAddressWidth: .bits64,
+              coherency: .hardwareCoherent
+          ), let surface = ScanoutBuffer(
+              mode: mode,
+              bytesPerRow: mode.minimumBytesPerRow,
+              mapping: mapping
+          )
+    else {
+        console.write("SWIFTOS:PANIC:USB_DISPLAY_MEMORY\n")
+        park()
+    }
+    console.write("SWIFTOS:USB_DISPLAY_SURFACE\n")
+    runDesktopSession(
+        console: console,
+        platform: platform,
+        memory: memory,
+        scanout: surface,
+        display: .memorySurface(mode: mode)
+    )
 }
 
 private func runQEMUDesktop(
@@ -406,6 +451,8 @@ private func runDesktopSession(
         park()
     }
     switch displayKind {
+    case .memorySurface:
+        console.write("SWIFTOS:USB_DISPLAY_READY\n")
     case .virtIOGPU:
         console.write(VirtIOGPU.transportReadyMarker)
         console.write(VirtIOGPU.readyMarker)
@@ -418,7 +465,10 @@ private func runDesktopSession(
     console.write("SWIFTOS:SWIFT_OK\n")
 
     proveTimerInterrupts(console: console)
-    if platform.processorCount > 1 {
+    // QEMU currently hands its BSP to the preemptive EL0 scheduler. Until Pi
+    // service work has its own kernel thread, keep the Pi BSP in the monitor
+    // loop so polled USB and display presentation continue making progress.
+    if platform.kind == .qemuVirt && platform.processorCount > 1 {
         runScheduledOrPark(
             console: console,
             platform: platform,
