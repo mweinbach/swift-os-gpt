@@ -18,12 +18,17 @@ private final class VirtIOBlockTestHardware {
     var usedAddress: UInt64 = 0
     var status: UInt32 = 0
     var interruptStatus: UInt32 = 0
+    var interruptStatusAfterReset: UInt32?
+    var interruptAcknowledgeWrites: [UInt32] = []
+    var registerReads: [UInt] = []
     var configurationGeneration: UInt32 = 4
     var capacity: UInt64 = 32
     var unstableConfiguration = false
     var rejectFeatures = false
+    var rejectDriverOK = false
     var ignoreResetWrites = false
     var completeRequests = true
+    var completeAfterSpinCount: Int?
     var corruptDescriptorID = false
     var corruptWrittenByteCount = false
     var forcedRequestStatus: UInt8?
@@ -33,10 +38,12 @@ private final class VirtIOBlockTestHardware {
     var synchronizationCount = 0
     var spinCount = 0
     var notifications = 0
+    var resetWriteCount = 0
     var disk = [UInt8](repeating: 0, count: 32 * 512)
 
     func processOneRequest() {
         guard completeRequests,
+              status & 4 != 0,
               queueReady == 1,
               queueSize == UInt32(VirtIOBlockDMAStorage.requestQueueSize),
               descriptorAddress != 0,
@@ -141,6 +148,7 @@ private struct VirtIOBlockTestRegisters: VirtIOBlockRegisterAccess {
     let hardware: VirtIOBlockTestHardware
 
     func read32(at offset: UInt) -> UInt32 {
+        hardware.registerReads.append(offset)
         switch offset {
         case VirtIOBlockMMIORegisterLayout.magic:
             return hardware.magic
@@ -219,11 +227,29 @@ private struct VirtIOBlockTestRegisters: VirtIOBlockRegisterAccess {
             hardware.notifications += 1
             hardware.processOneRequest()
         case VirtIOBlockMMIORegisterLayout.interruptAcknowledge:
+            hardware.interruptAcknowledgeWrites.append(value)
             hardware.interruptStatus &= ~value
         case VirtIOBlockMMIORegisterLayout.status:
-            if value == 0, hardware.ignoreResetWrites { return }
-            if hardware.rejectFeatures, value & 8 != 0 {
+            if value == 0 {
+                hardware.resetWriteCount += 1
+                if hardware.ignoreResetWrites { return }
+                hardware.status = 0
+                hardware.driverFeatures = 0
+                hardware.deviceFeatureSelection = 0
+                hardware.driverFeatureSelection = 0
+                hardware.selectedQueue = 0
+                hardware.queueSize = 0
+                hardware.queueReady = 0
+                hardware.descriptorAddress = 0
+                hardware.availableAddress = 0
+                hardware.usedAddress = 0
+                hardware.interruptStatus = hardware.interruptStatusAfterReset ?? 0
+                hardware.availableDeviceIndex = 0
+                hardware.usedDeviceIndex = 0
+            } else if hardware.rejectFeatures, value & 8 != 0 {
                 hardware.status = value & ~8
+            } else if hardware.rejectDriverOK, value & 4 != 0 {
+                hardware.status = value & ~4
             } else {
                 hardware.status = value
             }
@@ -246,6 +272,14 @@ private struct VirtIOBlockTestRegisters: VirtIOBlockRegisterAccess {
 
     func spinWaitHint() {
         hardware.spinCount += 1
+        guard let remaining = hardware.completeAfterSpinCount else { return }
+        if remaining <= 1 {
+            hardware.completeAfterSpinCount = nil
+            hardware.completeRequests = true
+            hardware.processOneRequest()
+        } else {
+            hardware.completeAfterSpinCount = remaining - 1
+        }
     }
 }
 
@@ -253,13 +287,185 @@ private struct VirtIOBlockTestRegisters: VirtIOBlockRegisterAccess {
 struct VirtIOBlockDeviceTests {
     static func main() {
         initializesModernDeviceAndNegotiatesOnlySupportedFeatures()
+        discoversMMIOIdentityInRequiredOrder()
+        acknowledgesOnlyDefinedInterruptBits()
+        rejectsTranslatedDMAWithoutAccessPlatform()
+        resetsOrQuarantinesPublishedDMAStorage()
         transfersCompleteBlocksAndFlushes()
         enforcesReadOnlyAndBufferBounds()
         rejectsInvalidInitializationContracts()
         failsClosedOnTimedOutAndMalformedCompletions()
         rejectsConfigurationMutationAfterPublication()
         mapsDeviceReportedErrors()
-        print("VirtIO block device host tests: 7 groups passed")
+        print("VirtIO block device host tests: 11 groups passed")
+    }
+
+    private static func discoversMMIOIdentityInRequiredOrder() {
+        withDMAStorage { storage in
+            let hardware = VirtIOBlockTestHardware()
+            hardware.version = 1
+            hardware.deviceID = 18
+            let result = VirtIOBlockDevice<VirtIOBlockTestRegisters>.initialize(
+                registers: VirtIOBlockTestRegisters(hardware: hardware),
+                storage: storage
+            )
+            guard case .failure(.legacyTransport) = result else {
+                fail("legacy transport was not rejected before device discovery")
+            }
+            expect(
+                hardware.registerReads == [
+                    VirtIOBlockMMIORegisterLayout.magic,
+                    VirtIOBlockMMIORegisterLayout.version,
+                ],
+                "MMIO identity was not read in Magic-Version-DeviceID order"
+            )
+        }
+        withDMAStorage { storage in
+            let hardware = VirtIOBlockTestHardware()
+            hardware.deviceID = 18
+            let result = VirtIOBlockDevice<VirtIOBlockTestRegisters>.initialize(
+                registers: VirtIOBlockTestRegisters(hardware: hardware),
+                storage: storage
+            )
+            guard case .failure(.wrongDevice) = result else {
+                fail("unexpected MMIO device was accepted")
+            }
+            expect(
+                hardware.registerReads == [
+                    VirtIOBlockMMIORegisterLayout.magic,
+                    VirtIOBlockMMIORegisterLayout.version,
+                    VirtIOBlockMMIORegisterLayout.deviceID,
+                ],
+                "MMIO device identity discovery order changed"
+            )
+        }
+    }
+
+    private static func acknowledgesOnlyDefinedInterruptBits() {
+        withDMAStorage { storage in
+            let hardware = VirtIOBlockTestHardware()
+            hardware.interruptStatusAfterReset = 0x8000_0003
+            let result = VirtIOBlockDevice<VirtIOBlockTestRegisters>.initialize(
+                registers: VirtIOBlockTestRegisters(hardware: hardware),
+                storage: storage
+            )
+            guard case .ready(var device) = result else {
+                fail("interrupt-mask device initialization")
+            }
+            expect(
+                hardware.interruptAcknowledgeWrites == [3],
+                "InterruptACK included undefined status bits"
+            )
+            expect(
+                hardware.interruptStatus == 0x8000_0000,
+                "undefined interrupt status bit was acknowledged"
+            )
+            expect(
+                device.teardown() == .safeToRelease,
+                "interrupt-mask device teardown"
+            )
+        }
+    }
+
+    private static func rejectsTranslatedDMAWithoutAccessPlatform() {
+        withDMAStorage { storage in
+            guard let translated = translatedStorage(from: storage) else {
+                fail("translated DMA test storage")
+            }
+            let hardware = VirtIOBlockTestHardware()
+            let result = VirtIOBlockDevice<VirtIOBlockTestRegisters>.initialize(
+                registers: VirtIOBlockTestRegisters(hardware: hardware),
+                storage: translated
+            )
+            guard case .failure(let failure) = result,
+                  failure == .invalidDMAStorage,
+                  failure.dmaStorageDisposition == .safeToRelease
+            else {
+                fail("translated DMA was accepted without ACCESS_PLATFORM")
+            }
+            expect(
+                hardware.registerReads.isEmpty,
+                "invalid DMA reached MMIO discovery"
+            )
+        }
+    }
+
+    private static func resetsOrQuarantinesPublishedDMAStorage() {
+        withDMAStorage { storage in
+            let hardware = VirtIOBlockTestHardware()
+            hardware.rejectDriverOK = true
+            let result = VirtIOBlockDevice<VirtIOBlockTestRegisters>.initialize(
+                registers: VirtIOBlockTestRegisters(hardware: hardware),
+                storage: storage,
+                maximumPollCount: 3
+            )
+            guard case .failure(let failure) = result,
+                  failure == .featureNegotiationFailed,
+                  failure.dmaStorageDisposition == .safeToRelease
+            else {
+                fail("post-queue initialization failure was not reset")
+            }
+            expect(hardware.status == 0, "post-queue reset did not complete")
+            expect(hardware.queueReady == 0, "post-queue remained live")
+        }
+        withDMAStorage { storage in
+            let hardware = VirtIOBlockTestHardware()
+            hardware.rejectDriverOK = true
+            hardware.ignoreResetWrites = true
+            let result = VirtIOBlockDevice<VirtIOBlockTestRegisters>.initialize(
+                registers: VirtIOBlockTestRegisters(hardware: hardware),
+                storage: storage,
+                maximumPollCount: 3
+            )
+            guard case .failure(let failure) = result,
+                  failure == .dmaStorageQuarantineRequired,
+                  failure.dmaStorageDisposition == .quarantineRequired
+            else {
+                fail("failed post-queue reset released DMA storage")
+            }
+            expect(hardware.queueReady == 1, "hostile queue unexpectedly stopped")
+        }
+        withDMAStorage { storage in
+            let hardware = VirtIOBlockTestHardware()
+            hardware.offeredFeatures = VirtIOTransportFeature.version1
+            hardware.completeRequests = false
+            hardware.ignoreResetWrites = true
+            guard case .ready(var device) =
+                    VirtIOBlockDevice<VirtIOBlockTestRegisters>.initialize(
+                        registers: VirtIOBlockTestRegisters(hardware: hardware),
+                        storage: storage,
+                        maximumPollCount: 3
+                    )
+            else { fail("late-completion device initialization") }
+
+            var bytes = [UInt8](repeating: 0, count: 512)
+            expect(
+                bytes.withUnsafeMutableBytes {
+                    device.readBlock(at: 0, into: $0)
+                } == .transportFailure,
+                "hostile request did not time out"
+            )
+            expect(
+                device.dmaStorageDisposition == .quarantineRequired,
+                "failed runtime reset released exposed DMA"
+            )
+
+            hardware.completeRequests = true
+            hardware.processOneRequest()
+            expect(
+                hardware.usedDeviceIndex == 1,
+                "hostile late completion was not exercised"
+            )
+            expect(
+                device.teardown() == .quarantineRequired,
+                "ignored reset did not preserve quarantine"
+            )
+            hardware.ignoreResetWrites = false
+            expect(
+                device.teardown() == .safeToRelease,
+                "retry did not observe completed reset"
+            )
+        }
     }
 
     private static func initializesModernDeviceAndNegotiatesOnlySupportedFeatures() {
@@ -269,7 +475,7 @@ struct VirtIOBlockDeviceTests {
                 registers: VirtIOBlockTestRegisters(hardware: hardware),
                 storage: storage
             )
-            guard case .ready(let device) = result else {
+            guard case .ready(var device) = result else {
                 fail("modern block device initialization failed")
             }
             expect(device.geometry.logicalBlockByteCount == 512, "logical block size")
@@ -288,6 +494,11 @@ struct VirtIOBlockDeviceTests {
             expect(hardware.availableAddress != 0, "available address")
             expect(hardware.usedAddress != 0, "used address")
             expect(hardware.status & 15 == 15, "device status progression")
+            expect(
+                device.dmaStorageDisposition == .deviceMayAccess,
+                "live queue was marked releasable"
+            )
+            expect(device.teardown() == .safeToRelease, "normal teardown")
         }
     }
 
@@ -325,6 +536,7 @@ struct VirtIOBlockDeviceTests {
             expect(hardware.flushCount == 1, "flush request count")
             expect(hardware.notifications == 3, "request notification count")
             expect(hardware.interruptStatus == 0, "used interrupt acknowledgment")
+            expect(device.teardown() == .safeToRelease, "transfer teardown")
         }
     }
 
@@ -358,6 +570,7 @@ struct VirtIOBlockDeviceTests {
             )
             expect(device.synchronize() == .success, "no-flush barrier")
             expect(hardware.notifications == 0, "invalid operation reached queue")
+            expect(device.teardown() == .safeToRelease, "read-only teardown")
         }
     }
 
@@ -419,6 +632,32 @@ struct VirtIOBlockDeviceTests {
 
     private static func failsClosedOnTimedOutAndMalformedCompletions() {
         withDMAStorage { storage in
+            let boundaryHardware = VirtIOBlockTestHardware()
+            boundaryHardware.offeredFeatures = VirtIOTransportFeature.version1
+            boundaryHardware.completeRequests = false
+            boundaryHardware.completeAfterSpinCount = 3
+            guard case .ready(var boundaryDevice) =
+                    VirtIOBlockDevice<VirtIOBlockTestRegisters>.initialize(
+                        registers: VirtIOBlockTestRegisters(
+                            hardware: boundaryHardware
+                        ),
+                        storage: storage,
+                        maximumPollCount: 3
+                    )
+            else { fail("poll-boundary device initialization") }
+            var bytes = [UInt8](repeating: 0, count: 512)
+            expect(
+                bytes.withUnsafeMutableBytes {
+                    boundaryDevice.readBlock(at: 0, into: $0)
+                } == .success,
+                "completion on final permitted poll was rejected"
+            )
+            expect(
+                boundaryDevice.teardown() == .safeToRelease,
+                "poll-boundary teardown"
+            )
+        }
+        withDMAStorage { storage in
             let timeoutHardware = VirtIOBlockTestHardware()
             timeoutHardware.offeredFeatures = VirtIOTransportFeature.version1
             timeoutHardware.completeRequests = false
@@ -440,6 +679,10 @@ struct VirtIOBlockDeviceTests {
                     == .transportFailure,
                 "faulted device reused"
             )
+            expect(
+                timedOut.dmaStorageDisposition == .safeToRelease,
+                "completed timeout reset did not release DMA"
+            )
         }
         withDMAStorage { storage in
             let malformedHardware = VirtIOBlockTestHardware()
@@ -456,6 +699,10 @@ struct VirtIOBlockDeviceTests {
                 bytes.withUnsafeMutableBytes { malformed.readBlock(at: 0, into: $0) }
                     == .transportFailure,
                 "corrupt used ID accepted"
+            )
+            expect(
+                malformed.dmaStorageDisposition == .safeToRelease,
+                "malformed completion did not reset queue"
             )
         }
     }
@@ -479,6 +726,10 @@ struct VirtIOBlockDeviceTests {
             )
             expect(hardware.interruptStatus == 0, "config interrupt not acknowledged")
             expect(hardware.notifications == 0, "faulted geometry reached queue")
+            expect(
+                device.dmaStorageDisposition == .safeToRelease,
+                "configuration fault did not reset queue"
+            )
         }
     }
 
@@ -499,6 +750,7 @@ struct VirtIOBlockDeviceTests {
                     == .transportFailure,
                 "device I/O error reported success"
             )
+            expect(device.teardown() == .safeToRelease, "device-error teardown")
         }
     }
 
@@ -555,6 +807,37 @@ struct VirtIOBlockDeviceTests {
             byteCount: byteCount,
             deviceAddressWidth: .bits64,
             coherency: .hardwareCoherent
+        )
+    }
+
+    private static func translatedStorage(
+        from storage: VirtIOBlockDMAStorage
+    ) -> VirtIOBlockDMAStorage? {
+        let translation: UInt64 = 0x10_0000
+        guard let queue = translated(storage.requestQueue, by: translation),
+              let header = translated(storage.requestHeader, by: translation),
+              let data = translated(storage.data, by: translation),
+              let status = translated(storage.status, by: translation)
+        else { return nil }
+        return VirtIOBlockDMAStorage(
+            requestQueue: queue,
+            requestHeader: header,
+            data: data,
+            status: status
+        )
+    }
+
+    private static func translated(
+        _ mapping: DMAMapping,
+        by offset: UInt64
+    ) -> DMAMapping? {
+        guard mapping.deviceAddress <= UInt64.max - offset else { return nil }
+        return DMAMapping(
+            cpuPhysicalAddress: mapping.cpuPhysicalAddress,
+            deviceAddress: mapping.deviceAddress + offset,
+            byteCount: mapping.byteCount,
+            deviceAddressWidth: mapping.deviceAddressWidth,
+            coherency: mapping.coherency
         )
     }
 

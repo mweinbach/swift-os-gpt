@@ -176,6 +176,22 @@ enum VirtIOBlockInitializationFailure: Equatable {
     case unstableConfiguration
     case invalidCapacity
     case queueUnavailable
+    /// Reset did not complete after queue memory was published. The caller
+    /// must retain the DMA storage until a later reset attempt succeeds or a
+    /// platform reset makes device access impossible.
+    case dmaStorageQuarantineRequired
+
+    var dmaStorageDisposition: VirtIOBlockDMAStorageDisposition {
+        switch self {
+        case .invalidPollLimit, .invalidDMAStorage, .wrongDevice,
+             .legacyTransport, .deviceResetFailed, .missingRequiredFeature,
+             .featureNegotiationFailed, .unstableConfiguration,
+             .invalidCapacity, .queueUnavailable:
+            return .safeToRelease
+        case .dmaStorageQuarantineRequired:
+            return .quarantineRequired
+        }
+    }
 }
 
 enum VirtIOBlockInitializationResult<Registers: VirtIOBlockRegisterAccess> {
@@ -183,10 +199,27 @@ enum VirtIOBlockInitializationResult<Registers: VirtIOBlockRegisterAccess> {
     case failure(VirtIOBlockInitializationFailure)
 }
 
+/// Whether caller-owned DMA storage can be returned to the allocator.
+///
+/// A live device can still observe its queue. Quarantined storage must remain
+/// allocated until a later `teardown()` call observes reset completion, or an
+/// out-of-band platform reset provides the same guarantee.
+enum VirtIOBlockDMAStorageDisposition: UInt8, Equatable {
+    case deviceMayAccess
+    case safeToRelease
+    case quarantineRequired
+}
+
 private enum VirtIOBlockDeviceState: UInt8 {
-    case cold
     case ready
-    case faulted
+    case reset
+    case quarantined
+}
+
+private enum VirtIOBlockQueueConfigurationResult: UInt8 {
+    case ready
+    case unavailable
+    case storagePublished
 }
 
 /// Modern VirtIO 1.x block device using one bounded synchronous request queue.
@@ -209,6 +242,7 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
     private enum Interrupt {
         static var usedBuffer: UInt32 { 1 }
         static var configurationChanged: UInt32 { 2 }
+        static var known: UInt32 { usedBuffer | configurationChanged }
     }
 
     private enum Feature {
@@ -251,6 +285,17 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
     let supportsFlush: Bool
     let offeredFeatures: UInt64
     let negotiatedFeatures: UInt64
+
+    var dmaStorageDisposition: VirtIOBlockDMAStorageDisposition {
+        switch state {
+        case .ready:
+            return .deviceMayAccess
+        case .reset:
+            return .safeToRelease
+        case .quarantined:
+            return .quarantineRequired
+        }
+    }
 
     private init(
         registers: Registers,
@@ -298,14 +343,14 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
         guard maximumPollCount > 0 else {
             return .failure(.invalidPollLimit)
         }
-        guard zero(storage) else {
+        // ACCESS_PLATFORM is deliberately not negotiated yet. Until it is,
+        // VirtIO requires queue and request addresses to be CPU physical
+        // addresses rather than translated bus addresses.
+        guard storageUsesIdentityMappings(storage), zero(storage) else {
             return .failure(.invalidDMAStorage)
         }
         guard registers.read32(at: VirtIOBlockMMIORegisterLayout.magic)
-                == Self.magicValue,
-              registers.read32(at: VirtIOBlockMMIORegisterLayout.deviceID)
-                == Self.blockDeviceID
-        else {
+                == Self.magicValue else {
             return .failure(.wrongDevice)
         }
         guard registers.read32(at: VirtIOBlockMMIORegisterLayout.version)
@@ -313,15 +358,16 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
         else {
             return .failure(.legacyTransport)
         }
-
-        registers.write32(0, at: VirtIOBlockMMIORegisterLayout.status)
-        var resetPollCount: UInt64 = 0
-        while resetPollCount < maximumPollCount,
-              registers.read32(at: VirtIOBlockMMIORegisterLayout.status) != 0 {
-            resetPollCount += 1
-            registers.spinWaitHint()
+        guard registers.read32(at: VirtIOBlockMMIORegisterLayout.deviceID)
+                == Self.blockDeviceID else {
+            return .failure(.wrongDevice)
         }
-        guard resetPollCount < maximumPollCount else {
+
+        guard resetAndWait(
+                  registers,
+                  maximumPollCount: maximumPollCount
+              )
+        else {
             return .failure(.deviceResetFailed)
         }
 
@@ -363,9 +409,22 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
             return .failure(.invalidCapacity)
         }
 
-        acknowledgeInterrupts(registers, mask: UInt32.max)
-        guard configureQueue(registers, storage: storage) else {
+        acknowledgeInterrupts(registers, mask: Interrupt.known)
+        switch configureQueue(registers, storage: storage) {
+        case .ready:
+            break
+        case .unavailable:
             failInitialization(registers)
+            return .failure(.queueUnavailable)
+        case .storagePublished:
+            failInitialization(registers)
+            guard resetAndWait(
+                      registers,
+                      maximumPollCount: maximumPollCount
+                  )
+            else {
+                return .failure(.dmaStorageQuarantineRequired)
+            }
             return .failure(.queueUnavailable)
         }
 
@@ -379,6 +438,13 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
               completedStatus & Status.driverOK != 0
         else {
             failInitialization(registers)
+            guard resetAndWait(
+                      registers,
+                      maximumPollCount: maximumPollCount
+                  )
+            else {
+                return .failure(.dmaStorageQuarantineRequired)
+            }
             return .failure(.featureNegotiationFailed)
         }
 
@@ -397,6 +463,23 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
                 usedIndex: 0
             )
         )
+    }
+
+    /// Stops the device and waits until its status reads as zero. The caller
+    /// may release DMA storage only after `.safeToRelease` is returned.
+    /// A failed reset is retryable, but the storage remains quarantined between
+    /// attempts because the device may still complete an exposed descriptor.
+    mutating func teardown() -> VirtIOBlockDMAStorageDisposition {
+        guard state != .reset else { return .safeToRelease }
+        if Self.resetAndWait(
+            registers,
+            maximumPollCount: maximumPollCount
+        ) {
+            state = .reset
+            return .safeToRelease
+        }
+        state = .quarantined
+        return .quarantineRequired
     }
 
     mutating func readBlock(
@@ -484,16 +567,14 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
         guard state == .ready else { return .transportFailure }
         let status = registers.read32(at: VirtIOBlockMMIORegisterLayout.status)
         guard status & (Status.failed | Status.deviceNeedsReset) == 0 else {
-            state = .faulted
-            return .transportFailure
+            return failAndReset()
         }
         let interrupts = registers.read32(
             at: VirtIOBlockMMIORegisterLayout.interruptStatus
         )
         guard interrupts & Interrupt.configurationChanged == 0 else {
-            Self.acknowledgeInterrupts(registers, mask: interrupts)
-            state = .faulted
-            return .transportFailure
+            Self.acknowledgeInterrupts(registers, mask: Interrupt.known)
+            return failAndReset()
         }
 
         prepareRequestHeader(type: type, logicalBlock: logicalBlock)
@@ -532,8 +613,7 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
                 at: VirtIOBlockMMIORegisterLayout.status
             )
             if currentStatus & (Status.failed | Status.deviceNeedsReset) != 0 {
-                state = .faulted
-                return .transportFailure
+                return failAndReset()
             }
             pollCount += 1
             registers.spinWaitHint()
@@ -541,11 +621,9 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
                 at: queue.cpuPhysicalAddress + layout.usedOffset + 2
             )
         }
-        guard pollCount < maximumPollCount,
-              observedUsedIndex &- usedIndex == 1
+        guard observedUsedIndex &- usedIndex == 1
         else {
-            state = .faulted
-            return .transportFailure
+            return failAndReset()
         }
         registers.synchronizeDMA()
 
@@ -558,8 +636,7 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
         guard descriptorID == 0,
               writtenByteCount == expectedWrittenByteCount
         else {
-            state = .faulted
-            return .transportFailure
+            return failAndReset()
         }
         usedIndex = observedUsedIndex
         Self.acknowledgeInterrupts(registers, mask: Interrupt.usedBuffer)
@@ -570,9 +647,20 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
         case RequestStatus.ioError, RequestStatus.unsupported:
             return .transportFailure
         default:
-            state = .faulted
-            return .transportFailure
+            return failAndReset()
         }
+    }
+
+    private mutating func failAndReset() -> BlockDeviceIOResult {
+        if Self.resetAndWait(
+            registers,
+            maximumPollCount: maximumPollCount
+        ) {
+            state = .reset
+        } else {
+            state = .quarantined
+        }
+        return .transportFailure
     }
 
     private func prepareRequestHeader(type: UInt32, logicalBlock: UInt64) {
@@ -660,10 +748,19 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
         )
     }
 
+    private static func storageUsesIdentityMappings(
+        _ storage: VirtIOBlockDMAStorage
+    ) -> Bool {
+        storage.requestQueue.isIdentityMapped
+            && storage.requestHeader.isIdentityMapped
+            && storage.data.isIdentityMapped
+            && storage.status.isIdentityMapped
+    }
+
     private static func configureQueue(
         _ registers: Registers,
         storage: VirtIOBlockDMAStorage
-    ) -> Bool {
+    ) -> VirtIOBlockQueueConfigurationResult {
         let queue = storage.requestQueue
         let layout = storage.requestQueueLayout
         registers.write32(0, at: VirtIOBlockMMIORegisterLayout.queueSelect)
@@ -671,7 +768,7 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
               registers.read32(at: VirtIOBlockMMIORegisterLayout.queueMaximum)
                 >= UInt32(layout.size)
         else {
-            return false
+            return .unavailable
         }
 
         PhysicalBytes.writeLE16(
@@ -707,6 +804,8 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
         registers.synchronizeDMA()
         registers.write32(1, at: VirtIOBlockMMIORegisterLayout.queueReady)
         return registers.read32(at: VirtIOBlockMMIORegisterLayout.queueReady) == 1
+            ? .ready
+            : .storagePublished
     }
 
     private static func readDeviceFeatures(_ registers: Registers) -> UInt64 {
@@ -794,13 +893,30 @@ struct VirtIOBlockDevice<Registers: VirtIOBlockRegisterAccess>: BlockDevice {
     ) {
         let pending = registers.read32(
             at: VirtIOBlockMMIORegisterLayout.interruptStatus
-        ) & mask
+        ) & mask & Interrupt.known
         if pending != 0 {
             registers.write32(
                 pending,
                 at: VirtIOBlockMMIORegisterLayout.interruptAcknowledge
             )
         }
+    }
+
+    private static func resetAndWait(
+        _ registers: Registers,
+        maximumPollCount: UInt64
+    ) -> Bool {
+        registers.write32(0, at: VirtIOBlockMMIORegisterLayout.status)
+        var pollCount: UInt64 = 0
+        while pollCount < maximumPollCount {
+            if registers.read32(at: VirtIOBlockMMIORegisterLayout.status) == 0 {
+                registers.synchronizeDMA()
+                return true
+            }
+            pollCount += 1
+            registers.spinWaitHint()
+        }
+        return false
     }
 
     private static func failInitialization(_ registers: Registers) {
