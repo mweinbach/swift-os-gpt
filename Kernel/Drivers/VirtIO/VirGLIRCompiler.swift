@@ -29,12 +29,17 @@ enum VirGLIRUnitQuadVertexLayout: Equatable {
     }
 }
 
-/// Context-local object handles used by the solid-quad pipeline. Resource
+/// Context-local object handles used by the quad pipelines. Resource
 /// handles live in a separate VirtIO-GPU namespace, but all object handles are
 /// kept distinct so teardown and protocol traces remain unambiguous.
 struct VirGLIRPipelineHandles: Equatable {
     let vertexShader: UInt32
     let fragmentShader: UInt32
+    /// Optional until a machine's session reserves the analytic pipeline's
+    /// two additional context-local handles. A solid-only session remains a
+    /// valid staged configuration, but rounded commands then fail closed.
+    let roundedVertexShader: UInt32?
+    let roundedFragmentShader: UInt32?
     let vertexElements: UInt32
     let rasterizer: UInt32
     let depthStencilAlpha: UInt32
@@ -45,6 +50,8 @@ struct VirGLIRPipelineHandles: Equatable {
     init?(
         vertexShader: UInt32,
         fragmentShader: UInt32,
+        roundedVertexShader: UInt32? = nil,
+        roundedFragmentShader: UInt32? = nil,
         vertexElements: UInt32,
         rasterizer: UInt32,
         depthStencilAlpha: UInt32,
@@ -68,18 +75,68 @@ struct VirGLIRPipelineHandles: Equatable {
                   depthStencilAlpha,
                   copyBlend,
                   sourceOverBlend
+              ),
+              Self.roundedHandlesAreValid(
+                  roundedVertexShader,
+                  roundedFragmentShader,
+                  vertexShader,
+                  fragmentShader,
+                  vertexElements,
+                  rasterizer,
+                  depthStencilAlpha,
+                  copyBlend,
+                  sourceOverBlend
               )
         else {
             return nil
         }
         self.vertexShader = vertexShader
         self.fragmentShader = fragmentShader
+        self.roundedVertexShader = roundedVertexShader
+        self.roundedFragmentShader = roundedFragmentShader
         self.vertexElements = vertexElements
         self.rasterizer = rasterizer
         self.depthStencilAlpha = depthStencilAlpha
         self.copyBlend = copyBlend
         self.sourceOverBlend = sourceOverBlend
         self.unitQuadVertexResource = unitQuadVertexResource
+    }
+
+    private static func roundedHandlesAreValid(
+        _ roundedVertexShader: UInt32?,
+        _ roundedFragmentShader: UInt32?,
+        _ value0: UInt32,
+        _ value1: UInt32,
+        _ value2: UInt32,
+        _ value3: UInt32,
+        _ value4: UInt32,
+        _ value5: UInt32,
+        _ value6: UInt32
+    ) -> Bool {
+        switch (roundedVertexShader, roundedFragmentShader) {
+        case (nil, nil):
+            return true
+        case (.some(let vertex), .some(let fragment)):
+            guard vertex != 0, fragment != 0, vertex != fragment else {
+                return false
+            }
+            let values = (
+                value0, value1, value2, value3, value4, value5, value6
+            )
+            return withUnsafeBytes(of: values) { bytes in
+                let words = bytes.bindMemory(to: UInt32.self)
+                var index = 0
+                while index < words.count {
+                    if vertex == words[index] || fragment == words[index] {
+                        return false
+                    }
+                    index += 1
+                }
+                return true
+            }
+        default:
+            return false
+        }
     }
 
     private static func areDistinct(
@@ -110,16 +167,22 @@ struct VirGLIRPipelineHandles: Equatable {
     }
 
     /// VirGL keeps every context object (including surfaces) in one handle
-    /// table. Resource handles use a different namespace, so only the seven
-    /// context-local pipeline objects participate in this collision check.
+    /// table. Resource handles use a different namespace, so only context-local
+    /// pipeline objects participate in this collision check.
     func containsContextObjectHandle(_ handle: UInt32) -> Bool {
         handle == vertexShader
             || handle == fragmentShader
+            || roundedVertexShader == Optional(handle)
+            || roundedFragmentShader == Optional(handle)
             || handle == vertexElements
             || handle == rasterizer
             || handle == depthStencilAlpha
             || handle == copyBlend
             || handle == sourceOverBlend
+    }
+
+    var hasRoundedPipeline: Bool {
+        roundedVertexShader != nil && roundedFragmentShader != nil
     }
 }
 
@@ -189,7 +252,11 @@ enum VirGLIRLoweringRejection: Equatable {
     case renderTargetTooLarge(commandIndex: Int)
     case discardStoreUnsupported(commandIndex: Int)
     case pipelineNotInitialized(commandIndex: Int)
-    case roundedQuadUnsupported(commandIndex: Int)
+    case roundedPipelineUnavailable(commandIndex: Int)
+    case roundedCopyUnsupported(commandIndex: Int)
+    case roundedTransformSingular(commandIndex: Int)
+    case roundedTransformIllConditioned(commandIndex: Int)
+    case roundedGeometryNotFinite(commandIndex: Int)
     case glyphAtlasUnsupported(commandIndex: Int)
     case capacityExhausted(requiredDWords: Int, availableDWords: Int)
     case encoderRejected(commandIndex: Int, rejection: VirGLEncodeRejection)
@@ -210,22 +277,53 @@ private enum VirGLIRPreflightResult {
     case rejected(VirGLIRLoweringRejection)
 }
 
+private enum VirGLIRQuadPipeline: Equatable {
+    case solid
+    case rounded
+}
+
+private struct VirGLIRRoundedGeometry {
+    let clipBasisXX: Float
+    let clipBasisXY: Float
+    let localBasisXX: Float
+    let localBasisXY: Float
+    let clipBasisYX: Float
+    let clipBasisYY: Float
+    let localBasisYX: Float
+    let localBasisYY: Float
+    let clipOriginX: Float
+    let clipOriginY: Float
+    let localOriginX: Float
+    let localOriginY: Float
+}
+
+private enum VirGLIRRoundedGeometryResult {
+    case accepted(VirGLIRRoundedGeometry)
+    case singular
+    case illConditioned
+    case notFinite
+}
+
 /// Stateful because context-local pipeline objects must be created once. A
 /// clear-only command buffer does not require pipeline initialization; solid
-/// quads do. Rounded quads and glyphs deliberately fail closed until their
-/// shader/resource paths are implemented.
+/// quads do. Rounded quads use a separate analytic shader pair when its handles
+/// are configured; glyphs deliberately fail closed until their atlas path is
+/// implemented.
 struct VirGLIRCompiler {
     private static let color0ClearMask: UInt32 = 1 << 2
     private static let shaderTokenCapacity: UInt32 = 256
     private static let maximumScissorCoordinate = UInt32(UInt16.max)
     private static let supportedRenderTargetFormat =
         GPUColorAttachmentFormat.bgra8UNormSRGB
+    private static let maximumRoundedTransformCondition: Double = 4096
 
     // TGSI text is carried verbatim by VirGL. Each StaticString includes its
     // terminal NUL in utf8CodeUnitCount; the encoder verifies that byte before
     // accepting the final shader fragment.
     private static let vertexShaderText: StaticString = "VERT\nDCL IN[0]\nDCL OUT[0], POSITION\nDCL OUT[1], COLOR\nDCL CONST[0..3]\nDCL TEMP[0]\n  0: MUL TEMP[0], IN[0].xxxx, CONST[0]\n  1: MAD TEMP[0], IN[0].yyyy, CONST[1], TEMP[0]\n  2: ADD OUT[0], TEMP[0], CONST[2]\n  3: MOV OUT[1], CONST[3]\n  4: END\n\0"
     private static let fragmentShaderText: StaticString = "FRAG\nDCL IN[0], COLOR, LINEAR\nDCL OUT[0], COLOR\n  0: MOV OUT[0], IN[0]\n  1: END\n\0"
+    private static let roundedVertexShaderText: StaticString = "VERT\nDCL IN[0]\nDCL OUT[0], POSITION\nDCL OUT[1], COLOR\nDCL OUT[2], GENERIC[0]\nDCL CONST[0..3]\nDCL TEMP[0]\nIMM[0] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x3f800000}\n  0: MUL TEMP[0], IN[0].xxxx, CONST[0]\n  1: MAD TEMP[0], IN[0].yyyy, CONST[1], TEMP[0]\n  2: ADD OUT[0].xy, TEMP[0], CONST[2]\n  3: MOV OUT[0].zw, IMM[0]\n  4: ADD OUT[2].xy, TEMP[0].zwzw, CONST[2].zwzw\n  5: MOV OUT[2].zw, IMM[0]\n  6: MOV OUT[1], CONST[3]\n  7: END\n\0"
+    private static let roundedFragmentShaderText: StaticString = "FRAG\nDCL IN[0], COLOR, LINEAR\nDCL IN[1], GENERIC[0], LINEAR\nDCL OUT[0], COLOR\nDCL CONST[0..1]\nDCL TEMP[0..4]\nIMM[0] FLT32 {0x00000000, 0x3f000000, 0x3f800000, 0x35800000}\n  0: ADD TEMP[0].xy, IN[1], -CONST[0]\n  1: CMP TEMP[1].x, -TEMP[0].xxxx, CONST[1].yyyy, CONST[1].xxxx\n  2: CMP TEMP[1].y, -TEMP[0].xxxx, CONST[1].zzzz, CONST[1].wwww\n  3: CMP TEMP[1].x, -TEMP[0].yyyy, TEMP[1].yyyy, TEMP[1].xxxx\n  4: ABS TEMP[2].xy, TEMP[0]\n  5: ADD TEMP[2].xy, TEMP[2], -CONST[0]\n  6: ADD TEMP[2].xy, TEMP[2], TEMP[1].xxxx\n  7: MAX TEMP[3].xy, TEMP[2], IMM[0].xxxx\n  8: DP2 TEMP[3].z, TEMP[3], TEMP[3]\n  9: SQRT TEMP[3].z, TEMP[3].zzzz\n 10: MAX TEMP[3].w, TEMP[2].xxxx, TEMP[2].yyyy\n 11: MIN TEMP[3].w, TEMP[3].wwww, IMM[0].xxxx\n 12: ADD TEMP[3].z, TEMP[3].zzzz, TEMP[3].wwww\n 13: ADD TEMP[3].z, TEMP[3].zzzz, -TEMP[1].xxxx\n 14: DDX TEMP[4].x, TEMP[3].zzzz\n 15: DDY TEMP[4].y, TEMP[3].zzzz\n 16: ABS TEMP[4].xy, TEMP[4]\n 17: ADD TEMP[4].x, TEMP[4].xxxx, TEMP[4].yyyy\n 18: MAX TEMP[4].x, TEMP[4].xxxx, IMM[0].wwww\n 19: RCP TEMP[4].x, TEMP[4].xxxx\n 20: MUL TEMP[4].y, -TEMP[3].zzzz, TEMP[4].xxxx\n 21: ADD TEMP[4].y, TEMP[4].yyyy, IMM[0].yyyy\n 22: MAX TEMP[4].y, TEMP[4].yyyy, IMM[0].xxxx\n 23: MIN TEMP[4].y, TEMP[4].yyyy, IMM[0].zzzz\n 24: MUL OUT[0], IN[0], TEMP[4].yyyy\n 25: END\n\0"
 
     let configuration: VirGLIRPipelineConfiguration
     private(set) var isPipelineInitialized = false
@@ -331,12 +429,19 @@ struct VirGLIRCompiler {
     }
 
     private var pipelineInitializationDWordCount: Int {
-        // Vertex elements, rasterizer, DSA, two blend objects, and two shader
-        // objects. LINK_SHADER is present only when the capset advertises SSO.
+        // Vertex elements, rasterizer, DSA, two blend objects, and the solid
+        // shader pair. A configured analytic pair adds two shader objects.
+        // LINK_SHADER is present only when the capset advertises SSO.
         var count = 6 + 10 + 6 + 12 + 12
         count += Self.shaderPacketDWordCount(Self.vertexShaderText)
         count += Self.shaderPacketDWordCount(Self.fragmentShaderText)
-        if configuration.capabilities.supportsShaderLink { count += 7 }
+        if configuration.handles.hasRoundedPipeline {
+            count += Self.shaderPacketDWordCount(Self.roundedVertexShaderText)
+            count += Self.shaderPacketDWordCount(Self.roundedFragmentShaderText)
+        }
+        if configuration.capabilities.supportsShaderLink {
+            count += configuration.handles.hasRoundedPipeline ? 14 : 7
+        }
         return count
     }
 
@@ -349,7 +454,9 @@ struct VirGLIRCompiler {
         var passCount = 0
         var drawCount = 0
         var insidePass = false
+        var transform = GPUTransform2D.identity
         var pipelineBound = false
+        var boundPipeline: VirGLIRQuadPipeline?
         var boundBlend: GPUBlendMode?
 
         var index = 0
@@ -416,7 +523,9 @@ struct VirGLIRCompiler {
                 required += 16
                 if case .clear = descriptor.loadAction { required += 9 }
                 insidePass = true
+                transform = .identity
                 pipelineBound = false
+                boundPipeline = nil
                 boundBlend = nil
                 passCount += 1
 
@@ -428,12 +537,13 @@ struct VirGLIRCompiler {
                 }
                 required += 4
 
-            case .setTransform:
+            case .setTransform(let newTransform):
                 guard insidePass else {
                     return .rejected(
                         .malformedCommandStream(commandIndex: index)
                     )
                 }
+                transform = newTransform
 
             case .drawQuad(let quad):
                 guard insidePass else {
@@ -441,28 +551,65 @@ struct VirGLIRCompiler {
                         .malformedCommandStream(commandIndex: index)
                     )
                 }
-                guard !quad.isRounded else {
-                    return .rejected(
-                        .roundedQuadUnsupported(commandIndex: index)
-                    )
-                }
                 guard isPipelineInitialized else {
                     return .rejected(
                         .pipelineNotInitialized(commandIndex: index)
                     )
+                }
+                let requestedPipeline: VirGLIRQuadPipeline
+                if quad.isRounded {
+                    guard configuration.handles.hasRoundedPipeline else {
+                        return .rejected(
+                            .roundedPipelineUnavailable(commandIndex: index)
+                        )
+                    }
+                    guard quad.blendMode == .sourceOver else {
+                        return .rejected(
+                            .roundedCopyUnsupported(commandIndex: index)
+                        )
+                    }
+                    switch Self.roundedGeometry(
+                        quad,
+                        transform: transform,
+                        extent: renderTarget.extent
+                    ) {
+                    case .accepted:
+                        break
+                    case .singular:
+                        return .rejected(
+                            .roundedTransformSingular(commandIndex: index)
+                        )
+                    case .illConditioned:
+                        return .rejected(
+                            .roundedTransformIllConditioned(commandIndex: index)
+                        )
+                    case .notFinite:
+                        return .rejected(
+                            .roundedGeometryNotFinite(commandIndex: index)
+                        )
+                    }
+                    requestedPipeline = .rounded
+                } else {
+                    requestedPipeline = .solid
                 }
                 if !pipelineBound {
                     // Three generic object binds, two shader binds, and one
                     // vertex-buffer packet.
                     required += 16
                     pipelineBound = true
+                    boundPipeline = requestedPipeline
+                } else if boundPipeline != requestedPipeline {
+                    // Switching analytic/solid programs rebinds both stages.
+                    required += 6
+                    boundPipeline = requestedPipeline
                 }
                 if boundBlend != quad.blendMode {
                     required += 2
                     boundBlend = quad.blendMode
                 }
-                // Four vec4 vertex constants (19) plus DRAW_VBO (13).
-                required += 32
+                // Four vec4 vertex constants (19) plus DRAW_VBO (13). The
+                // analytic shader also receives two fragment vec4s (11).
+                required += requestedPipeline == .rounded ? 43 : 32
                 drawCount += 1
 
             case .drawGlyph:
@@ -649,6 +796,43 @@ struct VirGLIRCompiler {
             return rejection
         }
 
+        if let roundedVertex = handles.roundedVertexShader,
+           let roundedFragment = handles.roundedFragmentShader {
+            let roundedVertexBytes = UnsafeRawBufferPointer(
+                start: Self.roundedVertexShaderText.utf8Start,
+                count: Self.roundedVertexShaderText.utf8CodeUnitCount
+            )
+            if let rejection = Self.rejection(
+                arena.encodeCreateShaderObjectFragment(
+                    handle: roundedVertex,
+                    stage: .vertex,
+                    tokenCount: Self.shaderTokenCapacity,
+                    totalByteCount: UInt32(roundedVertexBytes.count),
+                    fragmentOffset: 0,
+                    bytes: roundedVertexBytes
+                )
+            ) {
+                return rejection
+            }
+
+            let roundedFragmentBytes = UnsafeRawBufferPointer(
+                start: Self.roundedFragmentShaderText.utf8Start,
+                count: Self.roundedFragmentShaderText.utf8CodeUnitCount
+            )
+            if let rejection = Self.rejection(
+                arena.encodeCreateShaderObjectFragment(
+                    handle: roundedFragment,
+                    stage: .fragment,
+                    tokenCount: Self.shaderTokenCapacity,
+                    totalByteCount: UInt32(roundedFragmentBytes.count),
+                    fragmentOffset: 0,
+                    bytes: roundedFragmentBytes
+                )
+            ) {
+                return rejection
+            }
+        }
+
         if configuration.capabilities.supportsShaderLink {
             guard let program = VirGLShaderProgramHandles(
                 vertex: handles.vertexShader,
@@ -664,6 +848,23 @@ struct VirGLIRCompiler {
             ) {
                 return rejection
             }
+            if let roundedVertex = handles.roundedVertexShader,
+               let roundedFragment = handles.roundedFragmentShader {
+                guard let roundedProgram = VirGLShaderProgramHandles(
+                    vertex: roundedVertex,
+                    fragment: roundedFragment
+                ) else {
+                    return .invalidState
+                }
+                if let rejection = Self.rejection(
+                    arena.encodeLinkShader(
+                        capabilities: configuration.capabilities,
+                        program: roundedProgram
+                    )
+                ) {
+                    return rejection
+                }
+            }
         }
         return nil
     }
@@ -677,6 +878,7 @@ struct VirGLIRCompiler {
         var activeDescriptor: GPURenderPassDescriptor?
         var transform = GPUTransform2D.identity
         var pipelineBound = false
+        var boundPipeline: VirGLIRQuadPipeline?
         var boundBlend: GPUBlendMode?
 
         var index = 0
@@ -689,6 +891,7 @@ struct VirGLIRCompiler {
                 activeDescriptor = descriptor
                 transform = .identity
                 pipelineBound = false
+                boundPipeline = nil
                 boundBlend = nil
 
                 var colorSurface = renderTarget.surfaceHandle
@@ -762,14 +965,32 @@ struct VirGLIRCompiler {
                 guard let descriptor = activeDescriptor else {
                     return .malformedCommandStream(commandIndex: index)
                 }
+                let requestedPipeline: VirGLIRQuadPipeline = quad.isRounded
+                    ? .rounded
+                    : .solid
                 if !pipelineBound {
-                    if let rejection = encodePipelineBindings(into: &arena) {
+                    if let rejection = encodePipelineBindings(
+                        requestedPipeline,
+                        into: &arena
+                    ) {
                         return .encoderRejected(
                             commandIndex: index,
                             rejection: rejection
                         )
                     }
                     pipelineBound = true
+                    boundPipeline = requestedPipeline
+                } else if boundPipeline != requestedPipeline {
+                    if let rejection = encodeShaderBindings(
+                        requestedPipeline,
+                        into: &arena
+                    ) {
+                        return .encoderRejected(
+                            commandIndex: index,
+                            rejection: rejection
+                        )
+                    }
+                    boundPipeline = requestedPipeline
                 }
                 if boundBlend != quad.blendMode {
                     let blendHandle = quad.blendMode == .copy
@@ -788,16 +1009,47 @@ struct VirGLIRCompiler {
                     }
                     boundBlend = quad.blendMode
                 }
-                if let rejection = encodeQuadConstants(
-                    quad,
-                    transform: transform,
-                    extent: descriptor.extent,
-                    into: &arena
-                ) {
-                    return .encoderRejected(
-                        commandIndex: index,
-                        rejection: rejection
-                    )
+                switch requestedPipeline {
+                case .solid:
+                    if let rejection = encodeSolidQuadConstants(
+                        quad,
+                        transform: transform,
+                        extent: descriptor.extent,
+                        into: &arena
+                    ) {
+                        return .encoderRejected(
+                            commandIndex: index,
+                            rejection: rejection
+                        )
+                    }
+                case .rounded:
+                    let geometry: VirGLIRRoundedGeometry
+                    switch Self.roundedGeometry(
+                        quad,
+                        transform: transform,
+                        extent: descriptor.extent
+                    ) {
+                    case .accepted(let accepted):
+                        geometry = accepted
+                    case .singular:
+                        return .roundedTransformSingular(commandIndex: index)
+                    case .illConditioned:
+                        return .roundedTransformIllConditioned(
+                            commandIndex: index
+                        )
+                    case .notFinite:
+                        return .roundedGeometryNotFinite(commandIndex: index)
+                    }
+                    if let rejection = encodeRoundedQuadConstants(
+                        quad,
+                        geometry: geometry,
+                        into: &arena
+                    ) {
+                        return .encoderRejected(
+                            commandIndex: index,
+                            rejection: rejection
+                        )
+                    }
                 }
                 let draw = VirGLDrawDescriptor(
                     start: 0,
@@ -833,6 +1085,7 @@ struct VirGLIRCompiler {
 
     @_optimize(none)
     private func encodePipelineBindings(
+        _ pipeline: VirGLIRQuadPipeline,
         into arena: inout VirGLDWordArena
     ) -> VirGLEncodeRejection? {
         let handles = configuration.handles
@@ -851,20 +1104,9 @@ struct VirGLIRCompiler {
                 handle: handles.vertexElements
             )
         ) { return rejection }
-        if let rejection = Self.rejection(
-            arena.encodeBindShader(
-                capabilities: configuration.capabilities,
-                stage: .vertex,
-                handle: handles.vertexShader
-            )
-        ) { return rejection }
-        if let rejection = Self.rejection(
-            arena.encodeBindShader(
-                capabilities: configuration.capabilities,
-                stage: .fragment,
-                handle: handles.fragmentShader
-            )
-        ) { return rejection }
+        if let rejection = encodeShaderBindings(pipeline, into: &arena) {
+            return rejection
+        }
 
         var vertexBuffer = VirGLVertexBuffer(
             stride: configuration.unitQuadVertexLayout.stride,
@@ -878,6 +1120,43 @@ struct VirGLIRCompiler {
                 )
             )
         }
+    }
+
+    @_optimize(none)
+    private func encodeShaderBindings(
+        _ pipeline: VirGLIRQuadPipeline,
+        into arena: inout VirGLDWordArena
+    ) -> VirGLEncodeRejection? {
+        let vertexHandle: UInt32
+        let fragmentHandle: UInt32
+        switch pipeline {
+        case .solid:
+            vertexHandle = configuration.handles.vertexShader
+            fragmentHandle = configuration.handles.fragmentShader
+        case .rounded:
+            guard let roundedVertex = configuration.handles.roundedVertexShader,
+                  let roundedFragment =
+                    configuration.handles.roundedFragmentShader
+            else {
+                return .invalidState
+            }
+            vertexHandle = roundedVertex
+            fragmentHandle = roundedFragment
+        }
+        if let rejection = Self.rejection(
+            arena.encodeBindShader(
+                capabilities: configuration.capabilities,
+                stage: .vertex,
+                handle: vertexHandle
+            )
+        ) { return rejection }
+        return Self.rejection(
+            arena.encodeBindShader(
+                capabilities: configuration.capabilities,
+                stage: .fragment,
+                handle: fragmentHandle
+            )
+        )
     }
 
     @_optimize(none)
@@ -948,7 +1227,7 @@ struct VirGLIRCompiler {
     }
 
     @_optimize(none)
-    private func encodeQuadConstants(
+    private func encodeSolidQuadConstants(
         _ quad: GPUQuadInstance,
         transform: GPUTransform2D,
         extent: GPUPixelExtent,
@@ -1001,6 +1280,194 @@ struct VirGLIRCompiler {
         }
     }
 
+    @_optimize(none)
+    private func encodeRoundedQuadConstants(
+        _ quad: GPUQuadInstance,
+        geometry: VirGLIRRoundedGeometry,
+        into arena: inout VirGLDWordArena
+    ) -> VirGLEncodeRejection? {
+        let colorScale = Float(1) / Float(UInt16.max)
+        let color = quad.color
+        var vertexConstants = (
+            geometry.clipBasisXX.bitPattern,
+            geometry.clipBasisXY.bitPattern,
+            geometry.localBasisXX.bitPattern,
+            geometry.localBasisXY.bitPattern,
+            geometry.clipBasisYX.bitPattern,
+            geometry.clipBasisYY.bitPattern,
+            geometry.localBasisYX.bitPattern,
+            geometry.localBasisYY.bitPattern,
+            geometry.clipOriginX.bitPattern,
+            geometry.clipOriginY.bitPattern,
+            geometry.localOriginX.bitPattern,
+            geometry.localOriginY.bitPattern,
+            (Float(color.red) * colorScale).bitPattern,
+            (Float(color.green) * colorScale).bitPattern,
+            (Float(color.blue) * colorScale).bitPattern,
+            (Float(color.alpha) * colorScale).bitPattern
+        )
+        let vertexResult = withUnsafeBytes(of: &vertexConstants) { bytes in
+            arena.encodeSetConstantBuffer(
+                stage: .vertex,
+                index: 0,
+                dwords: bytes.bindMemory(to: UInt32.self)
+            )
+        }
+        if let rejection = Self.rejection(vertexResult) { return rejection }
+
+        let halfWidth = Self.float(quad.bounds.width) * 0.5
+        let halfHeight = Self.float(quad.bounds.height) * 0.5
+        let radii = quad.cornerRadii
+        var fragmentConstants = (
+            halfWidth.bitPattern,
+            halfHeight.bitPattern,
+            UInt32(0),
+            UInt32(0),
+            Self.float(radii.topLeft).bitPattern,
+            Self.float(radii.topRight).bitPattern,
+            Self.float(radii.bottomRight).bitPattern,
+            Self.float(radii.bottomLeft).bitPattern
+        )
+        return withUnsafeBytes(of: &fragmentConstants) { bytes in
+            Self.rejection(
+                arena.encodeSetConstantBuffer(
+                    stage: .fragment,
+                    index: 0,
+                    dwords: bytes.bindMemory(to: UInt32.self)
+                )
+            )
+        }
+    }
+
+    /// Builds a one-target-pixel-padded screen-space primitive and the inverse
+    /// mapping used by the fragment shader to recover the quad's local point.
+    /// Padding keeps the complete derivative-based coverage ramp inside the
+    /// rasterized primitive even for subpixel, rotated, or sheared edges.
+    @_optimize(none)
+    private static func roundedGeometry(
+        _ quad: GPUQuadInstance,
+        transform: GPUTransform2D,
+        extent: GPUPixelExtent
+    ) -> VirGLIRRoundedGeometryResult {
+        let x = Self.double(quad.bounds.x)
+        let y = Self.double(quad.bounds.y)
+        let width = Self.double(quad.bounds.width)
+        let height = Self.double(quad.bounds.height)
+        let endX = x + width
+        let endY = y + height
+
+        let m11 = Self.double(transform.m11)
+        let m12 = Self.double(transform.m12)
+        let m21 = Self.double(transform.m21)
+        let m22 = Self.double(transform.m22)
+        let translationX = Self.double(transform.translationX)
+        let translationY = Self.double(transform.translationY)
+
+        let determinant = m11 * m22 - m21 * m12
+        guard determinant.isFinite else { return .notFinite }
+        guard determinant != 0 else { return .singular }
+
+        let inverse00 = m22 / determinant
+        let inverse01 = -m21 / determinant
+        let inverse10 = -m12 / determinant
+        let inverse11 = m11 / determinant
+        guard inverse00.isFinite, inverse01.isFinite,
+              inverse10.isFinite, inverse11.isFinite
+        else {
+            return .notFinite
+        }
+
+        // The infinity-norm condition estimate is scale invariant: uniform
+        // microscopic transforms stay legal, while cancellation that would
+        // make Float interpolation unreliable fails closed.
+        let transformNorm = Self.maximum(
+            Self.absolute(m11) + Self.absolute(m21),
+            Self.absolute(m12) + Self.absolute(m22)
+        )
+        let inverseNorm = Self.maximum(
+            Self.absolute(inverse00) + Self.absolute(inverse01),
+            Self.absolute(inverse10) + Self.absolute(inverse11)
+        )
+        let condition = transformNorm * inverseNorm
+        guard condition.isFinite else { return .notFinite }
+        guard condition <= Self.maximumRoundedTransformCondition else {
+            return .illConditioned
+        }
+
+        let point00X = m11 * x + m21 * y + translationX
+        let point00Y = m12 * x + m22 * y + translationY
+        let point10X = m11 * endX + m21 * y + translationX
+        let point10Y = m12 * endX + m22 * y + translationY
+        let point01X = m11 * x + m21 * endY + translationX
+        let point01Y = m12 * x + m22 * endY + translationY
+        let point11X = m11 * endX + m21 * endY + translationX
+        let point11Y = m12 * endX + m22 * endY + translationY
+
+        let minimumX = Self.minimum4(
+            point00X, point10X, point01X, point11X
+        ) - 1
+        let minimumY = Self.minimum4(
+            point00Y, point10Y, point01Y, point11Y
+        ) - 1
+        let maximumX = Self.maximum4(
+            point00X, point10X, point01X, point11X
+        ) + 1
+        let maximumY = Self.maximum4(
+            point00Y, point10Y, point01Y, point11Y
+        ) + 1
+        let geometryWidth = maximumX - minimumX
+        let geometryHeight = maximumY - minimumY
+
+        let localDeltaX = minimumX - translationX
+        let localDeltaY = minimumY - translationY
+        let localOriginX = inverse00 * localDeltaX
+            + inverse01 * localDeltaY - x
+        let localOriginY = inverse10 * localDeltaX
+            + inverse11 * localDeltaY - y
+        let localBasisXX = inverse00 * geometryWidth
+        let localBasisXY = inverse10 * geometryWidth
+        let localBasisYX = inverse01 * geometryHeight
+        let localBasisYY = inverse11 * geometryHeight
+
+        let targetWidth = Double(extent.width)
+        let targetHeight = Double(extent.height)
+        let clipBasisXX = (2 * geometryWidth) / targetWidth
+        let clipBasisYY = -(2 * geometryHeight) / targetHeight
+        let clipOriginX = (2 * minimumX) / targetWidth - 1
+        let clipOriginY = 1 - (2 * minimumY) / targetHeight
+
+        let result = VirGLIRRoundedGeometry(
+            clipBasisXX: Float(clipBasisXX),
+            clipBasisXY: 0,
+            localBasisXX: Float(localBasisXX),
+            localBasisXY: Float(localBasisXY),
+            clipBasisYX: 0,
+            clipBasisYY: Float(clipBasisYY),
+            localBasisYX: Float(localBasisYX),
+            localBasisYY: Float(localBasisYY),
+            clipOriginX: Float(clipOriginX),
+            clipOriginY: Float(clipOriginY),
+            localOriginX: Float(localOriginX),
+            localOriginY: Float(localOriginY)
+        )
+        guard result.clipBasisXX.isFinite,
+              result.clipBasisXY.isFinite,
+              result.localBasisXX.isFinite,
+              result.localBasisXY.isFinite,
+              result.clipBasisYX.isFinite,
+              result.clipBasisYY.isFinite,
+              result.localBasisYX.isFinite,
+              result.localBasisYY.isFinite,
+              result.clipOriginX.isFinite,
+              result.clipOriginY.isFinite,
+              result.localOriginX.isFinite,
+              result.localOriginY.isFinite
+        else {
+            return .notFinite
+        }
+        return .accepted(result)
+    }
+
     private static func clearValue(
         _ color: GPUPremultipliedColor
     ) -> VirGLClearValue {
@@ -1020,6 +1487,40 @@ struct VirGLIRCompiler {
 
     private static func float(_ value: GPUFixed16) -> Float {
         Float(value.rawValue) / Float(GPUFixed16.unitRawValue)
+    }
+
+    private static func double(_ value: GPUFixed16) -> Double {
+        Double(value.rawValue) / Double(GPUFixed16.unitRawValue)
+    }
+
+    private static func absolute(_ value: Double) -> Double {
+        value < 0 ? -value : value
+    }
+
+    private static func minimum(_ left: Double, _ right: Double) -> Double {
+        left < right ? left : right
+    }
+
+    private static func maximum(_ left: Double, _ right: Double) -> Double {
+        left > right ? left : right
+    }
+
+    private static func minimum4(
+        _ value0: Double,
+        _ value1: Double,
+        _ value2: Double,
+        _ value3: Double
+    ) -> Double {
+        minimum(minimum(value0, value1), minimum(value2, value3))
+    }
+
+    private static func maximum4(
+        _ value0: Double,
+        _ value1: Double,
+        _ value2: Double,
+        _ value3: Double
+    ) -> Double {
+        maximum(maximum(value0, value1), maximum(value2, value3))
     }
 
     private static func shaderPacketDWordCount(_ text: StaticString) -> Int {

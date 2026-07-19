@@ -5,10 +5,12 @@ struct VirGLIRCompilerTests {
         initializesPipelineTransactionally()
         lowersGPUClearWithoutShaderPipeline()
         lowersTransformedScissoredSolidQuads()
+        lowersAnalyticRoundedQuads()
+        validatesRoundedTransformsAndRollback()
         rejectsUnsupportedDrawsBeforeEncoding()
         rejectsInvalidPassContracts()
         rejectsShortArenaWithoutPartialPublication()
-        print("VirGL IR compiler host tests: 7 groups passed")
+        print("VirGL IR compiler host tests: 9 groups passed")
     }
 
     private static func validatesResourceContracts() {
@@ -24,6 +26,8 @@ struct VirGLIRCompilerTests {
             VirGLIRPipelineHandles(
                 vertexShader: 1,
                 fragmentShader: 1,
+                roundedVertexShader: 8,
+                roundedFragmentShader: 9,
                 vertexElements: 3,
                 rasterizer: 4,
                 depthStencilAlpha: 5,
@@ -32,6 +36,36 @@ struct VirGLIRCompilerTests {
                 unitQuadVertexResource: 8
             ) == nil,
             "duplicate object handles accepted"
+        )
+        expect(
+            VirGLIRPipelineHandles(
+                vertexShader: 1,
+                fragmentShader: 2,
+                roundedVertexShader: 8,
+                roundedFragmentShader: 2,
+                vertexElements: 3,
+                rasterizer: 4,
+                depthStencilAlpha: 5,
+                copyBlend: 6,
+                sourceOverBlend: 7,
+                unitQuadVertexResource: 0x80
+            ) == nil,
+            "rounded shader collision accepted"
+        )
+        expect(
+            VirGLIRPipelineHandles(
+                vertexShader: 1,
+                fragmentShader: 2,
+                roundedVertexShader: 8,
+                roundedFragmentShader: nil,
+                vertexElements: 3,
+                rasterizer: 4,
+                depthStencilAlpha: 5,
+                copyBlend: 6,
+                sourceOverBlend: 7,
+                unitQuadVertexResource: 0x80
+            ) == nil,
+            "incomplete rounded shader pair accepted"
         )
         expect(
             VirGLIRPipelineHandles(
@@ -71,7 +105,7 @@ struct VirGLIRCompilerTests {
 
     private static func initializesPipelineTransactionally() {
         var requiredDWords = 0
-        withArena(capacity: 512) { arena, _ in
+        withArena(capacity: 1024) { arena, _ in
             var compiler = makeCompiler(supportsShaderLink: true)
             let result = compiler.initializePipeline(into: &arena)
             guard case .initialized(let start, let count) = result else {
@@ -83,7 +117,7 @@ struct VirGLIRCompilerTests {
             requiredDWords = count
 
             let starts = packetStarts(arena)
-            expect(starts.count == 8, "pipeline packet count")
+            expect(starts.count == 11, "pipeline packet count")
             expect(packetCommand(arena, starts[0]) == 1, "vertex element create")
             expect(packetObjectType(arena, starts[0]) == 5, "vertex element type")
             expect(packetObjectType(arena, starts[1]) == 2, "rasterizer type")
@@ -92,13 +126,30 @@ struct VirGLIRCompilerTests {
             expect(packetObjectType(arena, starts[4]) == 1, "source blend type")
             expect(packetObjectType(arena, starts[5]) == 4, "vertex shader type")
             expect(packetObjectType(arena, starts[6]) == 4, "fragment shader type")
-            expect(packetCommand(arena, starts[7]) == 52, "shader link command")
+            expect(packetObjectType(arena, starts[7]) == 4, "rounded vertex type")
+            expect(packetObjectType(arena, starts[8]) == 4, "rounded fragment type")
+            expect(packetCommand(arena, starts[9]) == 52, "solid shader link")
+            expect(packetCommand(arena, starts[10]) == 52, "rounded shader link")
 
             expect(arena.dword(at: starts[5] + 2) == 0, "vertex shader stage")
             expect(arena.dword(at: starts[6] + 2) == 1, "fragment shader stage")
+            expect(arena.dword(at: starts[7] + 2) == 0, "rounded vertex stage")
+            expect(arena.dword(at: starts[8] + 2) == 1, "rounded fragment stage")
             expect(arena.dword(at: starts[5] + 4) == 256, "shader token bound")
             expect(shaderTerminalByte(arena, start: starts[5]) == 0, "vertex shader NUL")
             expect(shaderTerminalByte(arena, start: starts[6]) == 0, "fragment shader NUL")
+            expect(
+                shaderTerminalByte(arena, start: starts[7]) == 0,
+                "rounded vertex shader NUL"
+            )
+            expect(
+                shaderTerminalByte(arena, start: starts[8]) == 0,
+                "rounded fragment shader NUL"
+            )
+            expect(arena.dword(at: starts[9] + 1) == 1, "solid link vertex")
+            expect(arena.dword(at: starts[9] + 2) == 2, "solid link fragment")
+            expect(arena.dword(at: starts[10] + 1) == 8, "rounded link vertex")
+            expect(arena.dword(at: starts[10] + 2) == 9, "rounded link fragment")
 
             expect(
                 compiler.initializePipeline(into: &arena)
@@ -192,7 +243,7 @@ struct VirGLIRCompilerTests {
 
     private static func lowersTransformedScissoredSolidQuads() {
         withArena(capacity: 512) { arena, _ in
-            var compiler = makeCompiler()
+            var compiler = makeCompiler(roundedPipeline: false)
             _ = compiler.initializePipeline(into: &arena)
             arena.reset()
 
@@ -285,19 +336,269 @@ struct VirGLIRCompilerTests {
         }
     }
 
-    private static func rejectsUnsupportedDrawsBeforeEncoding() {
-        withArena(capacity: 256) { arena, _ in
+    private static func lowersAnalyticRoundedQuads() {
+        withArena(capacity: 1024) { arena, _ in
             var compiler = makeCompiler()
             _ = compiler.initializePipeline(into: &arena)
             arena.reset()
+
+            let rounded = requireRoundedQuad(
+                x: 10,
+                y: 20,
+                width: 20,
+                height: 12,
+                topLeft: 1,
+                topRight: 2,
+                bottomRight: 3,
+                bottomLeft: 4,
+                color: requireColor(
+                    red: 0x8000,
+                    green: 0x4000,
+                    blue: 0,
+                    alpha: .max
+                )
+            )
+            let buffer = commandBuffer(
+                id: 3,
+                commands: [
+                    .beginRenderPass(pass(width: 100, height: 100)),
+                    .drawQuad(rounded),
+                    .endRenderPass,
+                ]
+            )
+            expect(
+                compiler.lower(
+                    buffer,
+                    renderTarget: renderTarget(width: 100, height: 100),
+                    into: &arena
+                ) == .lowered(
+                    startDWord: 0,
+                    dwordCount: 77,
+                    renderPassCount: 1,
+                    drawCount: 1
+                ),
+                "rounded quad lowering result"
+            )
+
+            expect(arena.dword(at: 22) == 0x0002_001f, "rounded VS bind")
+            expect(arena.dword(at: 23) == 8, "rounded VS handle")
+            expect(arena.dword(at: 25) == 0x0002_001f, "rounded FS bind")
+            expect(arena.dword(at: 26) == 9, "rounded FS handle")
+            expect(arena.dword(at: 32) == 0x0001_0102, "rounded blend bind")
+            expect(arena.dword(at: 33) == 7, "rounded source-over handle")
+            expect(arena.dword(at: 34) == 0x0012_000c, "rounded VS constants")
+
+            // Identity maps the 20x12 local rect at (10,20) to a 22x14
+            // screen AABB padded by one target pixel on every side.
+            expectClose(floatDWord(arena, 37), 0.44, "rounded clip basis x")
+            expectClose(floatDWord(arena, 38), 0, "rounded clip basis xy")
+            expectClose(floatDWord(arena, 39), 22, "rounded local basis x")
+            expectClose(floatDWord(arena, 40), 0, "rounded local basis xy")
+            expectClose(floatDWord(arena, 41), 0, "rounded clip basis yx")
+            expectClose(floatDWord(arena, 42), -0.28, "rounded clip basis y")
+            expectClose(floatDWord(arena, 43), 0, "rounded local basis yx")
+            expectClose(floatDWord(arena, 44), 14, "rounded local basis y")
+            expectClose(floatDWord(arena, 45), -0.82, "rounded clip origin x")
+            expectClose(floatDWord(arena, 46), 0.62, "rounded clip origin y")
+            expectClose(floatDWord(arena, 47), -1, "rounded local origin x")
+            expectClose(floatDWord(arena, 48), -1, "rounded local origin y")
+
+            expect(arena.dword(at: 53) == 0x000a_000c, "rounded FS constants")
+            expect(arena.dword(at: 54) == 1, "fragment constant stage")
+            expectClose(floatDWord(arena, 56), 10, "rounded half width")
+            expectClose(floatDWord(arena, 57), 6, "rounded half height")
+            expectClose(floatDWord(arena, 60), 1, "top-left radius")
+            expectClose(floatDWord(arena, 61), 2, "top-right radius")
+            expectClose(floatDWord(arena, 62), 3, "bottom-right radius")
+            expectClose(floatDWord(arena, 63), 4, "bottom-left radius")
+            expect(arena.dword(at: 64) == 0x000c_0008, "rounded draw")
+        }
+
+        withArena(capacity: 1024) { arena, _ in
+            var compiler = makeCompiler()
+            _ = compiler.initializePipeline(into: &arena)
+            arena.reset()
+            let solid = requireQuad()
+            let rounded = requireRoundedQuad()
+            let buffer = commandBuffer(
+                id: 4,
+                commands: [
+                    .beginRenderPass(pass(width: 100, height: 100)),
+                    .drawQuad(solid),
+                    .drawQuad(rounded),
+                    .drawQuad(rounded),
+                    .drawQuad(solid),
+                    .endRenderPass,
+                ]
+            )
+            expect(
+                compiler.lower(
+                    buffer,
+                    renderTarget: renderTarget(width: 100, height: 100),
+                    into: &arena
+                ) == .lowered(
+                    startDWord: 0,
+                    dwordCount: 196,
+                    renderPassCount: 1,
+                    drawCount: 4
+                ),
+                "solid/rounded shader switching"
+            )
+            var shaderHandles: [UInt32] = []
+            for start in packetStarts(arena) where packetCommand(arena, start) == 31 {
+                shaderHandles.append(requireDWord(arena, start + 1))
+            }
+            expect(
+                shaderHandles == [1, 2, 8, 9, 1, 2],
+                "redundant or missing shader-pair bind"
+            )
+        }
+    }
+
+    private static func validatesRoundedTransformsAndRollback() {
+        withArena(capacity: 1024) { arena, _ in
+            var compiler = makeCompiler()
+            _ = compiler.initializePipeline(into: &arena)
+            arena.reset()
+            let rotation = transform(
+                m11: 0,
+                m12: 1,
+                m21: -1,
+                m22: 0,
+                translationX: 100,
+                translationY: 0
+            )
+            let buffer = commandBuffer(
+                id: 5,
+                commands: [
+                    .beginRenderPass(pass(width: 200, height: 200)),
+                    .setTransform(rotation),
+                    .drawQuad(
+                        requireRoundedQuad(
+                            x: 10,
+                            y: 20,
+                            width: 20,
+                            height: 12
+                        )
+                    ),
+                    .endRenderPass,
+                ]
+            )
+            expect(
+                compiler.lower(
+                    buffer,
+                    renderTarget: renderTarget(width: 200, height: 200),
+                    into: &arena
+                ) == .lowered(
+                    startDWord: 0,
+                    dwordCount: 77,
+                    renderPassCount: 1,
+                    drawCount: 1
+                ),
+                "rotated rounded quad"
+            )
+            expectClose(floatDWord(arena, 37), 0.14, "rotated clip basis x")
+            expectClose(floatDWord(arena, 39), 0, "rotated local x basis x")
+            expectClose(floatDWord(arena, 40), -14, "rotated local x basis y")
+            expectClose(floatDWord(arena, 42), -0.22, "rotated clip basis y")
+            expectClose(floatDWord(arena, 43), 22, "rotated local y basis x")
+            expectClose(floatDWord(arena, 44), 0, "rotated local y basis y")
+            expectClose(floatDWord(arena, 45), -0.33, "rotated clip origin x")
+            expectClose(floatDWord(arena, 46), 0.91, "rotated clip origin y")
+            expectClose(floatDWord(arena, 47), -1, "rotated local origin x")
+            expectClose(floatDWord(arena, 48), 13, "rotated local origin y")
+        }
+
+        var compiler = makeCompiler()
+        withArena(capacity: 1024) { arena, _ in
+            _ = compiler.initializePipeline(into: &arena)
+        }
+        withArena(capacity: 256) { arena, _ in
             appendTestClear(to: &arena)
             let originalCount = arena.dwordCount
             let originalPrefix = (0..<originalCount).map {
                 requireDWord(arena, $0)
             }
 
+            let singular = commandBuffer(
+                id: 6,
+                commands: [
+                    .beginRenderPass(pass(width: 100, height: 100)),
+                    .setTransform(
+                        transform(
+                            m11: 1,
+                            m12: 2,
+                            m21: 0,
+                            m22: 0
+                        )
+                    ),
+                    .drawQuad(requireRoundedQuad()),
+                    .endRenderPass,
+                ]
+            )
+            expect(
+                compiler.lower(
+                    singular,
+                    renderTarget: renderTarget(width: 100, height: 100),
+                    into: &arena
+                ) == .rejected(.roundedTransformSingular(commandIndex: 2)),
+                "singular rounded transform"
+            )
+
+            let illConditioned = commandBuffer(
+                id: 7,
+                commands: [
+                    .beginRenderPass(pass(width: 100, height: 100)),
+                    .setTransform(
+                        transform(
+                            m11: 1,
+                            m12: 0,
+                            m21: 4096,
+                            m22: 1
+                        )
+                    ),
+                    .drawQuad(requireRoundedQuad()),
+                    .endRenderPass,
+                ]
+            )
+            expect(
+                compiler.lower(
+                    illConditioned,
+                    renderTarget: renderTarget(width: 100, height: 100),
+                    into: &arena
+                ) == .rejected(
+                    .roundedTransformIllConditioned(commandIndex: 2)
+                ),
+                "ill-conditioned rounded transform"
+            )
+
+            let copy = commandBuffer(
+                id: 8,
+                commands: [
+                    .beginRenderPass(pass(width: 100, height: 100)),
+                    .drawQuad(requireRoundedQuad(blend: .copy)),
+                    .endRenderPass,
+                ]
+            )
+            expect(
+                compiler.lower(
+                    copy,
+                    renderTarget: renderTarget(width: 100, height: 100),
+                    into: &arena
+                ) == .rejected(.roundedCopyUnsupported(commandIndex: 1)),
+                "rounded copy blend"
+            )
+            expect(arena.dwordCount == originalCount, "rounded rejection cursor")
+            expect(
+                (0..<originalCount).map { requireDWord(arena, $0) }
+                    == originalPrefix,
+                "rounded rejection changed prefix"
+            )
+        }
+
+        withArena(capacity: 76) { arena, storage in
             let rounded = commandBuffer(
-                id: 3,
+                id: 9,
                 commands: [
                     .beginRenderPass(pass(width: 100, height: 100)),
                     .drawQuad(requireRoundedQuad()),
@@ -309,18 +610,57 @@ struct VirGLIRCompilerTests {
                     rounded,
                     renderTarget: renderTarget(width: 100, height: 100),
                     into: &arena
-                ) == .rejected(.roundedQuadUnsupported(commandIndex: 1)),
-                "rounded quad exact rejection"
+                ) == .rejected(
+                    .capacityExhausted(
+                        requiredDWords: 77,
+                        availableDWords: 76
+                    )
+                ),
+                "short rounded arena"
             )
-            expect(arena.dwordCount == originalCount, "rounded rejection cursor")
+            expect(arena.dwordCount == 0, "short rounded cursor")
+            expect(storage[0] == 0xa5a5_a5a5, "short rounded touched storage")
+        }
+
+        withArena(capacity: 512) { arena, _ in
+            var solidOnly = makeCompiler(roundedPipeline: false)
+            _ = solidOnly.initializePipeline(into: &arena)
+            arena.reset()
+            let rounded = commandBuffer(
+                id: 10,
+                commands: [
+                    .beginRenderPass(pass(width: 100, height: 100)),
+                    .drawQuad(requireRoundedQuad()),
+                    .endRenderPass,
+                ]
+            )
             expect(
-                (0..<originalCount).map { requireDWord(arena, $0) }
-                    == originalPrefix,
-                "rounded rejection changed prefix"
+                solidOnly.lower(
+                    rounded,
+                    renderTarget: renderTarget(width: 100, height: 100),
+                    into: &arena
+                ) == .rejected(
+                    .roundedPipelineUnavailable(commandIndex: 1)
+                ),
+                "solid-only rounded pipeline"
             )
+            expect(arena.dwordCount == 0, "solid-only rounded cursor")
+        }
+    }
+
+    private static func rejectsUnsupportedDrawsBeforeEncoding() {
+        withArena(capacity: 256) { arena, _ in
+            var compiler = makeCompiler(roundedPipeline: false)
+            _ = compiler.initializePipeline(into: &arena)
+            arena.reset()
+            appendTestClear(to: &arena)
+            let originalCount = arena.dwordCount
+            let originalPrefix = (0..<originalCount).map {
+                requireDWord(arena, $0)
+            }
 
             let glyph = commandBuffer(
-                id: 4,
+                id: 3,
                 commands: [
                     .beginRenderPass(pass(width: 100, height: 100)),
                     .drawGlyph(requireGlyph()),
@@ -336,6 +676,11 @@ struct VirGLIRCompilerTests {
                 "glyph exact rejection"
             )
             expect(arena.dwordCount == originalCount, "glyph rejection cursor")
+            expect(
+                (0..<originalCount).map { requireDWord(arena, $0) }
+                    == originalPrefix,
+                "glyph rejection changed prefix"
+            )
         }
 
         withArena(capacity: 128) { arena, _ in
@@ -462,6 +807,18 @@ struct VirGLIRCompilerTests {
                 ) == .rejected(.surfaceHandleCollision(commandIndex: 0)),
                 "surface/pipeline handle collision accepted"
             )
+            expect(
+                compiler.lower(
+                    base,
+                    renderTarget: renderTarget(
+                        width: 20,
+                        height: 10,
+                        surfaceHandle: 8
+                    ),
+                    into: &arena
+                ) == .rejected(.surfaceHandleCollision(commandIndex: 0)),
+                "surface/rounded-shader handle collision accepted"
+            )
 
             let discard = commandBuffer(
                 id: 8,
@@ -540,7 +897,8 @@ struct VirGLIRCompilerTests {
 
     private static func makeCompiler(
         explicitShaderBinding: Bool = true,
-        supportsShaderLink: Bool = false
+        supportsShaderLink: Bool = false,
+        roundedPipeline: Bool = true
     ) -> VirGLIRCompiler {
         let caps = VirGLContextCapabilities(
             capsetID: explicitShaderBinding ? 2 : 1,
@@ -553,6 +911,8 @@ struct VirGLIRCompilerTests {
         guard let handles = VirGLIRPipelineHandles(
             vertexShader: 1,
             fragmentShader: 2,
+            roundedVertexShader: roundedPipeline ? 8 : nil,
+            roundedFragmentShader: roundedPipeline ? 9 : nil,
             vertexElements: 3,
             rasterizer: 4,
             depthStencilAlpha: 5,
@@ -653,6 +1013,24 @@ struct VirGLIRCompilerTests {
         return result
     }
 
+    private static func transform(
+        m11: Int,
+        m12: Int,
+        m21: Int,
+        m22: Int,
+        translationX: Int = 0,
+        translationY: Int = 0
+    ) -> GPUTransform2D {
+        GPUTransform2D(
+            m11: fixed(m11),
+            m12: fixed(m12),
+            m21: fixed(m21),
+            m22: fixed(m22),
+            translationX: fixed(translationX),
+            translationY: fixed(translationY)
+        )
+    }
+
     private static func fixedRectangle(
         x: Int,
         y: Int,
@@ -705,12 +1083,34 @@ struct VirGLIRCompilerTests {
         return result
     }
 
-    private static func requireRoundedQuad() -> GPUQuadInstance {
-        guard let radii = GPUCornerRadii.uniform(fixed(2)),
+    private static func requireRoundedQuad(
+        x: Int = 0,
+        y: Int = 0,
+        width: Int = 10,
+        height: Int = 10,
+        topLeft: Int = 2,
+        topRight: Int = 2,
+        bottomRight: Int = 2,
+        bottomLeft: Int = 2,
+        color: GPUPremultipliedColor = .opaqueWhite,
+        blend: GPUBlendMode = .sourceOver
+    ) -> GPUQuadInstance {
+        guard let radii = GPUCornerRadii(
+                  topLeft: fixed(topLeft),
+                  topRight: fixed(topRight),
+                  bottomRight: fixed(bottomRight),
+                  bottomLeft: fixed(bottomLeft)
+              ),
               let result = GPUQuadInstance(
-                  bounds: fixedRectangle(x: 0, y: 0, width: 10, height: 10),
-                  color: .opaqueWhite,
-                  cornerRadii: radii
+                  bounds: fixedRectangle(
+                      x: x,
+                      y: y,
+                      width: width,
+                      height: height
+                  ),
+                  color: color,
+                  cornerRadii: radii,
+                  blendMode: blend
               )
         else {
             fatalError("test rounded quad")
