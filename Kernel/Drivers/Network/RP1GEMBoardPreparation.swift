@@ -109,6 +109,7 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
 {
     private let resources: RP1GEMBoardResources
     private var access: Access
+    private var isPrepared = false
 
     init(resources: RP1GEMBoardResources, access: Access) {
         self.resources = resources
@@ -118,6 +119,8 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
     mutating func prepareRP1Ethernet(
         maximumPollCount: UInt64
     ) -> CadenceGEMBoardPreparationResult {
+        if isPrepared { return .ready }
+
         guard maximumPollCount > 0,
               Self.valid(resources: resources)
         else {
@@ -134,7 +137,10 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
             return .failed
         }
 
-        guard let reset = resources.phyReset else { return .ready }
+        guard let reset = resources.phyReset else {
+            isPrepared = true
+            return .ready
+        }
         guard let gpio = Self.resetGPIOAddresses(for: reset) else {
             return .failed
         }
@@ -169,6 +175,7 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
         else {
             return .failed
         }
+        isPrepared = true
         return .ready
     }
 

@@ -226,8 +226,9 @@ struct RP1GEMBoardPreparationTests {
         resetsActiveHighGPIO53AndMapsEveryBankBoundary()
         rejectsMalformedResourcesBeforeTouchingHardware()
         reportsReadbackAndBoundedCounterFailures()
+        preparesExactlyOnceAndRetriesIncompleteAttempts()
         exercisesConcreteMMIOAccess()
-        print("RP1 GEM board preparation: 6 groups passed")
+        print("RP1 GEM board preparation: 7 groups passed")
     }
 
     private static func enablesExactClocksAndPreservesFields() {
@@ -583,6 +584,83 @@ struct RP1GEMBoardPreparationTests {
                 preparation.prepareRP1Ethernet(maximumPollCount: 3) == .failed
                     && count(.spin, in: access.events) == 0,
                 "invalid architectural-counter frequency was not rejected"
+            )
+        }
+    }
+
+    private static func preparesExactlyOnceAndRetriesIncompleteAttempts() {
+        do {
+            let access = resetAccess(line: 32)
+            var preparation = RP1GEMBoardPreparation(
+                resources: makeResources(
+                    resetLine: 32,
+                    durationMilliseconds: 1
+                ),
+                access: access
+            )
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 2) == .ready,
+                "first board preparation did not complete"
+            )
+            let completedEvents = access.events
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 0) == .ready
+                    && access.events == completedEvents,
+                "completed board preparation touched hardware a second time"
+            )
+        }
+
+        do {
+            let access = TestBoardAccess()
+            let ethernet = UInt(TestAddress.clocks + 0x064)
+            access.forcedReadValues[ethernet] = 0
+            var preparation = RP1GEMBoardPreparation(
+                resources: makeResources(resetLine: nil),
+                access: access
+            )
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 2) == .failed,
+                "clock readback failure did not fail preparation"
+            )
+            let failedEventCount = access.events.count
+            access.forcedReadValues[ethernet] = nil
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 2) == .ready
+                    && access.events.count > failedEventCount,
+                "failed board preparation was incorrectly latched ready"
+            )
+        }
+
+        do {
+            let access = resetAccess(line: 32)
+            access.counterAdvancePerSpin = 0
+            var preparation = RP1GEMBoardPreparation(
+                resources: makeResources(
+                    resetLine: 32,
+                    durationMilliseconds: 1
+                ),
+                access: access
+            )
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 1)
+                    == .timedOut,
+                "stopped counter did not time out preparation"
+            )
+            let gpio = gpioMap(line: 32)
+            expect(
+                access.registers[gpio.output, default: 0] & gpio.mask == 0,
+                "timed-out active-low reset was not left asserted"
+            )
+            let timedOutEventCount = access.events.count
+            access.counterAdvancePerSpin = 1
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 2) == .ready
+                    && access.events.count > timedOutEventCount,
+                "timed-out board preparation was incorrectly latched ready"
+            )
+            expect(
+                access.registers[gpio.output, default: 0] & gpio.mask != 0,
+                "successful retry did not deassert active-low reset"
             )
         }
     }
