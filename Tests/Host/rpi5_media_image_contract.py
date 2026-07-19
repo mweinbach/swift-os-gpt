@@ -93,6 +93,76 @@ def read_mbr(image: Path) -> tuple[bytes, tuple[int, int], tuple[int, int]]:
     return mbr, boot, data
 
 
+def fat32_entry_cluster(entry: bytes) -> int:
+    return (struct.unpack_from("<H", entry, 20)[0] << 16) | struct.unpack_from(
+        "<H", entry, 26
+    )[0]
+
+
+def require_root_child_parent_sentinel(
+    image: Path,
+    boot: tuple[int, int],
+    child_short_name: bytes,
+) -> None:
+    """Require FAT32's zero `..` sentinel for a root-owned directory."""
+
+    with image.open("rb") as source:
+        boot_offset = boot[0] * 512
+        source.seek(boot_offset)
+        bpb = source.read(512)
+        require(len(bpb) == 512, "FAT32 boot sector is truncated")
+        sectors_per_cluster = bpb[13]
+        reserved = struct.unpack_from("<H", bpb, 14)[0]
+        fat_count = bpb[16]
+        fat_sectors = struct.unpack_from("<I", bpb, 36)[0]
+        root_cluster = struct.unpack_from("<I", bpb, 44)[0]
+        data_start = boot[0] + reserved + fat_count * fat_sectors
+        fat_start = (boot[0] + reserved) * 512
+
+        def cluster_bytes(cluster: int) -> bytes:
+            sector = data_start + (cluster - 2) * sectors_per_cluster
+            source.seek(sector * 512)
+            return source.read(sectors_per_cluster * 512)
+
+        def directory_chain(first_cluster: int) -> bytes:
+            output = bytearray()
+            visited: set[int] = set()
+            cluster = first_cluster
+            while cluster < 0x0FFF_FFF8:
+                require(cluster >= 2 and cluster not in visited,
+                        "directory FAT chain is invalid")
+                visited.add(cluster)
+                output += cluster_bytes(cluster)
+                source.seek(fat_start + cluster * 4)
+                encoded = source.read(4)
+                require(len(encoded) == 4, "directory FAT entry is truncated")
+                cluster = struct.unpack("<I", encoded)[0] & 0x0FFF_FFFF
+            return bytes(output)
+
+        root = directory_chain(root_cluster)
+        child_cluster: int | None = None
+        for offset in range(0, len(root), 32):
+            entry = root[offset:offset + 32]
+            if len(entry) != 32 or entry[0] == 0:
+                break
+            if entry[0] == 0xE5 or entry[11] == 0x0F:
+                continue
+            if entry[:11] == child_short_name and entry[11] & 0x10:
+                child_cluster = fat32_entry_cluster(entry)
+                break
+        require(child_cluster is not None, "root child directory is missing")
+
+        child = directory_chain(child_cluster)
+        dot = child[:32]
+        dotdot = child[32:64]
+        require(dot[:11] == b".          ", "child '.' entry is malformed")
+        require(dotdot[:11] == b"..         ", "child '..' entry is malformed")
+        require(fat32_entry_cluster(dot) == child_cluster,
+                "child '.' entry does not reference itself")
+        require(fat32_entry_cluster(dotdot) == 0,
+                "root-owned child '..' must use FAT32 cluster-zero sentinel")
+
+
 def valid_record(sequence: int, timestamp: int, payload: bytes) -> bytes:
     block = bytearray(512)
     block[:8] = b"SWLOG001"
@@ -122,6 +192,7 @@ def main() -> int:
         _, boot, data = read_mbr(first)
         require(boot == (2_048, 131_072), "boot partition LBA extent changed")
         require(data == (133_120, 63_488), "data partition LBA extent changed")
+        require_root_child_parent_sentinel(first, boot, b"OVERLAYS   ")
 
         report = inspect(first)
         boot_files = report["boot_files"]

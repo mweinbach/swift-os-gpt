@@ -384,7 +384,7 @@ class FAT32Volume:
             output += self._dot_entry(b".", directory.clusters[0])
             parent_cluster = (
                 directory.parent.clusters[0]
-                if directory.parent.parent is not None else self.root_cluster
+                if directory.parent.parent is not None else 0
             )
             output += self._dot_entry(b"..", parent_cluster)
         for node in sorted(directory.children, key=lambda item: item.name):
