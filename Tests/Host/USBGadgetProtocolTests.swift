@@ -8,8 +8,9 @@ struct USBGadgetProtocolTests {
         testDeferredAddressAndConfigurationState()
         testStatusAndFeatureHandling()
         testInterfaceAndCDCControlRequests()
+        testTransactionalMutationAbortPaths()
         testPreciseRejectionsAndReset()
-        print("USB gadget protocol host tests: 8 groups passed")
+        print("USB gadget protocol host tests: 9 groups passed")
     }
 
     private static func testTypedSetupPacketParsing() {
@@ -293,6 +294,14 @@ struct USBGadgetProtocolTests {
                 "SET_CONFIGURATION one"
             )
             expect(
+                endpoint.state == .addressed && endpoint.configurationValue == 0,
+                "configuration took effect before status stage"
+            )
+            expect(
+                endpoint.completeStatusStage(succeeded: true) == .none,
+                "configuration commit result"
+            )
+            expect(
                 endpoint.state == .configured && endpoint.configurationValue == 1,
                 "configured state"
             )
@@ -307,6 +316,11 @@ struct USBGadgetProtocolTests {
                     reply: reply
                 ) == .statusIn,
                 "deconfigure"
+            )
+            expect(endpoint.state == .configured, "deconfigured before status stage")
+            expect(
+                endpoint.completeStatusStage(succeeded: true) == .none,
+                "deconfiguration commit result"
             )
             expect(endpoint.state == .addressed, "deconfigure state")
 
@@ -330,12 +344,14 @@ struct USBGadgetProtocolTests {
         withBuffer(byteCount: 16) { reply in
             expect(
                 endpoint.handle(
-                    setup(type: 0x02, request: 3, index: 0x83),
+                    setup(type: 0x02, request: 3, index: 0x82),
                     reply: reply
                 ) == .statusIn,
-                "precondition debug endpoint halt"
+                "precondition CDC endpoint halt"
             )
-            expect(endpoint.isEndpointHalted(0x83), "precondition halt state")
+            expect(!endpoint.isEndpointHalted(0x82), "halt committed before status")
+            _ = endpoint.completeStatusStage(succeeded: true)
+            expect(endpoint.isEndpointHalted(0x82), "precondition halt state")
             expect(
                 endpoint.handle(
                     setup(type: 0x00, request: 3, value: 1),
@@ -371,6 +387,11 @@ struct USBGadgetProtocolTests {
                 "SET_FEATURE endpoint halt"
             )
             expect(
+                !endpoint.isEndpointHalted(UInt8(endpointAddress)),
+                "endpoint halt committed before status"
+            )
+            _ = endpoint.completeStatusStage(succeeded: true)
+            expect(
                 endpoint.isEndpointHalted(UInt8(endpointAddress)),
                 "endpoint halt state"
             )
@@ -389,6 +410,11 @@ struct USBGadgetProtocolTests {
                 ) == .statusIn,
                 "CLEAR_FEATURE endpoint halt"
             )
+            expect(
+                endpoint.isEndpointHalted(UInt8(endpointAddress)),
+                "endpoint halt cleared before status"
+            )
+            _ = endpoint.completeStatusStage(succeeded: true)
             expect(!endpoint.isEndpointHalted(UInt8(endpointAddress)), "halt clear")
 
             expect(
@@ -407,6 +433,15 @@ struct USBGadgetProtocolTests {
         withBuffer(byteCount: 16) { reply in
             expect(
                 endpoint.handle(
+                    setup(type: 0x02, request: 3, index: 0x83),
+                    reply: reply
+                ) == .statusIn,
+                "SET_INTERFACE halt precondition"
+            )
+            _ = endpoint.completeStatusStage(succeeded: true)
+            expect(endpoint.isEndpointHalted(0x83), "SET_INTERFACE halt state")
+            expect(
+                endpoint.handle(
                     setup(type: 0x81, request: 10, index: 2, length: 1),
                     reply: reply
                 ) == .dataIn(byteCount: 1),
@@ -420,6 +455,11 @@ struct USBGadgetProtocolTests {
                 ) == .statusIn,
                 "SET_INTERFACE zero"
             )
+            expect(
+                endpoint.isEndpointHalted(0x83),
+                "SET_INTERFACE cleared halt before status"
+            )
+            _ = endpoint.completeStatusStage(succeeded: true)
             expect(
                 !endpoint.isEndpointHalted(0x83),
                 "SET_INTERFACE did not reset interface halt state"
@@ -439,6 +479,11 @@ struct USBGadgetProtocolTests {
                     "CDC SET_LINE_CODING data"
                 )
             }
+            expect(
+                endpoint.lineCoding == .consoleDefault,
+                "line coding committed before status"
+            )
+            _ = endpoint.completeStatusStage(succeeded: true)
             expect(
                 endpoint.lineCoding == USBLineCoding(
                     dataRate: 921_600,
@@ -464,6 +509,8 @@ struct USBGadgetProtocolTests {
                 ) == .statusIn,
                 "CDC SET_CONTROL_LINE_STATE"
             )
+            expect(endpoint.controlLineState == 0, "control lines committed before status")
+            _ = endpoint.completeStatusStage(succeeded: true)
             expect(endpoint.controlLineState == 3, "DTR and RTS state")
             expect(
                 endpoint.handle(
@@ -472,7 +519,162 @@ struct USBGadgetProtocolTests {
                 ) == .statusIn,
                 "CDC SEND_BREAK"
             )
+            expect(endpoint.breakDuration == 0, "break committed before status")
+            _ = endpoint.completeStatusStage(succeeded: true)
             expect(endpoint.breakDuration == 250, "break duration")
+        }
+    }
+
+    private static func testTransactionalMutationAbortPaths() {
+        var endpoint = configuredEndpoint()
+        withBuffer(byteCount: 16) { reply in
+            expect(
+                endpoint.handle(
+                    setup(type: 0x00, request: 9, value: 0),
+                    reply: reply
+                ) == .statusIn,
+                "failed deconfiguration setup"
+            )
+            expect(
+                endpoint.completeStatusStage(succeeded: false) == .none,
+                "failed deconfiguration commit result"
+            )
+            expect(
+                endpoint.state == .configured && endpoint.configurationValue == 1,
+                "failed status committed deconfiguration"
+            )
+
+            expect(
+                endpoint.handle(
+                    setup(type: 0x02, request: 3, index: 0x83),
+                    reply: reply
+                ) == .statusIn,
+                "aborted endpoint halt setup"
+            )
+            _ = endpoint.handle(
+                setup(type: 0x80, request: 8, length: 1),
+                reply: reply
+            )
+            expect(
+                endpoint.completeStatusStage(succeeded: true) == .none,
+                "superseded endpoint halt commit result"
+            )
+            expect(!endpoint.isEndpointHalted(0x83), "superseded halt committed")
+
+            expect(
+                endpoint.handle(
+                    setup(type: 0x02, request: 3, index: 0x83),
+                    reply: reply
+                ) == .statusIn,
+                "failed halt-clear precondition setup"
+            )
+            _ = endpoint.completeStatusStage(succeeded: true)
+            expect(endpoint.isEndpointHalted(0x83), "failed halt-clear precondition")
+            expect(
+                endpoint.handle(
+                    setup(type: 0x02, request: 1, index: 0x83),
+                    reply: reply
+                ) == .statusIn,
+                "failed halt-clear setup"
+            )
+            _ = endpoint.completeStatusStage(succeeded: false)
+            expect(endpoint.isEndpointHalted(0x83), "failed status cleared halt")
+
+            expect(
+                endpoint.handle(
+                    setup(type: 0x21, request: 0x22, value: 1, index: 0),
+                    reply: reply
+                ) == .statusIn,
+                "failed control-line setup"
+            )
+            _ = endpoint.completeStatusStage(succeeded: false)
+            expect(endpoint.controlLineState == 0, "failed DTR status committed")
+
+            expect(
+                endpoint.handle(
+                    setup(type: 0x21, request: 0x23, value: 400, index: 0),
+                    reply: reply
+                ) == .statusIn,
+                "superseded break setup"
+            )
+            _ = endpoint.handle(
+                setup(type: 0xa1, request: 0x21, index: 0, length: 7),
+                reply: reply
+            )
+            _ = endpoint.completeStatusStage(succeeded: true)
+            expect(endpoint.breakDuration == 0, "superseded break committed")
+
+            let lineBytes: [UInt8] = [0x00, 0x10, 0x0e, 0, 0, 0, 8]
+            expect(
+                endpoint.handle(
+                    setup(type: 0x21, request: 0x20, index: 0, length: 7),
+                    reply: reply
+                ) == .dataOut(expectedByteCount: 7),
+                "failed line-coding setup"
+            )
+            lineBytes.withUnsafeBytes { bytes in
+                expect(
+                    endpoint.acceptDataOut(bytes) == .statusIn,
+                    "failed line-coding data"
+                )
+            }
+            _ = endpoint.completeStatusStage(succeeded: false)
+            expect(endpoint.lineCoding == .consoleDefault, "failed line coding committed")
+
+            expect(
+                endpoint.handle(
+                    setup(type: 0x21, request: 0x20, index: 0, length: 7),
+                    reply: reply
+                ) == .dataOut(expectedByteCount: 7),
+                "superseded line-coding setup"
+            )
+            lineBytes.withUnsafeBytes { bytes in
+                expect(
+                    endpoint.acceptDataOut(bytes) == .statusIn,
+                    "superseded line-coding data"
+                )
+            }
+            _ = endpoint.handle(
+                setup(type: 0x80, request: 8, length: 1),
+                reply: reply
+            )
+            _ = endpoint.completeStatusStage(succeeded: true)
+            expect(
+                endpoint.lineCoding == .consoleDefault,
+                "superseded valid line coding committed"
+            )
+
+            expect(
+                endpoint.handle(
+                    setup(type: 0x02, request: 3, index: 0x83),
+                    reply: reply
+                ) == .statusIn,
+                "SET_INTERFACE precondition halt"
+            )
+            _ = endpoint.completeStatusStage(succeeded: true)
+            expect(
+                endpoint.handle(
+                    setup(type: 0x01, request: 11, value: 0, index: 2),
+                    reply: reply
+                ) == .statusIn,
+                "failed SET_INTERFACE setup"
+            )
+            _ = endpoint.completeStatusStage(succeeded: false)
+            expect(endpoint.isEndpointHalted(0x83), "failed SET_INTERFACE cleared halt")
+
+            expect(
+                endpoint.handle(
+                    setup(type: 0x21, request: 0x22, value: 1, index: 0),
+                    reply: reply
+                ) == .statusIn,
+                "reset-aborted control-line setup"
+            )
+            endpoint.busReset()
+            expect(
+                endpoint.completeStatusStage(succeeded: true) == .none,
+                "bus-reset control-line commit result"
+            )
+            expect(endpoint.controlLineState == 0, "bus reset committed pending DTR")
         }
     }
 
@@ -608,6 +810,10 @@ struct USBGadgetProtocolTests {
                     reply: reply
                 ) == .statusIn,
                 "test enumeration configuration"
+            )
+            expect(
+                endpoint.completeStatusStage(succeeded: true) == .none,
+                "test enumeration configuration commit"
             )
         }
         return endpoint

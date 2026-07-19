@@ -144,6 +144,8 @@ enum USBControlAction: Equatable {
 }
 
 enum USBControlStatusCommit: Equatable {
+    /// No controller register write is required. Protocol-visible state may
+    /// still have committed and should be synchronized after status succeeds.
     case none
     /// Program the controller's device-address register only after returning
     /// this commit from a successfully transmitted status stage.

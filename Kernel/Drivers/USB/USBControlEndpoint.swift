@@ -54,9 +54,19 @@ struct USBLineCoding: Equatable {
 }
 
 struct USBControlEndpoint {
-    private enum PendingDataOut {
+    /// At most one host-to-device mutation may be in flight. A new SETUP token,
+    /// a failed status stage, or a bus reset discards it without changing the
+    /// externally visible Chapter 9 / CDC state.
+    private enum PendingMutation {
         case none
-        case cdcLineCoding
+        case deviceAddress(UInt8)
+        case configuration(UInt8)
+        case endpointHalt(bit: UInt8, enabled: Bool)
+        case interfaceEndpointHaltClear(mask: UInt8)
+        case awaitingCDCLineCoding
+        case lineCoding(USBLineCoding)
+        case controlLineState(UInt16)
+        case breakDuration(UInt16)
     }
 
     let speed: USBDeviceSpeed
@@ -69,8 +79,7 @@ struct USBControlEndpoint {
     private(set) var breakDuration: UInt16 = 0
 
     private var endpointHaltMask: UInt8 = 0
-    private var pendingAddress: UInt8?
-    private var pendingDataOut: PendingDataOut = .none
+    private var pendingMutation: PendingMutation = .none
 
     init(speed: USBDeviceSpeed) {
         self.speed = speed
@@ -82,8 +91,7 @@ struct USBControlEndpoint {
         configurationValue = 0
         remoteWakeupEnabled = false
         endpointHaltMask = 0
-        pendingAddress = nil
-        pendingDataOut = .none
+        pendingMutation = .none
         lineCoding = .consoleDefault
         controlLineState = 0
         breakDuration = 0
@@ -94,8 +102,7 @@ struct USBControlEndpoint {
         reply: UnsafeMutableRawBufferPointer
     ) -> USBControlAction {
         // A new SETUP token aborts any older control transfer.
-        pendingAddress = nil
-        pendingDataOut = .none
+        pendingMutation = .none
 
         switch setup.requestType.kind {
         case .standard:
@@ -110,31 +117,67 @@ struct USBControlEndpoint {
     mutating func acceptDataOut(
         _ bytes: UnsafeRawBufferPointer
     ) -> USBControlAction {
-        switch pendingDataOut {
+        switch pendingMutation {
         case .none:
             return .stall(.unexpectedDataOut)
-        case .cdcLineCoding:
-            pendingDataOut = .none
+        case .awaitingCDCLineCoding:
             guard let coding = USBLineCoding.parse(bytes) else {
+                pendingMutation = .none
                 return .stall(.malformedClassData)
             }
-            lineCoding = coding
+            pendingMutation = .lineCoding(coding)
             return .statusIn
+        case .deviceAddress, .configuration, .endpointHalt,
+             .interfaceEndpointHaltClear, .lineCoding,
+             .controlLineState, .breakDuration:
+            pendingMutation = .none
+            return .stall(.unexpectedDataOut)
         }
     }
 
     mutating func completeStatusStage(
         succeeded: Bool
     ) -> USBControlStatusCommit {
-        guard let pendingAddress else { return .none }
-        self.pendingAddress = nil
+        let mutation = pendingMutation
+        pendingMutation = .none
         guard succeeded else { return .none }
 
-        address = pendingAddress
-        configurationValue = 0
-        endpointHaltMask = 0
-        state = pendingAddress == 0 ? .default : .addressed
-        return .deviceAddress(pendingAddress)
+        switch mutation {
+        case .none, .awaitingCDCLineCoding:
+            return .none
+
+        case .deviceAddress(let address):
+            self.address = address
+            configurationValue = 0
+            endpointHaltMask = 0
+            state = address == 0 ? .default : .addressed
+            return .deviceAddress(address)
+
+        case .configuration(let value):
+            configurationValue = value
+            endpointHaltMask = 0
+            state = value == 0 ? .addressed : .configured
+
+        case .endpointHalt(let bit, let enabled):
+            if enabled {
+                endpointHaltMask |= bit
+            } else {
+                endpointHaltMask &= ~bit
+            }
+
+        case .interfaceEndpointHaltClear(let mask):
+            endpointHaltMask &= ~mask
+
+        case .lineCoding(let coding):
+            lineCoding = coding
+
+        case .controlLineState(let value):
+            controlLineState = value
+
+        case .breakDuration(let duration):
+            breakDuration = duration
+        }
+        return .none
     }
 
     func isEndpointHalted(_ endpointAddress: UInt8) -> Bool {
@@ -197,7 +240,7 @@ struct USBControlEndpoint {
             }
             guard setup.value == 0 else { return .stall(.invalidValue) }
             guard setup.length == 7 else { return .stall(.invalidLength) }
-            pendingDataOut = .cdcLineCoding
+            pendingMutation = .awaitingCDCLineCoding
             return .dataOut(expectedByteCount: 7)
 
         case USBCDCRequest.getLineCoding:
@@ -220,7 +263,7 @@ struct USBControlEndpoint {
                 return .stall(.invalidValue)
             }
             guard setup.length == 0 else { return .stall(.invalidLength) }
-            controlLineState = setup.value
+            pendingMutation = .controlLineState(setup.value)
             return .statusIn
 
         case USBCDCRequest.sendBreak:
@@ -228,7 +271,7 @@ struct USBControlEndpoint {
                 return .stall(.invalidDirection)
             }
             guard setup.length == 0 else { return .stall(.invalidLength) }
-            breakDuration = setup.value
+            pendingMutation = .breakDuration(setup.value)
             return .statusIn
 
         default:
@@ -315,11 +358,7 @@ struct USBControlEndpoint {
             else {
                 return .stall(.unknownEndpoint)
             }
-            if enabled {
-                endpointHaltMask |= bit
-            } else {
-                endpointHaltMask &= ~bit
-            }
+            pendingMutation = .endpointHalt(bit: bit, enabled: enabled)
             return .statusIn
 
         case .interface:
@@ -344,7 +383,7 @@ struct USBControlEndpoint {
         guard setup.length == 0 else { return .stall(.invalidLength) }
         guard setup.value <= 127 else { return .stall(.invalidValue) }
         guard state != .configured else { return .stall(.invalidState) }
-        pendingAddress = UInt8(setup.value)
+        pendingMutation = .deviceAddress(UInt8(setup.value))
         return .statusIn
     }
 
@@ -420,9 +459,7 @@ struct USBControlEndpoint {
             return .stall(.invalidState)
         }
 
-        configurationValue = setup.valueLow
-        endpointHaltMask = 0
-        state = setup.valueLow == 0 ? .addressed : .configured
+        pendingMutation = .configuration(setup.valueLow)
         return .statusIn
     }
 
@@ -471,7 +508,7 @@ struct USBControlEndpoint {
         ) else {
             return .stall(.unknownInterface)
         }
-        endpointHaltMask &= ~interfaceMask
+        pendingMutation = .interfaceEndpointHaltClear(mask: interfaceMask)
         return .statusIn
     }
 }
