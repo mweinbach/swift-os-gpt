@@ -92,6 +92,80 @@ struct GPUMaskFontAtlasUploadPlan {
     }
 }
 
+enum GPUMaskFontAtlasWriteResult: Equatable {
+    case written(byteCount: Int)
+    case invalidUploadIndex
+    case insufficientCapacity(requiredByteCount: Int, availableByteCount: Int)
+}
+
+/// Builds immutable R8 coverage data for one upload strip.
+///
+/// This is asset preparation, not framebuffer rendering: the CPU writes each
+/// 5x7 mask once, then every visible glyph is positioned, sampled, tinted,
+/// blended, and presented by a GPU backend. Keeping the writer strip-oriented
+/// lets a freestanding resource manager reuse one bounded DMA page.
+enum GPUMaskFontAtlasWriter {
+    static func writeUpload(
+        at index: Int,
+        into storage: UnsafeMutableRawBufferPointer
+    ) -> GPUMaskFontAtlasWriteResult {
+        guard let upload = GPUMaskFontAtlasLayout.uploadPlan.upload(at: index)
+        else {
+            return .invalidUploadIndex
+        }
+        guard storage.count >= upload.byteCount else {
+            return .insufficientCapacity(
+                requiredByteCount: upload.byteCount,
+                availableByteCount: storage.count
+            )
+        }
+
+        var byteIndex = 0
+        while byteIndex < upload.byteCount {
+            storage[byteIndex] = 0
+            byteIndex += 1
+        }
+
+        var glyphIndex = 0
+        while glyphIndex < GPUMaskFontAtlasLayout.glyphCount {
+            guard let glyph = GPUMaskFontAtlasLayout.glyph(at: glyphIndex) else {
+                return .invalidUploadIndex
+            }
+            let packedRows = BitmapFont.glyph(
+                for: UInt8(truncatingIfNeeded: glyph.atlasScalar)
+            )
+
+            var row = 0
+            while row < Int(GPUMaskFontAtlasLayout.maskHeight) {
+                let atlasY = glyph.maskPixelRegion.y + UInt32(row)
+                if atlasY >= upload.destination.y
+                    && atlasY < upload.destination.endY {
+                    let sourceY = Int(atlasY - upload.destination.y)
+                    let sourceRowOffset = sourceY * upload.sourceBytesPerRow
+                    let rowBits = UInt8(
+                        truncatingIfNeeded: packedRows >> UInt64(row * 5)
+                    )
+
+                    var column = 0
+                    while column < Int(GPUMaskFontAtlasLayout.maskWidth) {
+                        let bit = UInt8(1) << UInt8(4 - column)
+                        if rowBits & bit != 0 {
+                            let destinationIndex = sourceRowOffset
+                                + Int(glyph.maskPixelRegion.x)
+                                + column
+                            storage[destinationIndex] = UInt8.max
+                        }
+                        column += 1
+                    }
+                }
+                row += 1
+            }
+            glyphIndex += 1
+        }
+        return .written(byteCount: upload.byteCount)
+    }
+}
+
 /// Layout-only foundation for a compact boot/UI mask font.
 ///
 /// Atlas scalar 32 is the space cell, scalars 33...126 are printable ASCII,

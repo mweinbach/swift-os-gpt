@@ -354,6 +354,7 @@ host-test:
 	$(BUILD_DIR)/gpu-command-ir-host-tests
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Graphics/BitmapFont.swift \
 		Kernel/Graphics/GPU/GPUPrimitives.swift \
 		Kernel/Graphics/GPU/GPUMaskFontAtlas.swift \
 		Tests/Host/GPUMaskFontAtlasTests.swift \

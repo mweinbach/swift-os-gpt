@@ -8,8 +8,12 @@ struct GPUMaskFontAtlasTests {
         usesDedicatedReplacementCell()
         plansTwoBoundedUploadStrips()
         coversAtlasBytesAndRowsExactlyOnce()
+        writesDeterministicBitmapCoverage()
+        writesReplacementAndLowercaseCoverage()
+        preservesGuttersAndCallerTailBytes()
+        rejectsInvalidAndShortWriteStorageTransactionally()
         rejectsInvalidIndexedAccess()
-        print("GPU mask font atlas host tests: 8 groups passed")
+        print("GPU mask font atlas host tests: 12 groups passed")
     }
 
     private static func validatesAtlasDescriptor() {
@@ -215,6 +219,127 @@ struct GPUMaskFontAtlasTests {
         )
     }
 
+    private static func writesDeterministicBitmapCoverage() {
+        withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 3_024) {
+            bytes in
+            bytes.initialize(repeating: 0x5a)
+            let result = GPUMaskFontAtlasWriter.writeUpload(
+                at: 0,
+                into: UnsafeMutableRawBufferPointer(bytes)
+            )
+            expect(result == .written(byteCount: 3_024), "first strip write")
+
+            let capitalA = GPUMaskFontAtlasLayout.glyph(for: 65)
+            let row0 = Int(capitalA.maskPixelRegion.y) * 112
+                + Int(capitalA.maskPixelRegion.x)
+            expectRow(bytes, at: row0, values: (0, 255, 255, 255, 0))
+            let row1 = row0 + 112
+            expectRow(bytes, at: row1, values: (255, 0, 0, 0, 255))
+            let row3 = row0 + 3 * 112
+            expectRow(bytes, at: row3, values: (255, 255, 255, 255, 255))
+        }
+    }
+
+    private static func writesReplacementAndLowercaseCoverage() {
+        withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 3_024) {
+            bytes in
+            bytes.initialize(repeating: 0)
+            expect(
+                GPUMaskFontAtlasWriter.writeUpload(
+                    at: 1,
+                    into: UnsafeMutableRawBufferPointer(bytes)
+                ) == .written(byteCount: 3_024),
+                "second strip write"
+            )
+
+            let lowerA = GPUMaskFontAtlasLayout.glyph(for: 97)
+            let localLowerAY = Int(lowerA.maskPixelRegion.y - 27)
+            let lowerAOffset = localLowerAY * 112
+                + Int(lowerA.maskPixelRegion.x)
+            expectRow(bytes, at: lowerAOffset, values: (0, 255, 255, 255, 0))
+
+            let replacement = requireGlyph(at: 95)
+            let replacementY = Int(replacement.maskPixelRegion.y - 27)
+            let replacementOffset = replacementY * 112
+                + Int(replacement.maskPixelRegion.x)
+            expectRow(
+                bytes,
+                at: replacementOffset,
+                values: (255, 255, 255, 255, 255)
+            )
+        }
+    }
+
+    private static func preservesGuttersAndCallerTailBytes() {
+        withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 3_032) {
+            bytes in
+            bytes.initialize(repeating: 0xa5)
+            expect(
+                GPUMaskFontAtlasWriter.writeUpload(
+                    at: 0,
+                    into: UnsafeMutableRawBufferPointer(bytes)
+                ) == .written(byteCount: 3_024),
+                "oversized strip write"
+            )
+
+            let capitalA = GPUMaskFontAtlasLayout.glyph(for: 65)
+            let cell = capitalA.cellPixelRegion
+            expect(bytes[Int(cell.y) * 112 + Int(cell.x)] == 0, "top gutter")
+            expect(
+                bytes[Int(cell.y + 1) * 112 + Int(cell.x)] == 0,
+                "left gutter"
+            )
+            expect(
+                bytes[Int(cell.y + 1) * 112 + Int(cell.endX - 1)] == 0,
+                "right gutter"
+            )
+            expect(
+                bytes[Int(cell.endY - 1) * 112 + Int(cell.x)] == 0,
+                "bottom gutter"
+            )
+
+            var tail = 3_024
+            while tail < bytes.count {
+                expect(bytes[tail] == 0xa5, "writer modified caller tail")
+                tail += 1
+            }
+        }
+    }
+
+    private static func rejectsInvalidAndShortWriteStorageTransactionally() {
+        withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 3_023) {
+            bytes in
+            bytes.initialize(repeating: 0x7c)
+            expect(
+                GPUMaskFontAtlasWriter.writeUpload(
+                    at: 0,
+                    into: UnsafeMutableRawBufferPointer(bytes)
+                ) == .insufficientCapacity(
+                    requiredByteCount: 3_024,
+                    availableByteCount: 3_023
+                ),
+                "short storage rejection"
+            )
+            var index = 0
+            while index < bytes.count {
+                expect(bytes[index] == 0x7c, "short write mutated storage")
+                index += 1
+            }
+        }
+        withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 3_024) {
+            bytes in
+            bytes.initialize(repeating: 0x31)
+            expect(
+                GPUMaskFontAtlasWriter.writeUpload(
+                    at: 2,
+                    into: UnsafeMutableRawBufferPointer(bytes)
+                ) == .invalidUploadIndex,
+                "invalid upload write"
+            )
+            expect(bytes[0] == 0x31 && bytes[3_023] == 0x31, "invalid mutated")
+        }
+    }
+
     private static func rejectsInvalidIndexedAccess() {
         expect(GPUMaskFontAtlasLayout.glyph(at: -1) == nil, "negative glyph index")
         expect(GPUMaskFontAtlasLayout.glyph(at: 96) == nil, "past-end glyph index")
@@ -269,6 +394,23 @@ struct GPUMaskFontAtlasTests {
                 && region.width == width && region.height == height,
             message
         )
+    }
+
+    private static func expectRow(
+        _ bytes: UnsafeMutableBufferPointer<UInt8>,
+        at offset: Int,
+        values: (UInt8, UInt8, UInt8, UInt8, UInt8)
+    ) {
+        withUnsafeBytes(of: values) { expected in
+            var index = 0
+            while index < 5 {
+                expect(
+                    bytes[offset + index] == expected[index],
+                    "glyph row mismatch"
+                )
+                index += 1
+            }
+        }
     }
 
     private static func expect(
