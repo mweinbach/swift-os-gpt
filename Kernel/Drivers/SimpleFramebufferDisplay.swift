@@ -113,6 +113,16 @@ struct PlatformDriverBootstrap {
            !resources.append(mmio: mailbox) {
             return nil
         }
+        if let usbDeviceController = platform.usbDeviceController {
+            let registers: DeviceResource
+            switch usbDeviceController {
+            case .dwc2(let resource):
+                registers = resource
+            }
+            if !resources.append(mmio: registers) {
+                return nil
+            }
+        }
         if let graphics = platform.graphicsResources {
             var index = 0
             while index < PlatformGraphicsResources.maximumMMIOResourceCount {

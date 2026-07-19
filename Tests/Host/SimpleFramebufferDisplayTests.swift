@@ -20,6 +20,10 @@ struct SimpleFramebufferDescription: Equatable {
     let format: SimpleFramebufferFormat
 }
 
+enum USBDeviceControllerDescription: Equatable {
+    case dwc2(registers: DeviceResource)
+}
+
 struct PlatformGraphicsResources {
     static let maximumMMIOResourceCount = 4
 
@@ -41,6 +45,7 @@ struct PlatformGraphicsResources {
 
 struct Platform {
     let firmwareMailbox: DeviceResource?
+    let usbDeviceController: USBDeviceControllerDescription?
     let simpleFramebuffer: SimpleFramebufferDescription?
     let graphicsResources: PlatformGraphicsResources?
 }
@@ -489,6 +494,7 @@ struct SimpleFramebufferDisplayTests {
 
     private static func testPlatformDriverDiscovery() {
         let mailbox = DeviceResource(baseAddress: 0x10_0000, length: 0x40)
+        let usb = DeviceResource(baseAddress: 0x18_0000, length: 0x1_0000)
         let framebuffer = description(
             baseAddress: 0x900_0000,
             length: 0x1_0000,
@@ -500,6 +506,7 @@ struct SimpleFramebufferDisplayTests {
         let bootstrap = PlatformDriverBootstrap.discover(
             platform: Platform(
                 firmwareMailbox: mailbox,
+                usbDeviceController: .dwc2(registers: usb),
                 simpleFramebuffer: framebuffer,
                 graphicsResources: PlatformGraphicsResources(
                     resource0: DeviceResource(
@@ -523,15 +530,17 @@ struct SimpleFramebufferDisplayTests {
         )
         expect(bootstrap != nil, "platform driver discovery failed")
         expect(
-            bootstrap?.resources.mmioResourceCount == 5,
-            "mailbox or graphics MMIO resources missing"
+            bootstrap?.resources.mmioResourceCount == 6,
+            "mailbox, USB, or graphics MMIO resources missing"
         )
         expect(
             bootstrap?.resources.mmioResource(at: 1)?.baseAddress
+                == usb.baseAddress
+                && bootstrap?.resources.mmioResource(at: 2)?.baseAddress
                 == 0x20_0000
-                && bootstrap?.resources.mmioResource(at: 4)?.baseAddress
+                && bootstrap?.resources.mmioResource(at: 5)?.baseAddress
                     == 0x23_0000,
-            "graphics MMIO order changed"
+            "USB or graphics MMIO order changed"
         )
         expect(
             bootstrap?.resources.memoryResourceCount == 1,
@@ -542,6 +551,7 @@ struct SimpleFramebufferDisplayTests {
         let unsupported = PlatformDriverBootstrap.discover(
             platform: Platform(
                 firmwareMailbox: nil,
+                usbDeviceController: nil,
                 simpleFramebuffer: description(
                     baseAddress: 0xa00_0000,
                     length: 0x1_0000,
