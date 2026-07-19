@@ -82,47 +82,56 @@ this path:
 
 - selects an enabled scanout and validates bounded renderer capabilities,
   including render-target and scanout support for alpha-preserving format 100
-  `B8G8R8A8_SRGB`;
-- creates one GPU-only color target, one six-vertex unit-quad buffer, a VirGL
-  context, surface/framebuffer, solid and analytic-rounded shader pairs, vertex
+  `B8G8R8A8_SRGB` and sampler support for format 64 `R8_UNORM`;
+- creates one GPU-only color target, one six-vertex unit-quad buffer, and one
+  immutable 112 x 54 R8 glyph-mask atlas, then uploads the atlas as two bounded
+  112 x 27 coverage strips;
+- creates a VirGL context, surface/framebuffer, solid, analytic-rounded, and
+  mask-glyph shader pairs, sampler view, nearest/linear sampler states, vertex
   elements, rasterizer, depth/stencil/alpha state, and copy/source-over blend
   state;
 - constructs an 800 x 600 five-layer `RetainedLayerTree`, marks a full logical
   `DamageRegion`, maps it through a centered integer `DisplayViewport`, and
   lowers it through `GPURetainedSceneCompiler` into one GPU clear, one solid
-  top bar, and four shader-antialiased rounded GPU quads; then publishes the
-  compiler-provided full presentation damage through set-scanout and flush
-  after 13 ordered fenced transactions; and
+  top bar, and four shader-antialiased rounded GPU quads, then loads that target
+  for seven GPU-sampled `SWIFTOS` glyph draws and publishes the compiler-provided
+  full presentation damage through set-scanout and flush after 18 ordered
+  fenced transactions; and
 - preserves the initialized session and compiler so later immutable render-IR
   frames can be lowered, submitted, and flushed with a checked damage rectangle
-  without CPU pixel backing or uploads.
+  without CPU-generated color or scanout backing or uploads. The CPU prepares
+  only immutable geometry and R8 coverage assets; visible placement, sampling,
+  tinting, blending, composition, and presentation remain GPU work.
 
 The supporting shared infrastructure includes:
 
 - bounded GPU render passes, blended/rounded quad and glyph-atlas commands,
-  sealed command storage, and a retained-scene compiler;
+  sealed command storage, an allocation-free mask-atlas writer, boot-text scene
+  construction, and a retained-scene compiler;
 - separate rasterizer, presenter, image-domain, queue, and fence capabilities,
   plus triple-buffer frame-slot scheduling and a graphics-worker mailbox;
 - optional VirtIO 3D feature negotiation, generation-stable device
   configuration, external DMA control buffers, bounded capset/context/resource/
   submit packet definitions, VirGL capability validation, and allocation-free
-  VirGL surface/framebuffer/clear/state/shader/draw/GPU-copy encoding and
-  device-neutral IR lowering; and
+  VirGL surface/framebuffer/clear/state/shader/sampler/texture/draw/GPU-copy
+  encoding and device-neutral IR lowering; and
 - Device Tree discovery and final Device-memory mapping for the Pi 5 V3D VII
   hub/core/SMS registers, HVS registers, and graphics address-translation
   requirement.
 
 The deterministic transport tests verify the exact bootstrap packet sequence,
-fences, unit-quad upload, pipeline/draw stream, reusable frame submission, and
-damage flush. Scene-builder and lowering tests cover painter order, 1080p and
-4K integer viewport scaling, full-clear presentation damage, four independent
-corner radii, transformed padded bounds, shader switching, and fail-closed
-inverse validation. A source audit requires the `GPUDesktopScene` and rounded
-shader crossings and rejects software-rasterizer and framebuffer types from
-accelerated activation and execution. The installed local QEMU
-build does not expose a GL-backed VirGL device, however, so the accelerated
-markers and pixels have not been observed on a locally hardware-exercised
-backend and there is no accelerated screenshot evidence yet.
+fences, unit-quad upload, exact atlas bytes and two-strip packets, glyph shader
+and sampler state, five quad draws plus seven glyph draws, reusable submission,
+and damage flush. Scene-builder and lowering tests cover painter order, 1080p
+and 4K integer viewport scaling, full-clear presentation damage, four
+independent corner radii, transformed padded bounds, shader switching, R8
+capability rejection, glyph sampling, and fail-closed inverse validation. A
+source audit requires the `GPUDesktopScene`, rounded-shader, mask-atlas, and
+`GPUBootTextScene` crossings and rejects software-rasterizer, software-text, and
+framebuffer types from accelerated activation and execution. The installed
+local QEMU build does not expose a GL-backed VirGL device, however, so the
+accelerated markers and pixels have not been observed on a locally exercised
+hardware backend and there is no accelerated screenshot evidence yet.
 
 ## Operating modes
 
@@ -204,8 +213,9 @@ graphics path, a native BCM2712 HVS/HDMI modesetting driver, or V3D VII
 acceleration. The simple-framebuffer contract does not report refresh rate or
 physical panel dimensions, so refresh and PPI remain unknown and current scaling
 is based on pixel fit. A bounded PSF2 font parser and rasterizer are host-tested,
-but no font asset or live boot-font selection is wired into the desktop. None of
-this path has executed on physical Pi hardware yet.
+but the Pi path has no packaged PSF2 asset, live font selection, or native GPU
+atlas. The fixed R8 atlas used by QEMU's VirGL session does not constitute Pi
+GPU text support. None of this path has executed on physical Pi hardware yet.
 
 ## Not implemented yet
 
@@ -249,12 +259,12 @@ been verified.
 The next QEMU graphics milestone is to exercise the checked-in VirGL route on a
 GL-backed device, retain accelerated frame evidence, and feed ongoing retained
 updates through its reusable submission API, frame scheduler, and graphics-
-worker mailbox. Rounded coverage and GPU glyph sampling are the next renderer
-lowering increments. The Pi backend independently needs native V3D VII command
-submission and address translation plus HVS, vblank, HDMI, HPD/DDC/EDID, clock,
-and PHY drivers behind the same contracts; simplefb remains only a bring-up
-diagnostic. Input, block storage, entropy, and networking drivers remain
-parallel work. The proof scheduler still needs per-CPU state and interrupt
-interfaces, runnable work on secondaries, a versioned syscall ABI, executable
-loading, and a minimal VFS before the renderer can become a user-facing
-compositor service.
+worker mailbox. The fixed boot atlas must grow into bounded font loading,
+layout/shaping, dynamic atlas management, and batched glyph runs. The Pi backend
+independently needs native V3D VII command submission and address translation
+plus HVS, vblank, HDMI, HPD/DDC/EDID, clock, PHY, and GPU font paths behind the
+same contracts; simplefb remains only a bring-up diagnostic. Input, block
+storage, entropy, and networking drivers remain parallel work. The proof
+scheduler still needs per-CPU state and interrupt interfaces, runnable work on
+secondaries, a versioned syscall ABI, executable loading, and a minimal VFS
+before the renderer can become a user-facing compositor service.

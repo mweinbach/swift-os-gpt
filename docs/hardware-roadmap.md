@@ -9,17 +9,19 @@ is exercised without a host OS inside the guest. The modern VirtIO-MMIO GPU 2D
 path now owns a split queue, resource backing, scanout, transfer, and flush, but
 still presents CPU-rasterized diagnostic pixels. Separately, the production
 boot branch now creates a fenced VirGL context, a format-100 sRGB GPU-only
-target, unit-quad geometry and pipeline state, builds the first 800 x 600
-desktop through the shared retained-scene compiler into one GPU clear and five
-quads, including four analytic antialiased rounded layers, and scans out its
-full-damage result after 13 fenced transactions. The
-session is retained for reusable render-IR submission and damage flush. The
-installed local QEMU cannot instantiate a GL-backed VirGL device, so this
-crossing is source/protocol/host-tested rather than locally hardware-exercised.
-The next graphics gate is captured accelerated evidence on a capable QEMU
-build, followed by sustained frame scheduling, richer lowering, and
-vblank-capable presentation. Input, block storage, entropy, and networking
-remain parallel device work.
+target, unit-quad geometry, a 112 x 54 format-64 R8 glyph-mask atlas uploaded in
+two 112 x 27 strips, and solid, analytic-rounded, and mask-glyph pipeline state.
+It builds the first 800 x 600 desktop through the shared retained-scene compiler
+into one GPU clear and five quads, including four analytic antialiased rounded
+layers, then overlays seven GPU-sampled `SWIFTOS` glyphs and scans out the full
+damage result after 18 fenced transactions. The CPU prepares immutable geometry
+and coverage assets but no color or scanout pixels. The session is retained for
+reusable render-IR submission and damage flush. The installed local QEMU cannot
+instantiate a GL-backed VirGL device, so this crossing has source, protocol, and
+host-test coverage rather than local hardware exercise. The next graphics gate
+is captured accelerated evidence on a capable QEMU build, followed by
+sustained frame scheduling, richer lowering, and vblank-capable presentation.
+Input, block storage, entropy, and networking remain parallel device work.
 
 ## Stage 2: documented physical ARM64 board
 

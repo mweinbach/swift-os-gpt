@@ -64,14 +64,16 @@ The verified QEMU path now includes:
    scene foundation with bounded damage, source-over alpha, antialiased rounded
    layers, fixed-point easing, and paced animation in the single-CPU monitor;
 6. a production QEMU GPU path that negotiates VirGL, creates a host-private
-   format-100 `B8G8R8A8_SRGB` render/scanout target and GPU unit-quad buffer,
-   installs its shaders and fixed pipeline, builds the 800 x 600 boot desktop
-   as five retained logical layers, compiles full logical damage through the
-   shared retained-scene compiler into one GPU clear, one solid quad, and four
-   analytic antialiased rounded quads at a centered integer scale, and
-   publishes scanout only after 13
-   ordered fenced transactions; the initialized session also accepts reusable
-   GPU-only render-IR submissions and flushes their declared damage; and
+   format-100 `B8G8R8A8_SRGB` render/scanout target, GPU unit-quad buffer, and
+   112 x 54 format-64 `R8_UNORM` glyph-mask atlas, uploads that atlas in two
+   bounded 112 x 27 strips, and installs solid, analytic-rounded, and
+   mask-glyph pipelines. It builds the 800 x 600 boot desktop as five retained
+   logical layers, compiles full logical damage into one GPU clear, one solid
+   quad, and four analytic antialiased rounded quads at a centered integer
+   scale, then overlays seven GPU-sampled `SWIFTOS` glyphs and publishes
+   scanout only after 18 ordered fenced transactions. The initialized session
+   also accepts reusable GPU-only render-IR submissions and flushes their
+   declared damage; and
 7. shared GPU foundations around that path: bounded render commands and
    retained-scene compilation, frame-slot/fence scheduling, a graphics-worker
    mailbox, strict production execution policy, and Pi V3D/HVS resource
@@ -82,13 +84,15 @@ state, compute animation and damage, and compile backend-neutral command buffers
 but hardware GPU queues must produce every displayed pixel. The software
 rasterizer remains only as an explicit diagnostic path and reference oracle.
 The QEMU boot path now crosses that boundary when a compatible VirGL2 device is
-available: it uses no CPU pixel backing or upload, and a session failure parks
-the kernel instead of falling back to software. Ramfb and VirtIO-GPU 2D remain
-explicitly marked diagnostic modes. The installed local QEMU build cannot
-instantiate a VirGL GL device, so the accelerated path has source, protocol,
-and host-test coverage but its pixels have not been exercised locally on a
-hardware-accelerated QEMU backend. The statically inspected Pi image has not
-crossed the boundary: Pi simplefb is diagnostic only, and V3D VII/HVS/HDMI
+available: it uploads no CPU-generated color or scanout pixels. The CPU prepares
+only immutable geometry and R8 glyph coverage; placement, sampling, tinting,
+blending, composition, and presentation execute in VirGL. A session failure
+parks the kernel instead of falling back to software. Ramfb and VirtIO-GPU 2D
+remain explicitly marked diagnostic modes. The installed local QEMU build
+cannot instantiate a VirGL GL device, so the accelerated path has source,
+protocol, and host-test coverage but its pixels have not been exercised locally
+on a hardware-accelerated QEMU backend. The statically inspected Pi image has
+not crossed the boundary: Pi simplefb is diagnostic only, and V3D VII/HVS/HDMI
 support remains discovery, mapping, and roadmap work.
 
 This is not yet a general-purpose OS. The next layers include sustained
@@ -179,17 +183,19 @@ with owned final mappings, proves IRQ-driven preemption and isolated EL0 Swift
 threads, brings multiple described CPUs online through PSCI, and renders and
 presents its diagnostic QEMU desktop through two display backends. It also
 contains a production VirGL boot route whose first desktop is built from
-retained scene state and full damage, then compiled into one GPU clear and five
-GPU quads—including four shader-antialiased rounded layers—with no CPU pixel
-storage. The local QEMU build cannot
-hardware-exercise that accelerated route.
+retained scene state and full damage, then compiled into one GPU clear, five GPU
+quads—including four shader-antialiased rounded layers—and seven GPU-sampled
+`SWIFTOS` glyphs. The CPU uploads immutable geometry and R8 coverage data, not
+color or scanout pixels. The local QEMU build cannot hardware-exercise that
+accelerated route.
 The scheduler currently runs both user threads only on CPU0; secondary CPUs
 publish online state and park. There is no loader, VFS, persistent storage,
 graphical input, user compositor/window protocol, or stable application ABI.
 Physical Raspberry Pi 5 execution remains unverified. The Pi path currently
 consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
-modesetting or V3D VII rendering. A bounded PSF2 font parser and diagnostic
-glyph renderer are host-tested, but no font asset or GPU glyph atlas is packaged
-into the live desktop yet. The retained scene and diagnostic compositor remain
-kernel-side bootstrap infrastructure, not an EL0 window system. Each milestone
-must leave behind a repeatable boot or unit test rather than a mock UI.
+modesetting or V3D VII rendering. The QEMU session builds and uploads a fixed
+built-in 5 x 7 ASCII mask atlas for its `SWIFTOS` boot label, but there is no
+PSF2 asset loader, shaping/layout stack, dynamic atlas, or Pi GPU font path. The
+retained scene and diagnostic compositor remain kernel-side bootstrap
+infrastructure, not an EL0 window system. Each milestone must leave behind a
+repeatable boot or unit test rather than a mock UI.

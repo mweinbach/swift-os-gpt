@@ -236,14 +236,17 @@ route does not exist yet.
 
 QEMU can boot without ramfb through a Swift modern VirtIO-MMIO GPU 2D driver;
 that smoke remains CPU-rasterized diagnostic evidence. A separate production
-QEMU branch now creates a format-100 sRGB VirGL target and GPU unit quad,
-installs its pipeline, builds its first desktop through the shared retained-scene
-compiler, renders the resulting clear and five quads on the GPU, and retains a
-reusable GPU-only IR submission/damage-flush session. Four of those layers use
-the dedicated analytic rounded-coverage shader pair. The installed local QEMU
-lacks a GL-backed VirGL device, so this route is source/protocol/host-tested but
-not locally hardware-exercised. None of it implements or validates Raspberry Pi
-5's V3D VII GPU, HVS, HDMI controllers, firmware interfaces, or display clocks.
+QEMU branch now creates a format-100 sRGB VirGL target, GPU unit quad, and a
+112 x 54 format-64 R8 glyph-mask atlas uploaded in two 112 x 27 strips. It
+installs solid, analytic-rounded, and mask-glyph pipelines, renders one clear,
+five quads, and seven GPU-sampled `SWIFTOS` glyphs, and publishes scanout after
+18 ordered fenced transactions. The CPU prepares immutable geometry and R8
+coverage, not color or scanout pixels, and the session remains reusable for
+GPU-only IR submission and damage flush. The installed local QEMU lacks a
+GL-backed VirGL device, so this route has source, protocol, and host-test
+coverage but is not locally hardware-exercised. None of it implements or
+validates Raspberry Pi 5's V3D VII GPU, HVS, HDMI controllers, firmware
+interfaces, display clocks, or GPU font path.
 
 The packaged Pi configuration sets `disable_fw_kms_setup=0`, requests a 32-bit
 legacy framebuffer, and leaves firmware to read HDMI EDID and choose the boot
@@ -282,9 +285,11 @@ native HVS/HDMI pipeline. Live EDID/DDC supplies mode timing, refresh, physical
 dimensions, and therefore the inputs for refresh- and PPI-aware scale policy.
 Simple framebuffer supplies none of those contracts and cannot satisfy the
 production invariant. A bounded PSF2 loader and diagnostic glyph rasterizer are
-host-tested, but no font asset, GPU glyph atlas, or live font-selection path is
-packaged yet. When no supported diagnostic framebuffer is present, current boot
-remains serial-only. Physical execution and HDMI output remain unverified.
+host-tested, but the Pi path has no packaged font asset, native GPU glyph atlas,
+GPU upload/sampling path, or live font selection. QEMU's fixed VirGL mask atlas
+does not constitute Pi support. When no supported diagnostic framebuffer is
+present, current boot remains serial-only. Physical execution and HDMI output
+remain unverified.
 
 ## Hardware validation gate
 

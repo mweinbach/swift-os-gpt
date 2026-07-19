@@ -27,34 +27,43 @@ completed result.
 The QEMU boot artifact attempts a production VirtIO/VirGL session before any
 diagnostic framebuffer setup. On a compatible VirGL2 device, the guest:
 
-1. reads the active display mode and validates the renderer capset;
+1. reads the active display mode and validates the renderer capset, including
+   format-100 render-target/scanout support and format-64 `R8_UNORM` sampler
+   support;
 2. creates a host-private format-100 `B8G8R8A8_SRGB` target with render-target
    and scanout bindings, preserving alpha and applying the sRGB transfer on the
    GPU;
 3. creates and attaches a GPU vertex buffer, then uploads six unit-quad
    `R32G32_FLOAT` vertices without creating any pixel backing store;
-4. creates the color surface, framebuffer, solid and analytic-rounded shader
-   pairs, vertex elements, rasterizer, depth/stencil/alpha state, and
-   copy/source-over blend state;
-5. builds the first desktop as five retained logical layers, then uses
+4. creates and attaches an immutable 112 x 54 `R8_UNORM` glyph-mask atlas and
+   uploads its coverage in two bounded 112 x 27 strips;
+5. creates the color surface and framebuffer; solid, analytic-rounded, and
+   mask-glyph shader pairs; a sampler view and nearest/linear sampler states;
+   vertex elements; rasterizer; depth/stencil/alpha state; and copy/source-over
+   blend state;
+6. builds the first desktop as five retained logical layers, then uses
    `GPURetainedSceneCompiler` to lower full logical damage into one attachment
-   clear, one solid top bar, and four source-over analytic rounded quads; and
-6. sets scanout and flushes the compiler-provided presentation damage only
+   clear, one solid top bar, and four source-over analytic rounded quads; loads
+   that attachment in a second pass and draws the seven glyphs in `SWIFTOS` by
+   sampling, tinting, and blending the mask atlas on the GPU; and
+7. sets scanout and flushes the compiler-provided presentation damage only
    after all dependent queue work completes.
 
 `DisplayViewport` centers and integer-scales the 800 x 600 logical scene. The
 full-damage clear includes letterboxes, so the first presentation damage is the
 complete scanout.
 
-The validated lifecycle uses 13 fenced control-queue transactions: display
+The validated lifecycle uses 18 fenced control-queue transactions: display
 query; two capset metadata queries; selected-capset payload; context creation;
-create/attach for both the color target and unit quad; quad upload; render
-submission; scanout selection; and flush. The context, target, geometry, and
-initialized IR compiler remain owned by `VirtIOGPU3DSession`. Its reusable
-`render` entry point lowers another immutable command buffer, submits it to the
-same GPU target, and issues a fenced flush for the caller's checked damage
-rectangle. Neither bootstrap nor reusable submission maps or uploads CPU-made
-pixels.
+create/attach for the color target, unit quad, and glyph atlas; quad upload; two
+atlas-strip uploads; pipeline initialization; desktop-and-text render
+submission; scanout selection; and flush. The context, targets, immutable
+geometry and coverage assets, and initialized IR compiler remain owned by
+`VirtIOGPU3DSession`. Its reusable `render` entry point lowers another immutable
+command buffer, submits it to the same GPU target, and issues a fenced flush for
+the caller's checked damage rectangle. Neither bootstrap nor reusable
+submission maps or uploads CPU-made color or scanout pixels; the R8 bytes are
+immutable glyph coverage that the GPU turns into visible text.
 
 If no accelerated device is available, boot emits
 `SWIFTOS:GRAPHICS_DIAGNOSTIC` before entering the software route. Once an
@@ -113,12 +122,14 @@ The platform-independent path now includes:
   CPU without sharing mutable scene storage.
 
 The QEMU backend negotiates optional VirtIO 3D features, reads stable device
-configuration, enumerates and validates bounded VirGL capability sets, encodes
-context/resource/transfer/submit control messages, and emits VirGL surface,
-framebuffer, clear, fixed-state, shader, draw, and GPU-to-GPU copy commands. The
-boot path now creates that context and submits a GPU-rasterized retained desktop
-compiled through `GPUDesktopScene` and `GPURetainedSceneCompiler`, while a
-reusable session API accepts later GPU-only IR frames with bounded damage.
+configuration, enumerates and validates bounded VirGL capability sets including
+R8 sampling, encodes context/resource/transfer/submit control messages, and
+emits VirGL surface, framebuffer, clear, fixed-state, shader, sampler-view,
+sampler-state, texture, draw, and GPU-to-GPU copy commands. The boot path now
+creates that context and submits a GPU-rasterized retained desktop compiled
+through `GPUDesktopScene` and `GPURetainedSceneCompiler`, followed by the
+GPU-sampled `SWIFTOS` label from `GPUBootTextScene`. A reusable session API
+accepts later GPU-only IR frames with bounded damage.
 
 The planned Pi backend will use the same generic commands and scheduling
 contracts. Device tree discovery identifies the enabled V3D VII hub/core/SMS
@@ -143,12 +154,14 @@ mutation order, damage overflow, clipping, alpha, rounded coverage, and
 compositor repaint.
 
 The accelerated session and IR lowering have deterministic host tests for exact
-packet order, fence progression, format/capability rejection, unit-quad upload,
-pipeline state, retained boot-scene construction, 1080p and 4K integer viewport
-scaling, full-clear presentation damage, per-corner analytic coverage,
-transformed padded bounds, shader switching, exact initial quad draws, reusable
-submission, and damage flush. The GPU-only source audit separately requires the
-retained scene and rounded-shader crossings and prevents software rasterizer or
+packet order, fence progression, color and R8 sampler capability rejection,
+unit-quad upload, exact atlas bytes and two-strip upload packets, glyph shader
+and sampler state, retained boot-scene and text-scene construction, 1080p and 4K
+integer viewport scaling, full-clear presentation damage, per-corner analytic
+coverage, transformed padded bounds, shader switching, five initial quad draws,
+seven glyph draws, reusable submission, and damage flush. The GPU-only source
+audit separately requires the retained scene, rounded-shader, mask-atlas, and
+GPU-text crossings and prevents software rasterizer, software text, or
 framebuffer types from entering accelerated activation and execution.
 
 The live animation loop currently belongs to the single-CPU EL1 diagnostic
@@ -164,13 +177,11 @@ physical Pi output are hardware-verified.
   retain accelerated serial, fence, and captured-frame evidence.
 - Route ongoing retained-scene updates through the reusable GPU submission API,
   then execute the frame scheduler and graphics mailbox in the live boot path.
-- Lower glyph-atlas commands to VirGL; solid and analytic rounded quads, affine
-  transforms, clear/load/store, clipping, and copy/source-over blending already
-  have bounded lowering.
 - Add retained image, glyph-run, border, gradient, shadow, and transform content
   while preserving old/new damage reporting and GPU-only pixel production.
-- Package a PSF2 asset, then separate parsing, layout, shaping, atlas allocation,
-  and GPU glyph sampling behind a bounded font-face contract.
+- Grow the fixed boot mask into bounded font loading, layout and shaping,
+  dynamic atlas allocation/update/eviction, and batched glyph runs behind a
+  font-face contract.
 - Define kernel-owned surfaces and immutable frame submissions for EL0 clients;
   applications must never map scanout directly.
 - Move frame scheduling to a compositor thread driven by a display/vblank event,
@@ -182,8 +193,10 @@ physical Pi output are hardware-verified.
   after object handles and checked user-copy exist.
 
 This is the base of a modern UI renderer, not yet a window server. The QEMU
-accelerated branch currently produces a static retained-scene bootstrap frame
-(one attachment clear plus five quads);
-there are no EL0 surfaces, textures, paths, live font atlas, input routing, or
-sustained compositor loop yet, and the checked-in GPU frame—including analytic
-rounded coverage—has not been exercised by the installed local QEMU.
+accelerated branch currently produces a static retained-scene bootstrap frame:
+one attachment clear, five quads, and seven mask-glyph draws. It has one
+immutable R8 boot atlas, but no EL0 surfaces, general image textures, dynamic
+font loading or shaping, mutable atlas lifecycle, paths, input routing, or
+sustained compositor loop yet. The checked-in GPU frame—including analytic
+rounded coverage and glyph sampling—has not been exercised by the installed
+local QEMU.

@@ -182,18 +182,24 @@ The QEMU GPU backend negotiates modern VirtIO and optional VirGL features, reads
 generation-stable GPU configuration, supports separate external control
 buffers, validates bounded capsets, and creates a live context when a compatible
 VirGL2 device is available. Its production target is a host-private format-100
-`B8G8R8A8_SRGB` render/scanout resource; pixel backing is never mapped or
-uploaded by the CPU. The session creates and uploads an immutable GPU unit quad
-and installs its shaders and fixed pipeline. `GPUDesktopScene` builds a
-five-layer 800 x 600 retained tree and full damage;
+`B8G8R8A8_SRGB` render/scanout resource; color and scanout pixel backing is
+never mapped or uploaded by the CPU. The session creates and uploads an
+immutable GPU unit quad plus a 112 x 54 format-64 `R8_UNORM` glyph-mask atlas in
+two bounded 112 x 27 coverage strips. The CPU prepares only those immutable
+geometry and coverage assets. The session installs solid, analytic-rounded, and
+mask-glyph shaders plus the required sampler view and nearest/linear sampler
+states. `GPUDesktopScene` builds a five-layer 800 x 600 retained tree and full
+damage;
 `GPURetainedSceneCompiler` applies the centered integer viewport and emits the
 attachment clear, scissor, one solid top bar, and four source-over rounded GPU
 quads. A dedicated analytic shader pair evaluates per-corner signed distance
-and derivative-based coverage over conservative transformed bounds. The
-returned full presentation damage is carried into the fenced flush, with the
-lifecycle still totaling 13 ordered transactions. The retained context/compiler
-can lower later immutable IR frames into the same target and issue a fenced
-flush for checked damage.
+and derivative-based coverage over conservative transformed bounds.
+`GPUBootTextScene` then loads the existing attachment and emits seven `SWIFTOS`
+glyph draws whose placement, mask sampling, tinting, blending, composition, and
+presentation execute on the GPU. The returned full presentation damage is
+carried into the fenced flush, with the lifecycle totaling 18 ordered
+transactions. The retained context/compiler can lower later immutable IR frames
+into the same target and issue a fenced flush for checked damage.
 
 The existing end-to-end QEMU smoke still exercises a separate host 2D resource
 with CPU-generated diagnostic backing, transfer, flush, and scanout. It is
@@ -220,14 +226,16 @@ refresh/PPI-aware policy waits for a live EDID/DDC or equivalent metadata
 driver. The implementation remains hardware-unverified.
 
 The production QEMU branch draws its initial retained scene's attachment clear,
-top bar, panel, sidebar, accent card, and dock on the GPU. Its bounded lowering
-supports solid quads, affine Q16 transforms, clear/load/store, clipping, and
-copy/source-over blend, plus analytic rounded coverage that rejects singular or
-ill-conditioned inverse transforms. Terminal glyphs and the continuous retained
-status animation still run only in the explicit diagnostic CPU path. There are
-no textures, paths, shadows, live font atlas, window/surface protocol,
-graphical input path, or EL0 application surface yet, and the local QEMU build
-cannot exercise the accelerated branch.
+top bar, panel, sidebar, accent card, dock, and seven-glyph `SWIFTOS` label on
+the GPU. Its bounded lowering supports solid quads, affine Q16 transforms,
+clear/load/store, clipping, copy/source-over blend, analytic rounded coverage
+that rejects singular or ill-conditioned inverse transforms, and sampling from
+one immutable R8 mask atlas. The full diagnostic terminal text and continuous
+retained status animation still run only in the explicit diagnostic CPU path.
+There are no general image textures, dynamic font loading or shaping, mutable
+atlas lifecycle, paths, shadows, window/surface protocol, graphical input path,
+or EL0 application surface yet, and the local QEMU build cannot exercise the
+accelerated branch.
 
 With four CPUs, `make run` publishes the ramfb frame and then follows the SMP/EL0
 path. `QEMU_CPUS=1 make run` retains the interactive EL1 kernel monitor after
