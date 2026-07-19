@@ -170,9 +170,10 @@ RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware make rpi5-package
 
 `rpi5-inspect` validates the Image header, link addresses, BCM2712 high-MMIO
 bootstrap descriptor, architecture, and unresolved-symbol contract. Packaging
-first probes the pinned firmware DTB for the exact UART10, GICv2, PSCI, CPU, and
-ATF-reservation contract, then adds it and the official `dwc2.dtbo` from that
-same revision with byte hashes. It also produces a sparse MBR media image with
+first probes the pinned firmware DTB for the exact UART10, GICv2, PSCI, CPU,
+ATF-reservation, removable SDHCI, and RP1 GEM resource contracts, then adds it
+and the official `dwc2.dtbo` from that same revision with byte hashes. It also
+produces a sparse MBR media image with
 a populated FAT32 boot partition and a signed type-0xda data partition. Set
 `RPI5_MEDIA_BLOCK_COUNT` to the exact target-card block count when the data
 partition should consume the remaining card. The packaged `config.txt` enables DWC2
@@ -239,8 +240,12 @@ The scheduler currently runs both user threads only on CPU0; secondary CPUs
 publish online state and park. There is no loader, VFS, mounted user filesystem,
 graphical input, user compositor/window protocol, or stable application ABI.
 The board-neutral block, MBR, signed data-volume, and bounded persistent-log
-formats are host-tested, but persistence still requires a bound hardware block
-transport; raw data blocks are never exposed to EL0.
+formats are host-tested. The Pi target now binds them to the removable,
+DT-discovered BCM2712 SDHCI controller and incrementally drains the retained
+kernel log into the signed `0xda` partition. That binding and its PIO transport
+remain physical-hardware-unverified, and QEMU has no VirtIO block binding yet.
+The remainder of the data partition is reserved for a user filesystem, but no
+VFS or filesystem exists and raw data blocks are never exposed to EL0.
 Physical Raspberry Pi 5 execution remains unverified. The Pi path currently
 consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
 modesetting or V3D VII rendering. It can also export that completed diagnostic

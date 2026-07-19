@@ -23,5 +23,6 @@ Partition 2:
 The persistent kernel-log arena is CRC-protected and power-loss recoverable.
 The kernel may access only that bounded arena. The remaining user-data blocks
 will be exposed through a future VFS/syscall boundary and must never be mapped
-raw into EL0. The image contains the format and generic block layer, but no
-physical Raspberry Pi SD/MMC transport is claimed by this manifest.
+raw into EL0. SwiftOS includes a DT-discovered BCM2712 SDHCI transport and a
+fail-closed Pi runtime for this log arena; both remain physical-hardware-
+unverified. No filesystem or general raw user-data API is claimed.

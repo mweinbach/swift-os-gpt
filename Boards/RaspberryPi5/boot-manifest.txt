@@ -44,10 +44,13 @@ the host receives its final status. COMMITTED proves sealed staging, not that
 the later policy handoff succeeded; confirm the USB disconnect, re-enumeration,
 and expected boot identity. This update is volatile; power cycling returns to
 kernel8.img on this partition. SHA-256 verifies transport integrity, not host
-authenticity. Persistent USB updates require a future SD/MMC writer.
+authenticity. Persistent USB update integration remains future work: the current
+SD/MMC writer is authorized only for the signed kernel-log arena and cannot
+overwrite boot files or user data.
 
 This is USB data, not DisplayPort. USB starts after memory and driver bring-up;
-UART10 remains the only route for failures before gadget attachment. Use a
+UART10 is the only live route before gadget attachment and SD-log recovery.
+Later pre-gadget failures may also be read from the returned card. Use a
 data-capable cable and follow Raspberry Pi's power guidance rather than asking
 the USB-C OTG data cable to power the board.
 
@@ -61,5 +64,6 @@ must both match that recorded revision.
 deterministic MBR image with a populated FAT32 boot partition and a type-0xda
 SwiftOS data partition. The data partition starts with duplicate signed volume
 headers and a bounded empty kernel-log arena; its remaining blocks are reserved
-for a future user filesystem. This packaging contract does not claim a working
-physical SD/MMC driver.
+for a future user filesystem. The kernel includes a DT-discovered BCM2712
+SDHCI/PIO binding for that arena, but this manifest does not claim it has run on
+physical hardware, and it does not claim a VFS or user filesystem.

@@ -216,6 +216,17 @@ simplefb surface is mirrored when HDMI exists; otherwise the kernel owns an
 polled controller progresses. This code and the viewer are host-tested, but
 physical USB enumeration remains unverified.
 
+The Pi image also binds the boot-DT's removable `brcm,bcm2712-sdhci` controller
+to the shared synchronous block contract. After the local HDMI/USB observation
+window, it initializes the card in bounded PIO mode, accepts only an
+unambiguous MBR plus signed `SWOSDATA` volume, incrementally recovers the 2 MiB
+log arena, and durably appends at most one retained 48-byte kernel event per
+cooperative pass. It never formats returned media and drops write authority on
+any discovery, signature, bounds, or transport failure. This path is host- and
+link-tested but has not written or recovered a record on physical Pi hardware.
+The remaining data-partition arena is reserved for user files; there is no VFS,
+filesystem, or EL0 block API.
+
 This is a diagnostic firmware-configured scanout handoff, not a production
 graphics path, a native BCM2712 HVS/HDMI modesetting driver, or V3D VII
 acceleration. The simple-framebuffer contract does not report refresh rate or
@@ -231,8 +242,9 @@ GPU text support. None of this path has executed on physical Pi hardware yet.
   interrupt/timer scheduling, migration, load balancing, and scheduler locking;
 - an executable loader, process creation/destruction, demand paging, copy-on-
   write, signals, or a stable user system library and syscall ABI;
-- persistent block storage, VFS, filesystem, permissions, or recovery;
-- virtio/RP1 keyboard, pointer, block, entropy, USB host/input, and network
+- general persistent block services, a QEMU VirtIO block transport, VFS,
+  filesystem, permissions, or user-data recovery;
+- virtio/RP1 keyboard, pointer, entropy, USB host/input, and additional network
   drivers;
 - hardware execution and captured-pixel validation of the VirtIO/VirGL path,
   sustained frame-scheduler/graphics-worker integration, native BCM2712 V3D VII
@@ -264,10 +276,11 @@ that Pi-only contract. The kernel retains the DWC2 and mailbox mappings, powers
 the USB domain, initializes the controller in polled PIO device mode, and can
 export the completed diagnostic desktop through the host-tested CDC/SDDP path.
 The kernel also contains a host-tested driver for the runtime-patched firmware
-simple framebuffer and a headless USB surface fallback. No physical Raspberry
-Pi 5 boot, UART, USB enumeration/frame, GICv2 timer delivery, PSCI startup,
-firmware-patched 8 GB allocator exercise, HDMI frame, input, or GUI path has
-been verified.
+simple framebuffer, a headless USB surface fallback, and a removable-SD binding
+that can persist the retained kernel log only after signed-volume validation.
+No physical Raspberry Pi 5 boot, UART, USB enumeration/frame, SD transfer/log
+recovery, Ethernet link, GICv2 timer delivery, PSCI startup, firmware-patched
+8 GB allocator exercise, HDMI frame, input, or GUI path has been verified.
 
 ## Next coherent milestone
 
@@ -278,8 +291,9 @@ worker mailbox. The fixed boot atlas must grow into bounded font loading,
 layout/shaping, dynamic atlas management, and batched glyph runs. The Pi backend
 independently needs native V3D VII command submission and address translation
 plus HVS, vblank, HDMI, HPD/DDC/EDID, clock, PHY, and GPU font paths behind the
-same contracts; simplefb remains only a bring-up diagnostic. Input, block
-storage, entropy, and networking drivers remain parallel work. The proof
+same contracts; simplefb remains only a bring-up diagnostic. Input, a QEMU
+VirtIO block transport, general filesystems, entropy, and broader networking
+remain parallel work. The proof
 scheduler still needs per-CPU state and interrupt interfaces, runnable work on
 secondaries, a versioned syscall ABI, executable loading, and a minimal VFS
 before the renderer can become a user-facing compositor service.

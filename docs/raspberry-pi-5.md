@@ -96,6 +96,64 @@ the EEPROM firmware to log
 the hashes of loaded files; it does not replace checking `SHA256SUMS` before
 writing media.
 
+## Physical media and returned-card diagnostics
+
+Treat a removable card as destructive media. Power the Pi down before moving
+the card, run `diskutil list external physical`, and resolve the whole removable
+disk again immediately before every operation. Verify that `diskutil info
+/dev/diskN` reports the expected capacity, a 512-byte device block size,
+`Internal: No`, and the complete disk rather than `diskNs1`. Never reuse a disk
+number from an earlier insertion.
+
+Build the image with that card's exact 512-byte block count, inspect it, and
+independently check the default 256 MiB FAT32 boot partition before flashing:
+
+```sh
+RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware \
+RPI5_MEDIA_BLOCK_COUNT=EXACT_CARD_BLOCK_COUNT make rpi5-package
+python3 tools/build_rpi5_media.py inspect \
+  .build/raspberry-pi-5/swiftos-rpi5-media.img
+dd if=.build/raspberry-pi-5/swiftos-rpi5-media.img \
+  of=/private/tmp/swiftos-rpi5-boot-fat.img bs=512 skip=2048 count=524288
+/sbin/fsck_msdos -n /private/tmp/swiftos-rpi5-boot-fat.img
+```
+
+The builder refuses an existing output, so move an earlier boot directory and
+media image aside instead of silently overwriting release evidence. For the
+initial card write, unmount the verified whole disk and write the exact-card
+image to its raw whole-disk node; substitute the freshly resolved `N` in both
+commands and check it again before entering the privileged command:
+
+```sh
+diskutil unmountDisk /dev/diskN
+sudo dd if=.build/raspberry-pi-5/swiftos-rpi5-media.img \
+  of=/dev/rdiskN bs=4m
+sync
+diskutil eject /dev/diskN
+```
+
+This full initial write can be slow because the sparse image expands to the
+card's exact geometry. Later development kernels can use the existing bounded
+USB RAM updater without rewriting the card, but that update remains volatile.
+
+After a failed physical boot, power down, return the card to the Mac, resolve
+the whole disk and exact block count again, unmount it, then extract logs with
+the read-only inspector:
+
+```sh
+diskutil unmountDisk /dev/diskN
+sudo python3 tools/inspect_rpi5_persistent_log.py /dev/rdiskN \
+  --expected-block-count EXACT_CARD_BLOCK_COUNT \
+  > swiftos-pi5-log-capture.json
+```
+
+The inspector rejects partition nodes and symlinks, opens the source
+`O_RDONLY`, verifies discovered geometry when the host exposes it, and reads
+only the MBR, two signed superblocks, and bounded log arena. Its JSON preserves
+structured records and reconstructs retained canonical console bytes in
+chronological order. An empty arena means the boot never reached a successful
+SD/log recovery crossing; use UART10 or HDMI evidence for that earlier failure.
+
 ## SwiftOS data partition
 
 The second MBR entry uses type `0xda` and is accepted only when its `SWOSDATA`
@@ -105,8 +163,18 @@ deterministic sequence-to-slot placement permit bounded recovery after a torn
 write. The remainder is reserved for a future user filesystem. The generic
 kernel layer exposes synchronous logical-block I/O and a partition-bounded view,
 but never maps that view into EL0. Files and mounts require a future VFS/syscall
-boundary. Until a physical Pi SD/MMC transport binds this layer, an image on the
-card is formatted correctly but the running kernel cannot persist records.
+boundary.
+
+On Pi, the runtime binds the boot DT's removable `brcm,bcm2712-sdhci` node to a
+bounded, default-speed 3.3 V PIO transport. It waits for the local USB/HDMI
+observation window, initializes the card, requires an unambiguous MBR and at
+least one valid signed superblock, then scans one log block and appends at most
+one retained 48-byte kernel event per cooperative pass. No boot path formats
+media. Any discovery, signature, bounds, or transport failure permanently drops
+that runtime's write authority and lets Ethernet troubleshooting continue. The
+shared partition/log service is board-neutral; only the SDHCI board handoff is
+Pi-specific. The binding is host- and static-DTB-tested but has not transferred
+a block on a physical Pi, and QEMU has no VirtIO block backend yet.
 
 ## AArch64 Image contract
 
@@ -211,9 +279,12 @@ translation rather than selecting the first PL011 node.
 `enable_uart=1` and `uart_2ndstage=1` are explicit boot preconditions. The
 current PL011 driver does not program UART10 clocks, baud, pinmux, or control
 registers and has no bounded timeout when TX remains full, so physical bring-up
-still depends on firmware leaving the dedicated debug UART operational. RP1
-UART/PCIe preservation is deliberately disabled: the bootstrap and final tables
-do not map the RP1 aperture, and SwiftOS does not yet own or quiesce RP1/PCIe DMA.
+still depends on firmware leaving the dedicated debug UART operational.
+`pciex4_reset=0` preserves the bootloader's internal RP1 PCIe configuration;
+SwiftOS then discovers and maps only the DT-described GEM, configuration, power,
+and reset resources required by its Ethernet driver. It does not enumerate the
+root complex, expose the general RP1 aperture, or claim ownership of unrelated
+RP1/PCIe DMA.
 
 ## USB-C diagnostic display
 
@@ -256,8 +327,9 @@ remain confined to `tools/USBDisplay`; none link into the boot artifact.
 
 Expected UART markers are `SWIFTOS:USB_POWER_READY`,
 `SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, and
-`SWIFTOS:USB_DEBUG_FRAME`. Early boot failures before attachment remain visible
-only on UART10. The host-test suite covers descriptors, control transactions,
+`SWIFTOS:USB_DEBUG_FRAME`. Failures before SD log recovery remain visible only
+on UART10; later pre-USB failures can also be recovered from the returned card.
+The host-test suite covers descriptors, control transactions,
 reset/reconnect, DTR restart, frame chunking, CRC, damage assembly, and viewer
 bounds, but no physical Pi has passed this sequence yet.
 
@@ -408,19 +480,25 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
   `SWIFTOS:USB_DEBUG_FRAME`; macOS reports VID `0x1209`, PID `0x5a17`, and a
   `/dev/cu.usbmodem*` node, while the viewer validates hello, mode, full-frame,
   CRC, damage, DTR-close, and DTR-reopen behavior.
+- A boot with Ethernet connected reaches `SWIFTOS:SD_INIT_READY_BLOCKS`,
+  `SWIFTOS:STORAGE_SUPERBLOCK_READY`, `SWIFTOS:RP1_NET_STARTING`, and a specific
+  link/DHCP outcome; after power-off, the read-only host inspector reconstructs
+  those same markers from CRC-valid persistent records without reading outside
+  the declared log arena.
 - At least three power-cycle boots and three warm resets produce the same staged
   serial protocol.
 - ELF inspection confirms AArch64, no Darwin load commands or framework symbols,
   and only reviewed freestanding unresolved symbols.
 
-Native display modesetting, vblank-driven animation, USB input, storage, RP1
-ownership, networking, and native GPU rendering are later gates that must pass
-before a production GUI claim. A firmware-framebuffer image establishes early
-diagnostic display output and can run the software oracle; it is not a user
-window system or GPU-capable Raspberry Pi release. The production GPU gate must
-add retained serial/fence evidence for V3D VII rendering, HVS/vblank presentation,
-IOMMU/address-translation ownership, HDMI HPD/DDC/EDID timing, measured refresh,
-physical dimensions/PPI, and captured output at the selected native mode.
+Native display modesetting, vblank-driven animation, USB input, general
+filesystems, full RP1 ownership, networking, and native GPU rendering are later
+gates that must pass before a production GUI claim. A firmware-framebuffer image
+establishes early diagnostic display output and can run the software oracle; it
+is not a user window system or GPU-capable Raspberry Pi release. The production
+GPU gate must add retained serial/fence evidence for V3D VII rendering,
+HVS/vblank presentation, IOMMU/address-translation ownership, HDMI HPD/DDC/EDID
+timing, measured refresh, physical dimensions/PPI, and captured output at the
+selected native mode.
 
 ## Primary sources
 

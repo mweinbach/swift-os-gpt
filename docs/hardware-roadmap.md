@@ -21,7 +21,10 @@ instantiate a GL-backed VirGL device, so this crossing has source, protocol, and
 host-test coverage rather than local hardware exercise. The next graphics gate
 is captured accelerated evidence on a capable QEMU build, followed by
 sustained frame scheduling, richer lowering, and vblank-capable presentation.
-Input, block storage, entropy, and networking remain parallel device work.
+Input, QEMU block storage, entropy, and broader networking remain parallel
+device work. The Pi target has a host-tested, DT-discovered SDHCI binding for
+its signed persistent-log arena, but it still needs physical power-loss and
+returned-card evidence before counting as hardware support.
 
 ## Stage 2: documented physical ARM64 board
 
