@@ -377,6 +377,19 @@ and reset resources required by its Ethernet driver. It does not enumerate the
 root complex, expose the general RP1 aperture, or claim ownership of unrelated
 RP1/PCIe DMA.
 
+RP1 Ethernet board-preparation failures retain four stable diagnostic markers
+before the existing `SWIFTOS:RP1_NET_BOARD_FAILED` or `_TIMEOUT` marker:
+`RP1_NET_BOARD_STAGE`, `_REGISTER`, `_EXPECTED`, and `_OBSERVED`. Stage values
+are `0x1` invalid configuration; `0x2`, `0x3`, and `0x4` SYS, Ethernet, and
+timestamp clock-enable readback; `0x5` reset-GPIO layout; `0x6` asserted output;
+`0x7` output enable; `0x8` SYS_RIO function selection; `0x9` pad output enable;
+`0xa` asserted pad status; `0xb` invalid reset-delay counter; `0xc` reset-delay
+timeout; `0xd` deasserted output; and `0xe` deasserted pad status. Register is
+zero for validation/counter stages. For MMIO stages it is the translated RP1
+address that was read back, while expected and observed preserve the exact
+values needed to distinguish a wrong aperture from an ignored clock or GPIO
+write.
+
 ## USB-C diagnostic display
 
 USB-C is a post-boot debug transport, not the early console and not a

@@ -137,9 +137,17 @@ enum RP1GEMNetworkRuntime {
         case .ready:
             break
         case .timedOut:
+            writeBoardPreparationDiagnostic(
+                preparation.lastDiagnostic,
+                console: console
+            )
             console.write("SWIFTOS:RP1_NET_BOARD_TIMEOUT\n")
             return
         case .failed:
+            writeBoardPreparationDiagnostic(
+                preparation.lastDiagnostic,
+                console: console
+            )
             console.write("SWIFTOS:RP1_NET_BOARD_FAILED\n")
             return
         }
@@ -338,6 +346,25 @@ enum RP1GEMNetworkRuntime {
     ) {
         console.write("SWIFTOS:RP1_NET_IPV4=")
         console.writeHex(UInt64(address.rawValue))
+        console.write("\n")
+    }
+
+    private static func writeBoardPreparationDiagnostic(
+        _ diagnostic: RP1GEMBoardPreparationDiagnostic?,
+        console: EarlyConsole
+    ) {
+        guard let diagnostic else { return }
+        console.write("SWIFTOS:RP1_NET_BOARD_STAGE=")
+        console.writeHex(UInt64(diagnostic.stage.rawValue))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_BOARD_REGISTER=")
+        console.writeHex(diagnostic.registerAddress)
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_BOARD_EXPECTED=")
+        console.writeHex(diagnostic.expectedValue)
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_BOARD_OBSERVED=")
+        console.writeHex(diagnostic.observedValue)
         console.write("\n")
     }
 

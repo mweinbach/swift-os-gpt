@@ -221,6 +221,7 @@ private struct GPIOBoundary {
 @main
 struct RP1GEMBoardPreparationTests {
     static func main() {
+        preservesStableDiagnosticStageValues()
         enablesExactClocksAndPreservesFields()
         resetsActiveLowGPIO32WithoutOutputGlitches()
         resetsActiveHighGPIO53AndMapsEveryBankBoundary()
@@ -228,7 +229,30 @@ struct RP1GEMBoardPreparationTests {
         reportsReadbackAndBoundedCounterFailures()
         preparesExactlyOnceAndRetriesIncompleteAttempts()
         exercisesConcreteMMIOAccess()
-        print("RP1 GEM board preparation: 7 groups passed")
+        print("RP1 GEM board preparation: 8 groups passed")
+    }
+
+    private static func preservesStableDiagnosticStageValues() {
+        let stages: [RP1GEMBoardPreparationStage] = [
+            .invalidConfiguration,
+            .systemClockEnable,
+            .ethernetClockEnable,
+            .timestampClockEnable,
+            .phyResetGPIOLayout,
+            .phyResetAssertOutput,
+            .phyResetOutputEnable,
+            .phyResetFunctionSelect,
+            .phyResetPadOutput,
+            .phyResetAssertStatus,
+            .phyResetDelayCounter,
+            .phyResetDelayTimeout,
+            .phyResetDeassertOutput,
+            .phyResetDeassertStatus,
+        ]
+        expect(
+            stages.map(\.rawValue) == Array(UInt8(1)...UInt8(14)),
+            "persistent diagnostic stage raw values drifted"
+        )
     }
 
     private static func enablesExactClocksAndPreservesFields() {
@@ -495,6 +519,16 @@ struct RP1GEMBoardPreparationTests {
                 && access.events.isEmpty,
             "zero poll bound touched hardware"
         )
+        expect(
+            preparation.lastDiagnostic
+                == RP1GEMBoardPreparationDiagnostic(
+                    stage: .invalidConfiguration,
+                    registerAddress: 0,
+                    expectedValue: 1,
+                    observedValue: 0
+                ),
+            "zero poll bound lost its typed diagnostic"
+        )
     }
 
     private static func reportsReadbackAndBoundedCounterFailures() {
@@ -509,6 +543,18 @@ struct RP1GEMBoardPreparationTests {
             expect(
                 preparation.prepareRP1Ethernet(maximumPollCount: 4) == .failed,
                 "missing clock ENABLE readback accepted"
+            )
+            expect(
+                preparation.lastDiagnostic
+                    == RP1GEMBoardPreparationDiagnostic(
+                        stage: .ethernetClockEnable,
+                        registerAddress: UInt64(ethernet),
+                        expectedValue: UInt64(
+                            RP1GEMBoardRegisterLayout.clockEnable
+                        ),
+                        observedValue: 0
+                    ),
+                "clock readback failure lost address/value diagnostics"
             )
             expect(
                 !access.events.contains(
@@ -532,6 +578,16 @@ struct RP1GEMBoardPreparationTests {
                     && count(.counterFrequency, in: access.events) == 0,
                 "GPIO output readback failure reached the delay"
             )
+            expect(
+                preparation.lastDiagnostic
+                    == RP1GEMBoardPreparationDiagnostic(
+                        stage: .phyResetAssertOutput,
+                        registerAddress: UInt64(gpio.output),
+                        expectedValue: 0,
+                        observedValue: UInt64(gpio.mask)
+                    ),
+                "GPIO output failure lost its exact readback"
+            )
         }
 
         do {
@@ -545,6 +601,19 @@ struct RP1GEMBoardPreparationTests {
                 preparation.prepareRP1Ethernet(maximumPollCount: 4) == .failed
                     && count(.counterFrequency, in: access.events) == 0,
                 "invalid GPIO status reached the reset delay"
+            )
+            let gpio = gpioMap(line: 32)
+            expect(
+                preparation.lastDiagnostic
+                    == RP1GEMBoardPreparationDiagnostic(
+                        stage: .phyResetAssertStatus,
+                        registerAddress: UInt64(gpio.status),
+                        expectedValue: UInt64(
+                            RP1GEMBoardRegisterLayout.outputEnabledToPad
+                        ),
+                        observedValue: 0
+                    ),
+                "GPIO status failure lost its pad-state diagnostic"
             )
         }
 
@@ -563,6 +632,16 @@ struct RP1GEMBoardPreparationTests {
             expect(
                 count(.spin, in: access.events) == 3,
                 "counter timeout exceeded its caller-supplied poll bound"
+            )
+            expect(
+                preparation.lastDiagnostic
+                    == RP1GEMBoardPreparationDiagnostic(
+                        stage: .phyResetDelayTimeout,
+                        registerAddress: 0,
+                        expectedValue: 5,
+                        observedValue: 0
+                    ),
+                "reset timeout lost required/elapsed counter ticks"
             )
             let gpio = gpioMap(line: 32)
             expect(
@@ -584,6 +663,16 @@ struct RP1GEMBoardPreparationTests {
                 preparation.prepareRP1Ethernet(maximumPollCount: 3) == .failed
                     && count(.spin, in: access.events) == 0,
                 "invalid architectural-counter frequency was not rejected"
+            )
+            expect(
+                preparation.lastDiagnostic
+                    == RP1GEMBoardPreparationDiagnostic(
+                        stage: .phyResetDelayCounter,
+                        registerAddress: 0,
+                        expectedValue: 5,
+                        observedValue: 0
+                    ),
+                "invalid counter lost reset-delay diagnostics"
             )
         }
     }
