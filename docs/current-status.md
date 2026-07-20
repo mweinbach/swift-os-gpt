@@ -28,8 +28,7 @@ unless a guest implementation and a repeatable test sit behind it.
   setup. Each participating CPU owns its timer, hook, counters, and fatal
   diagnostics; physical timer delivery, acknowledgement/end-of-interrupt,
   rearming, and repeated per-CPU IRQ evidence are exercised on both controller
-  versions. A returned-card Pi trace now separately proves nonzero secondary and
-  CPU0 timer evidence through the BCM2712 GICv2 path.
+  versions.
 - Range-based physical-memory ownership derived from all discovered RAM banks,
   minus firmware reservation-map entries, `/reserved-memory`, the DTB, kernel,
   and final-table pool. A live fixed-capacity classified allocator owns the
@@ -314,10 +313,11 @@ routed file-manager interaction, or GPU rasterization.
 Revision `9e93dac` booted on one Raspberry Pi 5 8 GB and returned 642 ordered,
 CRC-valid persistent records from a healthy type-`0xda` SwiftOS data volume.
 The trace proves EL1/FDT entry, roughly 8 GB memory discovery, final paging,
-GICv2 and timer delivery, all four PSCI CPUs with independent secondary work,
-SD/MBR/data-volume access, SwiftFS format and mount, and persistent-log recovery
-and flush. The exact artifact, card geometry, markers, and unproven boundaries
-are retained in the
+GICv2 and timer delivery, CPU0 plus three PSCI-started secondaries with
+independent work, SD/MBR/data-volume access, and an initial SwiftFS format and
+mount. Its empty-arena log scan found no prior record; the current boot was then
+flushed durably. The exact artifact, card geometry, markers, and unproven
+boundaries are retained in the
 [2026-07-20 hardware evidence](hardware-evidence/2026-07-20-pi5-8gb-9e93dac.md).
 
 That boot did not enumerate USB, establish Ethernet, receive a firmware simple
@@ -362,8 +362,8 @@ cooperative pass. It never rewrites an ambiguous MBR or signed data-volume
 layout; once those validate, the disjoint user subrange may be opened or
 formatted as blank SwiftFS. Discovery, signature, bounds, or transport failure
 drops the relevant write authority. The returned-card trace proves the physical
-controller, signed data-volume, log write/recovery, and initial SwiftFS format
-path.
+controller, validated data volume, empty-arena scan, current-boot log write, and
+initial SwiftFS format path, but not prior-boot recovery.
 The SD controller record, SwiftFS scratch, and provider record use stable
 classified allocations. A host-tested policy derives disjoint absolute log and
 user-filesystem ranges. A resumable bootstrap performs at most one block
@@ -424,8 +424,9 @@ SPI-`0x111`/INTID-`0x131` route. These gates prove an artifact and unpatched
 source-DTB contract. The package carries the official pinned
 `dwc2.dtbo`, applies it in peripheral mode, and records its hash. Platform
 discovery host-tests the translated DWC2 MMIO resource and keeps QEMU free of
-that Pi-only contract. The kernel retains the DWC2 and mailbox mappings, powers
-the USB domain, initializes the controller in polled PIO device mode, and can
+that Pi-only contract. The kernel retains the DWC2 and mailbox mappings,
+requests legacy firmware power or accepts a well-formed unavailable response as
+unmanaged, then initializes the controller in polled PIO device mode and can
 export the completed diagnostic desktop through the host-tested CDC/SDDP path.
 The Pi scheduler handoff consumes only `KernelSMP`'s exact proven-online count,
 published after every selected secondary also completes its bounded work. A
@@ -439,8 +440,9 @@ simple framebuffer, a headless USB surface fallback, and a removable-SD binding
 that can persist the retained kernel log and bootstrap a disjoint SwiftFS user
 range only after signed-volume validation, using stable allocator-owned records.
 Physical evidence now covers boot, firmware-patched memory/paging, GICv2 timers,
-PSCI startup and secondary work, SD transfer, the data volume, log recovery, and
-the initial SwiftFS mount. It does not cover UART electrical output, USB
+PSCI startup and secondary work, SD transfer, the data volume, an empty-arena
+scan, current-boot persistence, and the initial SwiftFS mount. It does not cover
+prior-boot log recovery, UART electrical output, USB
 enumeration/frame transport, Ethernet link, detailed above-4-GiB allocator
 stress, HDMI, native GPU, input, Pi EL0 migration, or a GUI.
 

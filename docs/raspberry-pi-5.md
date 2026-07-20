@@ -2,8 +2,9 @@
 
 > **Hardware status: early bring-up verified, target not supported.** One exact
 > SwiftOS artifact has booted on a Raspberry Pi 5 8 GB through FDT parsing,
-> memory ownership and final paging, GICv2/timers, four-core PSCI work, SD,
-> SwiftFS, and persistent-log recovery. USB enumeration, Ethernet link, HDMI,
+> memory ownership and final paging, GICv2/timers, CPU0 plus three PSCI-started
+> secondaries, SD, SwiftFS, and first persistent-log flush. USB enumeration,
+> Ethernet link, HDMI,
 > native V3D VII/HVS rendering, input, and Pi EL0 scheduling remain unverified.
 > See the [2026-07-20 returned-card evidence](hardware-evidence/2026-07-20-pi5-8gb-9e93dac.md).
 > No general hardware-support claim is permitted until the validation gate
@@ -63,9 +64,10 @@ values, so two builds with the same package and geometry are byte-identical.
 publish an enabled `brcm,bcm2835-usb` node, which shared platform discovery
 translates through its parent `ranges` into a controller-neutral DWC2 MMIO
 resource. If `dr_mode` is present, SwiftOS accepts only `peripheral`; QEMU does
-not publish this resource. SwiftOS retains that mapping, powers the USB domain
-through the discovered firmware mailbox, and binds the same board-neutral DWC2
-device controller used by host tests. Physical enumeration remains unverified.
+not publish this resource. SwiftOS retains that mapping, requests the legacy
+firmware power domain or accepts a well-formed unavailable response as
+unmanaged, and binds the same board-neutral DWC2 device controller used by host
+tests. Physical enumeration remains unverified.
 
 Build and statically inspect the Pi image with:
 
@@ -191,7 +193,8 @@ copy is not a whole-card flash: it cannot create a missing type-`0xda`
 partition. A card that was previously prepared as FAT-only therefore still has
 no SwiftFS or persistent-log arena after this update; perform a deliberate
 whole-card initialization when preserving its old contents is no longer
-required. The semantic verifier follows only paths named by the signed manifest,
+required. The semantic verifier follows only paths named by the package hash
+manifest,
 so unrelated `.Spotlight-V100`, `.fseventsd`, and AppleDouble files neither
 invalidate the boot payload nor expand the verifier's read scope.
 
@@ -268,13 +271,15 @@ current SDHCI transport remains synchronous and polled; retaining the validated
 route is groundwork for an asynchronous driver, not a claim that SD IRQ delivery
 has executed.
 
-The first physical trace reached `SD_INIT_READY_BLOCKS`, read the MBR and signed
-data superblock, formatted the blank SwiftFS range, published `SWIFTFS_READY`,
-recovered the log arena, and durably flushed the retained boot. That proves the
-bounded polled transport and initial provider path for one exact card. It does
-not prove the retained SD interrupt route, power-loss behavior during a write,
-or a subsequent physical SwiftFS remount. QEMU's native VirtIO-block/SwiftFS
-multi-boot smoke remains separate evidence.
+The first physical trace reached `SD_INIT_READY_BLOCKS`, read the MBR and
+validated data superblock, formatted the blank SwiftFS range, and published
+`SWIFTFS_READY`. Its recovery scan reported no previous record
+(`STORAGE_LOG_RECOVERY_READY=0`) before it durably flushed the current boot.
+That proves the bounded polled transport, initial provider path, and first log
+persistence for one exact card. It does not prove prior-boot recovery, the
+retained SD interrupt route, power-loss behavior during a write, or a subsequent
+physical SwiftFS remount. QEMU's native VirtIO-block/SwiftFS multi-boot smoke
+remains separate evidence.
 
 ## AArch64 Image contract
 
@@ -583,8 +588,9 @@ CPU compositor. The logical desktop is 800 x 600: a 1920 x 1080 scanout uses
 centered 1x rendering, while 3840 x 2160 uses centered 3x rendering. Letterbox
 pixels are cleared by the diagnostic canvas. The Pi image rasterizes the
 retained indicator's initial state before the first full-frame presentation.
-Continuous animation is currently exercised only by the single-CPU QEMU
-monitor, not by the Pi multicore/EL0 path.
+The returned-card trace reached `ANIMATION_FRAME_OK` and `ANIMATION_PEAK_OK` in
+the Pi monitor loop. It does not prove sustained or vblank-driven animation,
+and the Pi did not enter EL0.
 
 Device-tree discovery now identifies enabled `brcm,2712-v3d` hub, core, and SMS
 register tuples, the HVS register resource, and the graphics address-translation
@@ -604,7 +610,8 @@ host-tested, but the Pi path has no packaged font asset, native GPU glyph atlas,
 GPU upload/sampling path, or live font selection. QEMU's fixed VirGL mask atlas
 does not constitute Pi support. When no supported diagnostic framebuffer is
 present, the Pi can render the same diagnostic desktop into its kernel-owned
-USB surface; if USB activation also fails, current boot remains serial-only.
+USB surface; if USB activation also fails, no external display transport is
+verified, leaving attempted UART output plus the returned-card log path.
 There is no dynamic font loader/shaper/atlas, EL0 window server, or Pi GPU text
 path. The Pi executed the headless diagnostic-render path, but the firmware
 reported no simple framebuffer; USB enumeration and HDMI output remain
@@ -633,7 +640,8 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 - GICv2 distributor/CPU-interface discovery, one global distributor setup, and
   four processor-local PPI/GICC initializations pass repeating architectural-
   timer acknowledgement/EOI tests without an exception loop.
-- PSCI brings all four cores online with unique stacks and dense per-CPU IDs.
+- CPU0 plus three PSCI-started secondaries come online with unique stacks and
+  dense per-CPU IDs.
   For each `n` in 1, 2, and 3, retain ordered
   `SWIFTOS:SMP_CPU{n}_ONLINE`, `SWIFTOS:SMP_CPU{n}_TASK1_OK`,
   `SWIFTOS:SMP_CPU{n}_TASK1_CHECKSUM=0x...`,
