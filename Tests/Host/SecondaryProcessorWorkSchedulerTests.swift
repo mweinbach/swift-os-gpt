@@ -6,7 +6,8 @@ struct SecondaryProcessorWorkSchedulerTests {
         rejectsCrossCPUCompletionClaims()
         validatesUniqueSecondaryStackOwnership()
         rejectsInvalidExecutorAndSchedulerConfiguration()
-        print("Secondary processor work scheduler host tests: 5 passed")
+        boundsEvidenceWaitByCounterTimeAndDefensivePolls()
+        print("Secondary processor work scheduler host tests: 6 passed")
     }
 
     private static func buildsTwoDistinctAffinityPinnedTasksPerSecondary() {
@@ -176,6 +177,45 @@ struct SecondaryProcessorWorkSchedulerTests {
             contextStorage: contexts,
             processorCount: 4
         ) == nil, "undersized task storage")
+    }
+
+    private static func boundsEvidenceWaitByCounterTimeAndDefensivePolls() {
+        expect(SecondaryProcessorWorkWaitPolicy(
+            startedAtTicks: 0,
+            timeoutTicks: 0,
+            maximumPollCount: 1
+        ) == nil, "zero evidence timeout")
+        expect(SecondaryProcessorWorkWaitPolicy(
+            startedAtTicks: 0,
+            timeoutTicks: 1,
+            maximumPollCount: 0
+        ) == nil, "zero evidence poll bound")
+
+        var wrapping = SecondaryProcessorWorkWaitPolicy(
+            startedAtTicks: UInt64.max - 5,
+            timeoutTicks: 10,
+            maximumPollCount: 8
+        )!
+        expect(
+            wrapping.permitAnotherPoll(counterTick: 2),
+            "wrapping counter elapsed too early"
+        )
+        expect(
+            !wrapping.permitAnotherPoll(counterTick: 4),
+            "wrapping counter exceeded its deadline"
+        )
+
+        var bounded = SecondaryProcessorWorkWaitPolicy(
+            startedAtTicks: 100,
+            timeoutTicks: 1_000,
+            maximumPollCount: 2
+        )!
+        expect(bounded.permitAnotherPoll(counterTick: 100), "first poll")
+        expect(bounded.permitAnotherPoll(counterTick: 100), "second poll")
+        expect(
+            !bounded.permitAnotherPoll(counterTick: 100),
+            "stopped counter bypassed the defensive poll bound"
+        )
     }
 }
 

@@ -438,10 +438,10 @@ enum SecondaryProcessorWorkRuntime {
 
     static func waitForEvidence(
         logicalProcessorID: Int,
-        pollLimit: UInt64
+        timeoutTicks: UInt64,
+        maximumPollCount: UInt64
     ) -> SecondaryProcessorWorkEvidenceResult {
-        guard pollLimit > 0,
-              logicalProcessorID > 0,
+        guard logicalProcessorID > 0,
               let processorCount = publishedCount(),
               logicalProcessorID < processorCount,
               let states = stateStorage,
@@ -449,13 +449,17 @@ enum SecondaryProcessorWorkRuntime {
               let results = resultStorage,
               let stacks = stackStorage,
               logicalProcessorID < states.count,
-              logicalProcessorID < stacks.count
+              logicalProcessorID < stacks.count,
+              var waitPolicy = SecondaryProcessorWorkWaitPolicy(
+                  startedAtTicks: AArch64.counterValue,
+                  timeoutTicks: timeoutTicks,
+                  maximumPollCount: maximumPollCount
+              )
         else {
             return .invalidContext
         }
 
-        var pollCount: UInt64 = 0
-        while pollCount < pollLimit {
+        while true {
             let rawState = smpLoadAcquire(
                 stateBase.advanced(by: logicalProcessorID)
             )
@@ -478,10 +482,14 @@ enum SecondaryProcessorWorkRuntime {
             case .absent:
                 return .invalidContext
             }
-            pollCount &+= 1
+            guard waitPolicy.permitAnotherPoll(
+                      counterTick: AArch64.counterValue
+                  )
+            else {
+                return .timedOut
+            }
             AArch64.spinHint()
         }
-        return .timedOut
     }
 
     static func state(

@@ -715,6 +715,7 @@ secondary-work-scheduler-host-test: | $(BUILD_DIR)
 		Kernel/SMP/PSCITypes.swift \
 		Kernel/Scheduler/RunQueue.swift \
 		Kernel/Scheduler/SecondaryProcessorWorkScheduler.swift \
+		Kernel/SMP/SecondaryProcessorWorkWaitPolicy.swift \
 		Tests/Host/SecondaryProcessorWorkSchedulerTests.swift \
 		-o $(BUILD_DIR)/secondary-processor-work-scheduler-host-tests
 	$(BUILD_DIR)/secondary-processor-work-scheduler-host-tests

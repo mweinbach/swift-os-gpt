@@ -11,6 +11,8 @@ enum KernelSMP {
     private static let stateCapacity = 4
     private static let reportCapacity = 3
     private static let pollLimit: UInt64 = 10_000_000
+    private static let workEvidenceTimeoutSeconds: UInt64 = 1
+    private static let workEvidenceMaximumPollCount: UInt64 = 1_000_000_000
 
     /// Starts as many unique DT processors as are available, capped at four
     /// including CPU0. Returns true only when every selected secondary entered
@@ -160,6 +162,16 @@ enum KernelSMP {
             else {
                 return false
             }
+            let counterFrequency = AArch64.counterFrequency
+            guard counterFrequency > 0,
+                  counterFrequency
+                    <= UInt64.max / workEvidenceTimeoutSeconds
+            else {
+                console.write("SWIFTOS:SMP_WORK_BAD_CLOCK\n")
+                return false
+            }
+            let workEvidenceTimeoutTicks = counterFrequency
+                * workEvidenceTimeoutSeconds
             reportIndex = 0
             while reportIndex < plan.secondaryProcessorCount {
                 guard let report = runtime.report(at: reportIndex) else {
@@ -171,7 +183,8 @@ enum KernelSMP {
                 )
                 switch SecondaryProcessorWorkRuntime.waitForEvidence(
                     logicalProcessorID: logicalProcessorID,
-                    pollLimit: pollLimit
+                    timeoutTicks: workEvidenceTimeoutTicks,
+                    maximumPollCount: workEvidenceMaximumPollCount
                 ) {
                 case let .complete(evidence):
                     writeWorkEvidence(evidence, console: console)
