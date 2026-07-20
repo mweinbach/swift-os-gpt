@@ -79,6 +79,50 @@ struct KernelConsoleLogChunk: Equatable {
     }
 }
 
+/// First structured event in every initialized volatile log. Persistent record
+/// sequence numbers survive reboot while volatile ring sequences restart, so a
+/// dedicated boundary lets offline tools identify the new boot without
+/// inferring it solely from a non-increasing sequence transition.
+struct KernelBootEpochLogEvent: Equatable {
+    static let eventCode: UInt32 = 0x424f_4f54 // "BOOT"
+    static let schemaVersion: UInt32 = 1
+
+    let startedAtTicks: UInt64
+    let processorID: UInt32
+    let deviceTreeAddress: UInt64
+    let counterFrequency: UInt64
+
+    init?(event: KernelLogEvent) {
+        guard event.eventCode == Self.eventCode,
+              event.level == .notice,
+              event.subsystem == .boot,
+              event.flags == Self.schemaVersion
+        else { return nil }
+        startedAtTicks = event.timestampTicks
+        processorID = event.processorID
+        deviceTreeAddress = event.argument0
+        counterFrequency = event.argument1
+    }
+
+    static func event(
+        startedAtTicks: UInt64,
+        processorID: UInt32,
+        deviceTreeAddress: UInt64,
+        counterFrequency: UInt64
+    ) -> KernelLogEvent {
+        KernelLogEvent(
+            timestampTicks: startedAtTicks,
+            level: .notice,
+            subsystem: .boot,
+            eventCode: eventCode,
+            processorID: processorID,
+            flags: schemaVersion,
+            argument0: deviceTreeAddress,
+            argument1: counterFrequency
+        )
+    }
+}
+
 /// Pure fixed-storage encoder used by the runtime and by host tests. Newline
 /// expansion happens here so retained bytes exactly match the CRLF stream sent
 /// to PL011. A caller serializes mutation when this value is shared.
@@ -94,6 +138,10 @@ struct KernelDebugLogBuffer {
 
     func entry(sequence: UInt64) -> KernelLogLookupResult {
         ring.entry(sequence: sequence)
+    }
+
+    mutating func append(_ event: KernelLogEvent) -> KernelLogAppendResult {
+        ring.append(event)
     }
 
     mutating func appendCanonical(
@@ -252,7 +300,7 @@ enum KernelDebugLogRuntime {
     private nonisolated(unsafe) static var buffer: KernelDebugLogBuffer?
     private nonisolated(unsafe) static var lockWord: UInt32 = 0
 
-    static func initialize() {
+    static func initialize(deviceTreeAddress: UInt64) {
         let interruptState = lock()
         defer { unlock(restoring: interruptState) }
         guard buffer == nil else { return }
@@ -263,12 +311,23 @@ enum KernelDebugLogRuntime {
                   bitPattern: UInt(region.start)
               )
         else { return }
-        buffer = KernelDebugLogBuffer(
-            storage: UnsafeMutableRawBufferPointer(
-                start: storage,
-                count: Int(region.length)
+        guard var active = KernelDebugLogBuffer(
+                  storage: UnsafeMutableRawBufferPointer(
+                      start: storage,
+                      count: Int(region.length)
+                  )
+              )
+        else { return }
+        let startedAtTicks = AArch64.counterValue
+        _ = active.append(
+            KernelBootEpochLogEvent.event(
+                startedAtTicks: startedAtTicks,
+                processorID: AArch64.redistributorAffinity,
+                deviceTreeAddress: deviceTreeAddress,
+                counterFrequency: AArch64.counterFrequency
             )
         )
+        buffer = active
     }
 
     /// Retains and emits one StaticString under the same lock, making the log

@@ -103,6 +103,27 @@ def console_payload(
     )
 
 
+def boot_epoch_payload(
+    sequence: int = 1,
+    *,
+    started_at_ticks: int = 0x1234,
+    processor_id: int = 0x300,
+    device_tree_address: int = 0x2_0000_0000,
+    counter_frequency_hz: int = 54_000_000,
+) -> bytes:
+    return kernel_log_payload(
+        sequence,
+        timestamp=started_at_ticks,
+        level=3,
+        subsystem=2,
+        event_code=media.KERNEL_BOOT_EPOCH_EVENT_CODE,
+        processor_id=processor_id,
+        flags=media.KERNEL_BOOT_EPOCH_SCHEMA_VERSION,
+        argument0=device_tree_address,
+        argument1=counter_frequency_hz,
+    )
+
+
 def blank_fixture_bytes(log_blocks: int) -> tuple[bytearray, int]:
     blocks = 64
     data_start = 16
@@ -303,6 +324,73 @@ def test_console_chunks_reconstruct_split_crlf_marker() -> None:
     }
     require(expected_log_reads.issubset(set(source.read_extents)),
             "console reconstruction read outside the pre-scanned arena")
+
+
+def test_structured_boot_epoch_precedes_console_capture() -> None:
+    value, data_start = blank_fixture_bytes(3)
+    install_record(value, data_start, 3, 1, boot_epoch_payload())
+    install_record(
+        value,
+        data_start,
+        3,
+        2,
+        console_payload(
+            2,
+            b"SWIFTOS:BOOT\r\n",
+            is_first=True,
+            is_last=True,
+            timestamp=0x1235,
+            processor_id=0x300,
+        ),
+    )
+
+    report, _ = inspect_bytes(value)
+    first = report["persistent_records"][0]
+    require(first["kernel_log_event"]["event_code_tag"] == "BOOT",
+            "structured boot event tag changed")
+    require(first["boot_epoch"] == {
+        "schema_version": 1,
+        "started_at_ticks": 0x1234,
+        "processor_id": 0x300,
+        "device_tree_address": 0x2_0000_0000,
+        "counter_frequency_hz": 54_000_000,
+    }, "structured boot epoch decode changed")
+    markers = report["boot_epoch_markers"]
+    require(markers["count"] == 1, "boot epoch marker count changed")
+    require(markers["markers"] == [{
+        "persistent_sequence": 1,
+        "kernel_sequence": 1,
+        **first["boot_epoch"],
+    }], "boot epoch marker coordinates changed")
+    summary = report["capture_summary"]
+    require(summary == {
+        "status": "records-present",
+        "has_persistent_records": True,
+        "has_boot_epoch_marker": True,
+        "has_console_bytes": True,
+    }, "capture summary changed")
+    stream = report["canonical_console_stream"]
+    require(stream["text"] == "SWIFTOS:BOOT\r\n",
+            "console did not follow structured boot epoch")
+    require(not stream["is_empty"] and stream["is_complete"],
+            "single-epoch console capture was not complete")
+
+
+def test_empty_arena_is_not_claimed_as_complete_console() -> None:
+    value, _ = blank_fixture_bytes(2)
+    report, _ = inspect_bytes(value)
+    require(report["capture_summary"] == {
+        "status": "empty",
+        "has_persistent_records": False,
+        "has_boot_epoch_marker": False,
+        "has_console_bytes": False,
+    }, "empty capture summary changed")
+    require(report["boot_epoch_markers"] == {"count": 0, "markers": []},
+            "empty arena manufactured a boot epoch")
+    stream = report["canonical_console_stream"]
+    require(stream["is_empty"], "empty console stream was not explicit")
+    require(not stream["is_complete"],
+            "empty console stream was misleadingly called complete")
 
 
 def test_sequence_gaps_and_kernel_epochs_are_explicit() -> None:
@@ -547,6 +635,8 @@ def main() -> int:
     tests = [
         test_valid_capture_is_partition_bounded,
         test_console_chunks_reconstruct_split_crlf_marker,
+        test_structured_boot_epoch_precedes_console_capture,
+        test_empty_arena_is_not_claimed_as_complete_console,
         test_sequence_gaps_and_kernel_epochs_are_explicit,
         test_kernel_epoch_boundary_is_not_one_complete_stream,
         test_mbr_and_partition_refusals,

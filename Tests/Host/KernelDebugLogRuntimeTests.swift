@@ -4,8 +4,9 @@ struct KernelDebugLogRuntimeTests {
         retainsCanonicalConsoleBytesAcrossChunks()
         marksExactBoundaryAsOneCompleteChunk()
         preservesMonotonicSequenceAcrossProducers()
+        retainsStructuredBootEpochBeforeConsole()
         retainsWholeMessageWhenSerialEmissionStops()
-        print("kernel debug log runtime host tests: 4 groups passed")
+        print("kernel debug log runtime host tests: 5 groups passed")
     }
 
     private static func retainsCanonicalConsoleBytesAcrossChunks() {
@@ -83,6 +84,58 @@ struct KernelDebugLogRuntimeTests {
             expect(chunk(log, sequence: 1).source == .earlyConsole, "early source")
             expect(chunk(log, sequence: 2).source == .monitor, "monitor source")
             expect(event(log, sequence: 3).timestampTicks == 12, "monotonic event")
+        }
+    }
+
+    private static func retainsStructuredBootEpochBeforeConsole() {
+        withLog(capacity: 3) { log in
+            let boot = KernelBootEpochLogEvent.event(
+                startedAtTicks: 0x1234,
+                processorID: 0x300,
+                deviceTreeAddress: 0x2_0000_0000,
+                counterFrequency: 54_000_000
+            )
+            expect(
+                log.append(boot) == .appended(
+                    sequence: 1,
+                    overwrittenSequence: nil
+                ),
+                "boot epoch append"
+            )
+            let message = Array("SWIFTOS:BOOT\n".utf8)
+            message.withUnsafeBufferPointer {
+                log.appendCanonical(
+                    $0,
+                    timestampTicks: 0x1235,
+                    processorID: 0x300,
+                    source: .earlyConsole
+                )
+            }
+
+            guard let decoded = KernelBootEpochLogEvent(
+                      event: event(log, sequence: 1)
+                  )
+            else { fail("boot epoch decode") }
+            expect(decoded.startedAtTicks == 0x1234, "boot start ticks")
+            expect(decoded.processorID == 0x300, "boot processor")
+            expect(
+                decoded.deviceTreeAddress == 0x2_0000_0000,
+                "boot device tree"
+            )
+            expect(
+                decoded.counterFrequency == 54_000_000,
+                "boot counter frequency"
+            )
+            expect(
+                KernelConsoleLogChunk(
+                    event: event(log, sequence: 1)
+                ) == nil,
+                "boot epoch decoded as console"
+            )
+            expect(
+                chunk(log, sequence: 2).isFirst,
+                "console did not follow boot epoch"
+            )
         }
     }
 

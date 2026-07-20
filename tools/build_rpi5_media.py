@@ -35,6 +35,8 @@ LOG_VERSION = 1
 LOG_HEADER_BYTES = 40
 KERNEL_LOG_PAYLOAD_BYTES = 48
 KERNEL_CONSOLE_EVENT_CODE = 0x434F_4E53  # "CONS"
+KERNEL_BOOT_EPOCH_EVENT_CODE = 0x424F_4F54  # "BOOT"
+KERNEL_BOOT_EPOCH_SCHEMA_VERSION = 1
 KERNEL_CONSOLE_BYTE_COUNT_MASK = 0x1F
 KERNEL_CONSOLE_FIRST_FLAG = 1 << 8
 KERNEL_CONSOLE_LAST_FLAG = 1 << 9
@@ -1003,6 +1005,28 @@ def decode_console_chunk(
     }
 
 
+def decode_boot_epoch(
+    event: dict[str, object],
+) -> dict[str, object] | None:
+    """Mirror KernelBootEpochLogEvent's stable structured boundary."""
+
+    if (
+        not event["codec_valid"]
+        or int(event["event_code"]) != KERNEL_BOOT_EPOCH_EVENT_CODE
+        or int(event["level"]) != 3
+        or int(event["subsystem"]) != 2
+        or int(event["flags"]) != KERNEL_BOOT_EPOCH_SCHEMA_VERSION
+    ):
+        return None
+    return {
+        "schema_version": KERNEL_BOOT_EPOCH_SCHEMA_VERSION,
+        "started_at_ticks": int(event["timestamp_ticks"]),
+        "processor_id": int(event["processor_id"]),
+        "device_tree_address": int(event["argument0"]),
+        "counter_frequency_hz": int(event["argument1"]),
+    }
+
+
 def sequence_metadata(
     points: list[tuple[int, int]],
 ) -> dict[str, object]:
@@ -1126,6 +1150,16 @@ def persistent_log_diagnostics(
     persistent = sequence_metadata(persistent_points)
     kernel = sequence_metadata(kernel_points)
 
+    boot_epoch_markers = [
+        {
+            "persistent_sequence": int(record["sequence"]),
+            "kernel_sequence": int(record["kernel_log_event"]["sequence"]),
+            **record["boot_epoch"],
+        }
+        for record in records
+        if "boot_epoch" in record
+    ]
+
     chunks = [
         (record, record["console_chunk"])
         for record in records
@@ -1188,13 +1222,26 @@ def persistent_log_diagnostics(
 
     has_sequence_gaps = bool(persistent["has_gaps"] or kernel["has_gaps"])
     crosses_kernel_epochs = int(kernel["epoch_count"]) > 1
+    has_records = bool(records)
+    has_console_bytes = bool(encoded)
     return {
+        "capture_summary": {
+            "status": "records-present" if has_records else "empty",
+            "has_persistent_records": has_records,
+            "has_boot_epoch_marker": bool(boot_epoch_markers),
+            "has_console_bytes": has_console_bytes,
+        },
+        "boot_epoch_markers": {
+            "count": len(boot_epoch_markers),
+            "markers": boot_epoch_markers,
+        },
         "sequence_metadata": {
             "persistent_record": persistent,
             "kernel_log": kernel,
         },
         "canonical_console_stream": {
             "ordering": "persistent-sequence",
+            "is_empty": not has_console_bytes,
             "chunk_count": len(chunks),
             "byte_count": len(encoded),
             "bytes_hex": encoded.hex(),
@@ -1213,7 +1260,8 @@ def persistent_log_diagnostics(
             "has_sequence_gaps": has_sequence_gaps,
             "crosses_kernel_epochs": crosses_kernel_epochs,
             "is_complete": (
-                not has_sequence_gaps
+                has_console_bytes
+                and not has_sequence_gaps
                 and not crosses_kernel_epochs
                 and not boundary_issues
                 and console_utf8_valid
@@ -1265,6 +1313,9 @@ def persistent_records(image, data_partition, layout) -> list[dict[str, object]]
             console_chunk = decode_console_chunk(event)
             if console_chunk is not None:
                 record["console_chunk"] = console_chunk
+            boot_epoch = decode_boot_epoch(event)
+            if boot_epoch is not None:
+                record["boot_epoch"] = boot_epoch
         records.append(record)
     records.sort(key=lambda item: int(item["sequence"]))
     return records
