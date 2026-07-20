@@ -1045,8 +1045,9 @@ private func makeRuntimeMemoryDeviceTree(
     deviceTreeMemory: DeviceResource
 ) -> [UInt8] {
     let propertyNames = [
-        "#address-cells", "#size-cells", "compatible", "device_type",
-        "ranges", "reg",
+        "#address-cells", "#size-cells", "#interrupt-cells", "compatible",
+        "device_type", "interrupt-controller", "interrupt-parent",
+        "interrupts", "phandle", "ranges", "reg",
     ]
     var strings: [UInt8] = []
     var offsets: [String: UInt32] = [:]
@@ -1063,6 +1064,11 @@ private func makeRuntimeMemoryDeviceTree(
     fdtProperty(
         offsets["compatible"]!,
         Array("qemu,virt".utf8) + [0],
+        to: &structure
+    )
+    fdtProperty(
+        offsets["interrupt-parent"]!,
+        fdtBE32(1),
         to: &structure
     )
 
@@ -1144,7 +1150,25 @@ private func makeRuntimeMemoryDeviceTree(
             + fdtBE64(0x080a_0000) + fdtBE64(0x20_0000),
         to: &structure
     )
+    fdtProperty(offsets["interrupt-controller"]!, [], to: &structure)
+    fdtProperty(offsets["#interrupt-cells"]!, fdtBE32(3), to: &structure)
+    fdtProperty(offsets["phandle"]!, fdtBE32(1), to: &structure)
     fdtWord(2, to: &structure)
+
+    fdtNode("timer", to: &structure)
+    fdtProperty(
+        offsets["compatible"]!,
+        Array("arm,armv8-timer".utf8) + [0],
+        to: &structure
+    )
+    fdtProperty(
+        offsets["interrupts"]!,
+        fdtBE32(1) + fdtBE32(13) + fdtBE32(4)
+            + fdtBE32(1) + fdtBE32(14) + fdtBE32(4)
+            + fdtBE32(1) + fdtBE32(11) + fdtBE32(4)
+            + fdtBE32(1) + fdtBE32(10) + fdtBE32(4),
+        to: &structure
+    )
     fdtWord(2, to: &structure)
     fdtWord(9, to: &structure)
 
