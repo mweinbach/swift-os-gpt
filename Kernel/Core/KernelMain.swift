@@ -1135,6 +1135,16 @@ private func powerOnRaspberryPiUSB(
     case .completed:
         console.write("SWIFTOS:USB_POWER_READY\n")
         return true
+    case .deviceUnavailable:
+        // SET_POWER_STATE device 3 is the legacy USB HCD power domain. Pi 5
+        // may expose its DT-described DWC2 device controller without exposing
+        // that legacy firmware identifier. A well-formed "does not exist"
+        // response therefore transfers the capability decision to the DWC2
+        // driver; malformed responses and real state mismatches still fail.
+        console.write("SWIFTOS:USB_POWER_UNMANAGED\n")
+        return true
+    case .stateMismatch:
+        console.write("SWIFTOS:USB_POWER_STATE_MISMATCH\n")
     case .invalidPollLimit:
         console.write("SWIFTOS:USB_POWER_POLL_LIMIT\n")
     case .cacheCleanFailed:
@@ -1167,8 +1177,8 @@ private func usbPowerResponseMarker(
         return "SWIFTOS:USB_POWER_TAG_LENGTH\n"
     case .deviceIdentifier:
         return "SWIFTOS:USB_POWER_DEVICE_ID\n"
-    case .powerState:
-        return "SWIFTOS:USB_POWER_STATE\n"
+    case .powerStateReservedBits:
+        return "SWIFTOS:USB_POWER_STATE_RESERVED\n"
     case .endTag:
         return "SWIFTOS:USB_POWER_END_TAG\n"
     }

@@ -6,7 +6,7 @@ private enum MailboxResponseMutation {
     case tagBufferSize
     case tagResponseLength
     case deviceIdentifier
-    case powerState
+    case powerStateReservedBits
     case endTag
 }
 
@@ -19,6 +19,7 @@ private final class MailboxRegisterBank {
     var incomingStatuses: [UInt32] = [0]
     var incomingMessages: [UInt32] = []
     var responseMutation = MailboxResponseMutation.none
+    var responsePowerState: UInt32 = 1
     var bufferCPUAddress: UInt64 = 0
     var outgoingStatusIndex = 0
     var incomingStatusIndex = 0
@@ -47,7 +48,10 @@ private final class MailboxRegisterBank {
         }
         PhysicalBytes.writeLE32(0x8000_0000, at: bufferCPUAddress + 4)
         PhysicalBytes.writeLE32(0x8000_0008, at: bufferCPUAddress + 16)
-        PhysicalBytes.writeLE32(1, at: bufferCPUAddress + 24)
+        PhysicalBytes.writeLE32(
+            responsePowerState,
+            at: bufferCPUAddress + 24
+        )
         switch responseMutation {
         case .none:
             break
@@ -63,8 +67,8 @@ private final class MailboxRegisterBank {
             PhysicalBytes.writeLE32(0x8000_0004, at: bufferCPUAddress + 16)
         case .deviceIdentifier:
             PhysicalBytes.writeLE32(4, at: bufferCPUAddress + 20)
-        case .powerState:
-            PhysicalBytes.writeLE32(2, at: bufferCPUAddress + 24)
+        case .powerStateReservedBits:
+            PhysicalBytes.writeLE32(4, at: bufferCPUAddress + 24)
         case .endTag:
             PhysicalBytes.writeLE32(1, at: bufferCPUAddress + 28)
         }
@@ -141,10 +145,11 @@ struct FirmwarePropertyMailboxTests {
         validatesPowerOnRequestAndResponse()
         pollsFullAndEmptyFIFOsWithinBounds()
         skipsUnrelatedMailboxMessages()
+        classifiesPowerStateResponseSemantics()
         rejectsMalformedResponses()
         reportsBoundedTimeouts()
         validatesBuffersPollLimitsAndCacheOwnership()
-        print("firmware property mailbox: 6 groups passed")
+        print("firmware property mailbox: 7 groups passed")
     }
 
     private static func validatesPowerOnRequestAndResponse() {
@@ -257,6 +262,39 @@ struct FirmwarePropertyMailboxTests {
         }
     }
 
+    private static func classifiesPowerStateResponseSemantics() {
+        expectPowerStateResult(
+            returnedState: 2,
+            poweredOn: true,
+            expected: .deviceUnavailable,
+            message: "unavailable powered-off device was not classified"
+        )
+        expectPowerStateResult(
+            returnedState: 3,
+            poweredOn: true,
+            expected: .deviceUnavailable,
+            message: "unavailable powered-on device was not classified"
+        )
+        expectPowerStateResult(
+            returnedState: 0,
+            poweredOn: true,
+            expected: .stateMismatch,
+            message: "powered-off response did not report a state mismatch"
+        )
+        expectPowerStateResult(
+            returnedState: 1,
+            poweredOn: false,
+            expected: .stateMismatch,
+            message: "powered-on response did not report a state mismatch"
+        )
+        expectPowerStateResult(
+            returnedState: 0,
+            poweredOn: false,
+            expected: .completed,
+            message: "valid power-off response failed"
+        )
+    }
+
     private static func rejectsMalformedResponses() {
         let fixtures: [(MailboxResponseMutation, FirmwareMailboxPowerResponseError)] = [
             (.bufferSize, .bufferSize),
@@ -265,7 +303,7 @@ struct FirmwarePropertyMailboxTests {
             (.tagBufferSize, .tagBufferSize),
             (.tagResponseLength, .tagResponseLength),
             (.deviceIdentifier, .deviceIdentifier),
-            (.powerState, .powerState),
+            (.powerStateReservedBits, .powerStateReservedBits),
             (.endTag, .endTag),
         ]
         for (mutation, expectedError) in fixtures {
@@ -455,6 +493,36 @@ struct FirmwarePropertyMailboxTests {
             fatalError("valid mailbox fixture was rejected")
         }
         return mailbox
+    }
+
+    private static func expectPowerStateResult(
+        returnedState: UInt32,
+        poweredOn: Bool,
+        expected: FirmwareMailboxPowerStateResult,
+        message: String
+    ) {
+        withAlignedBuffer { address in
+            let bank = MailboxRegisterBank()
+            bank.bufferCPUAddress = address
+            bank.incomingMessages = [messageWord]
+            bank.responsePowerState = returnedState
+            let cache = TestMailboxCache()
+            var mailbox = requireMailbox(
+                address: address,
+                bank: bank,
+                cache: cache
+            )
+            bank.responseMutation = .none
+            expect(
+                mailbox.setPowerState(
+                    deviceID: 3,
+                    poweredOn: poweredOn,
+                    waitUntilStable: true,
+                    maximumPollCount: 1
+                ) == expected,
+                message
+            )
+        }
     }
 
     private static func withAlignedBuffer(_ body: (UInt64) -> Void) {

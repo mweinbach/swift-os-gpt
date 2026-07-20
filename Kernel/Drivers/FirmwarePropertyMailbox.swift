@@ -33,18 +33,26 @@ enum FirmwareMailboxPowerResponseError: UInt8, Equatable {
     case tagBufferSize
     case tagResponseLength
     case deviceIdentifier
-    case powerState
+    case powerStateReservedBits
     case endTag
 }
 
 enum FirmwareMailboxPowerStateResult: Equatable {
     case completed
+    case deviceUnavailable
+    case stateMismatch
     case invalidPollLimit
     case cacheCleanFailed
     case writeTimedOut
     case responseTimedOut
     case cacheInvalidationFailed
     case malformedResponse(FirmwareMailboxPowerResponseError)
+}
+
+private enum FirmwareMailboxPowerResponseStateBits {
+    static let poweredOn: UInt32 = 1 << 0
+    static let deviceUnavailable: UInt32 = 1 << 1
+    static let knownMask = poweredOn | deviceUnavailable
 }
 
 /// Bounded Raspberry Pi property-channel transaction engine. The register and
@@ -152,12 +160,24 @@ struct FirmwarePropertyMailbox<
         else {
             return .cacheInvalidationFailed
         }
-        if let error = validatePowerStateResponse(
-            deviceID: deviceID,
-            poweredOn: poweredOn
-        ) {
+        if let error = validatePowerStateResponse(deviceID: deviceID) {
             return .malformedResponse(error)
         }
+        let returnedState = PhysicalBytes.readLE32(
+            at: bufferCPUAddress + 24
+        )
+        guard returnedState
+                & ~FirmwareMailboxPowerResponseStateBits.knownMask == 0
+        else {
+            return .malformedResponse(.powerStateReservedBits)
+        }
+        if returnedState
+            & FirmwareMailboxPowerResponseStateBits.deviceUnavailable != 0 {
+            return .deviceUnavailable
+        }
+        let returnedPoweredOn = returnedState
+            & FirmwareMailboxPowerResponseStateBits.poweredOn != 0
+        guard returnedPoweredOn == poweredOn else { return .stateMismatch }
         return .completed
     }
 
@@ -182,8 +202,7 @@ struct FirmwarePropertyMailbox<
     }
 
     private func validatePowerStateResponse(
-        deviceID: UInt32,
-        poweredOn: Bool
+        deviceID: UInt32
     ) -> FirmwareMailboxPowerResponseError? {
         guard PhysicalBytes.readLE32(at: bufferCPUAddress)
                 == UInt32(Self.messageByteCount)
@@ -211,9 +230,6 @@ struct FirmwarePropertyMailbox<
         guard PhysicalBytes.readLE32(at: bufferCPUAddress + 20) == deviceID else {
             return .deviceIdentifier
         }
-        let returnedState = PhysicalBytes.readLE32(at: bufferCPUAddress + 24)
-        let requestedState: UInt32 = poweredOn ? 1 : 0
-        guard returnedState == requestedState else { return .powerState }
         guard PhysicalBytes.readLE32(at: bufferCPUAddress + 28) == 0 else {
             return .endTag
         }
