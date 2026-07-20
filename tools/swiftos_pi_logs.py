@@ -44,6 +44,8 @@ MAXIMUM_LIVE_REPORT_BYTES = 32 * 1024 * 1024
 MAXIMUM_SAVED_CAPTURE_BYTES = 64 * 1024 * 1024
 LOGICAL_BLOCK_BYTES = 512
 MAXIMUM_SEQUENCE = (1 << 64) - 1
+MAXIMUM_CONSOLE_CHUNK_BYTES = 16
+LIVE_DEVICE_PATTERN = re.compile(r"/dev/cu\.usbmodem[A-Za-z0-9._-]+")
 
 
 class PiLogToolError(Exception):
@@ -608,6 +610,39 @@ def _live_command(
     return command
 
 
+def _validate_live_request_arguments(
+    *,
+    timeout_seconds: float,
+    starting_sequence: int | None,
+    count: int,
+    poll_interval_seconds: float,
+) -> None:
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not 0.001 <= timeout_seconds <= 3_600
+    ):
+        raise PiLogToolError("--timeout must be between 0.001 and 3600 seconds")
+    if starting_sequence is not None and (
+        isinstance(starting_sequence, bool)
+        or not isinstance(starting_sequence, int)
+        or not 1 <= starting_sequence <= MAXIMUM_SEQUENCE
+    ):
+        raise PiLogToolError("--start must be between 1 and UInt64.max")
+    if (
+        isinstance(count, bool)
+        or not isinstance(count, int)
+        or not 1 <= count <= 4_096
+    ):
+        raise PiLogToolError("--count must be between 1 and 4096")
+    if (
+        isinstance(poll_interval_seconds, bool)
+        or not isinstance(poll_interval_seconds, (int, float))
+        or not 0.05 <= poll_interval_seconds <= 60
+    ):
+        raise PiLogToolError("--poll-interval must be between 0.05 and 60 seconds")
+
+
 def _decode_live_report(value: bytes) -> tuple[dict[str, object], bytes]:
     if len(value) > MAXIMUM_LIVE_REPORT_BYTES:
         raise PiLogToolError("swiftosctl returned an unexpectedly large report")
@@ -677,16 +712,17 @@ def _validate_live_page(
         raise PiLogToolError("live console count is outside the protocol bound")
 
     device_path = report.get("devicePath")
-    if not isinstance(device_path, str) or re.fullmatch(
-        r"/dev/cu\.usbmodem[^/]*",
-        device_path,
-    ) is None:
+    if (
+        not isinstance(device_path, str)
+        or LIVE_DEVICE_PATTERN.fullmatch(device_path) is None
+    ):
         raise PiLogToolError("swiftosctl console returned an invalid devicePath")
     boot_session = report.get("bootSessionID")
-    if not isinstance(boot_session, str) or re.fullmatch(
-        r"[0-9a-f]{32}",
-        boot_session,
-    ) is None:
+    if (
+        not isinstance(boot_session, str)
+        or re.fullmatch(r"[0-9a-f]{32}", boot_session) is None
+        or boot_session == "0" * 32
+    ):
         raise PiLogToolError("swiftosctl console returned an invalid bootSessionID")
 
     requested = _live_report_sequence(report, "requestedStartingSequence")
@@ -731,19 +767,39 @@ def _validate_live_page(
         "incompleteMessageCount",
         maximum=4_096,
     )
-    for key in ("startsMidMessage", "endsMidMessage"):
-        if not isinstance(report.get(key), bool):
-            raise PiLogToolError(f"swiftosctl console returned invalid {key}")
+    starts_mid_message = report.get("startsMidMessage")
+    ends_mid_message = report.get("endsMidMessage")
+    if not isinstance(starts_mid_message, bool):
+        raise PiLogToolError("swiftosctl console returned invalid startsMidMessage")
+    if not isinstance(ends_mid_message, bool):
+        raise PiLogToolError("swiftosctl console returned invalid endsMidMessage")
     entry_count = console_chunks + non_console + malformed_console
     if entry_count > requested_count:
         raise PiLogToolError("swiftosctl console exceeded the requested entry count")
-    if console and console_chunks == 0:
-        raise PiLogToolError("swiftosctl console returned bytes without CONS entries")
+    if discontinuities > max(0, entry_count - 1):
+        raise PiLogToolError("swiftosctl console returned impossible sequence gaps")
+    if incomplete > console_chunks:
+        raise PiLogToolError("swiftosctl console returned impossible incomplete messages")
+    if (starts_mid_message or ends_mid_message) and incomplete == 0:
+        raise PiLogToolError("swiftosctl console returned impossible message state")
+    if console_chunks == 0:
+        if console:
+            raise PiLogToolError("swiftosctl console returned bytes without CONS entries")
+        if incomplete != 0 or starts_mid_message or ends_mid_message:
+            raise PiLogToolError("swiftosctl console returned impossible message state")
+    elif not (
+        console_chunks
+        <= len(console)
+        <= MAXIMUM_CONSOLE_CHUNK_BYTES * console_chunks
+    ):
+        raise PiLogToolError("swiftosctl console returned invalid CONS chunk bytes")
 
     sequence_exhausted = False
     if entry_count > 0:
         if effective is None:
             raise PiLogToolError("swiftosctl console omitted the effective cursor")
+        if requested_cursor is None and effective != oldest:
+            raise PiLogToolError("swiftosctl console omitted the retained log prefix")
         if oldest == 0 or not oldest <= effective <= newest:
             raise PiLogToolError(
                 "swiftosctl console effective cursor is outside the available range"
@@ -769,8 +825,11 @@ def _validate_live_page(
                 )
             if next_sequence != expected_next:
                 raise PiLogToolError("swiftosctl console cursor did not advance exactly")
-            if more_available and newest < next_sequence:
-                raise PiLogToolError("swiftosctl console advertised unavailable entries")
+            expected_more = last_sequence < newest
+            if more_available != expected_more:
+                raise PiLogToolError(
+                    "swiftosctl console returned inconsistent moreAvailable"
+                )
     elif requested_cursor is None:
         if (
             effective is not None
@@ -820,12 +879,18 @@ def run_live_console(
 ) -> LiveResult:
     """Poll the canonical live-console client and tee exact console bytes."""
 
+    _validate_live_request_arguments(
+        timeout_seconds=timeout_seconds,
+        starting_sequence=starting_sequence,
+        count=count,
+        poll_interval_seconds=poll_interval_seconds,
+    )
     if not swiftosctl.is_file() or not os.access(swiftosctl, os.X_OK):
         raise PiLogToolError(
             f"{swiftosctl} is not an executable swiftosctl; run `make swiftosctl`"
         )
     if device is not None:
-        if re.fullmatch(r"/dev/cu\.usbmodem[^/]*", device) is None:
+        if LIVE_DEVICE_PATTERN.fullmatch(device) is None:
             raise PiLogToolError(
                 "live device must be a macOS /dev/cu.usbmodem* callout path"
             )
@@ -996,14 +1061,12 @@ def argument_parser() -> argparse.ArgumentParser:
 
 
 def _validate_live_arguments(arguments: argparse.Namespace) -> None:
-    if not 0.001 <= arguments.timeout <= 3600:
-        raise PiLogToolError("--timeout must be between 0.001 and 3600 seconds")
-    if arguments.start is not None and arguments.start <= 0:
-        raise PiLogToolError("--start must be greater than zero")
-    if not 1 <= arguments.count <= 4096:
-        raise PiLogToolError("--count must be between 1 and 4096")
-    if not 0.05 <= arguments.poll_interval <= 60:
-        raise PiLogToolError("--poll-interval must be between 0.05 and 60 seconds")
+    _validate_live_request_arguments(
+        timeout_seconds=arguments.timeout,
+        starting_sequence=arguments.start,
+        count=arguments.count,
+        poll_interval_seconds=arguments.poll_interval,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

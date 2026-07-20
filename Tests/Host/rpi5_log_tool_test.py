@@ -417,6 +417,12 @@ def live_report(
     return json.dumps(value).encode("utf-8")
 
 
+def updated_live_report(value: bytes, **updates: object) -> bytes:
+    report = json.loads(value)
+    report.update(updates)
+    return json.dumps(report).encode("utf-8")
+
+
 class FakeLiveRunner:
     def __init__(self, responses: list[bytes]) -> None:
         self.responses = list(responses)
@@ -747,6 +753,157 @@ def test_invalid_live_pages_do_not_contaminate_transcripts() -> None:
                 5,
                 "invalid bootSessionID",
             ),
+            (
+                live_report(
+                    b"PREFIX",
+                    next_sequence=3,
+                    newest_sequence=2,
+                    oldest_sequence=1,
+                    effective_sequence=2,
+                    non_console_entry_count=0,
+                ),
+                None,
+                "omitted the retained log prefix",
+            ),
+            (
+                live_report(
+                    b"TRUNCATED",
+                    next_sequence=6,
+                    newest_sequence=9,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                ),
+                5,
+                "inconsistent moreAvailable",
+            ),
+            (
+                live_report(
+                    b"DONE",
+                    next_sequence=6,
+                    newest_sequence=5,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                    more_available=True,
+                ),
+                5,
+                "inconsistent moreAvailable",
+            ),
+            (
+                updated_live_report(
+                    live_report(
+                        b"",
+                        next_sequence=6,
+                        newest_sequence=5,
+                        requested_sequence=5,
+                        non_console_entry_count=0,
+                    ),
+                    consoleChunkCount=1,
+                ),
+                5,
+                "invalid CONS chunk bytes",
+            ),
+            (
+                live_report(
+                    b"X" * 17,
+                    next_sequence=6,
+                    newest_sequence=5,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                ),
+                5,
+                "invalid CONS chunk bytes",
+            ),
+            (
+                updated_live_report(
+                    live_report(
+                        b"X",
+                        next_sequence=7,
+                        newest_sequence=6,
+                        requested_sequence=5,
+                        non_console_entry_count=0,
+                    ),
+                    consoleChunkCount=2,
+                ),
+                5,
+                "invalid CONS chunk bytes",
+            ),
+            (
+                live_report(
+                    b"ZERO-BOOT",
+                    next_sequence=6,
+                    newest_sequence=5,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                    boot="0" * 32,
+                ),
+                5,
+                "invalid bootSessionID",
+            ),
+            (
+                live_report(
+                    b"INJECT",
+                    next_sequence=6,
+                    newest_sequence=5,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                    device="/dev/cu.usbmodemOK\nESC",
+                ),
+                5,
+                "invalid devicePath",
+            ),
+            (
+                live_report(
+                    b"EMPTY-SUFFIX",
+                    next_sequence=6,
+                    newest_sequence=5,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                    device="/dev/cu.usbmodem",
+                ),
+                5,
+                "invalid devicePath",
+            ),
+            (
+                updated_live_report(
+                    live_report(
+                        b"",
+                        next_sequence=5,
+                        newest_sequence=4,
+                        requested_sequence=5,
+                    ),
+                    startsMidMessage=True,
+                ),
+                5,
+                "impossible message state",
+            ),
+            (
+                updated_live_report(
+                    live_report(
+                        b"ONE",
+                        next_sequence=6,
+                        newest_sequence=5,
+                        requested_sequence=5,
+                        non_console_entry_count=0,
+                    ),
+                    sequenceDiscontinuityCount=1,
+                ),
+                5,
+                "impossible sequence gaps",
+            ),
+            (
+                updated_live_report(
+                    live_report(
+                        b"ONE",
+                        next_sequence=6,
+                        newest_sequence=5,
+                        requested_sequence=5,
+                        non_console_entry_count=0,
+                    ),
+                    endsMidMessage=True,
+                ),
+                5,
+                "impossible message state",
+            ),
         ]
         for index, (response, start, message) in enumerate(cases):
             terminal = io.BytesIO()
@@ -859,6 +1016,53 @@ def test_live_keyboard_interrupt_has_clean_cli_exit() -> None:
             "Control-C did not emit a concise stop message")
 
 
+def test_live_request_bounds_are_checked_before_execution() -> None:
+    with tempfile.TemporaryDirectory() as directory_name:
+        executable = executable_fixture(Path(directory_name))
+        cases = [
+            ({"starting_sequence": 0}, "--start"),
+            ({"starting_sequence": logs.MAXIMUM_SEQUENCE + 1}, "--start"),
+            ({"count": 0}, "--count"),
+            ({"count": 4_097}, "--count"),
+            ({"timeout_seconds": 0.0}, "--timeout"),
+            ({"poll_interval_seconds": 0.0}, "--poll-interval"),
+        ]
+        for overrides, message in cases:
+            runner = FakeLiveRunner([])
+            arguments = {
+                "swiftosctl": executable,
+                "device": None,
+                "timeout_seconds": 1.0,
+                "starting_sequence": None,
+                "count": 8,
+                "follow": False,
+                "poll_interval_seconds": 0.5,
+                "output": None,
+                "runner": runner,
+                "stdout": io.BytesIO(),
+                "stderr": io.StringIO(),
+            }
+            arguments.update(overrides)
+            expect_error(
+                lambda arguments=arguments: logs.run_live_console(**arguments),
+                message,
+            )
+            require(runner.calls == [], "invalid arguments reached swiftosctl")
+
+        error_output = io.StringIO()
+        with mock.patch.object(logs, "run_live_console") as run:
+            with redirect_stderr(error_output):
+                status = logs.main([
+                    "live",
+                    "--start",
+                    str(logs.MAXIMUM_SEQUENCE + 1),
+                ])
+        require(status == 1, "oversized CLI cursor was accepted")
+        require(not run.called, "oversized CLI cursor reached live execution")
+        require("--start" in error_output.getvalue(),
+                "oversized CLI cursor refusal was not explained")
+
+
 def main() -> int:
     tests = [
         test_fresh_card_discovery_ignores_unrelated_fixed_disk,
@@ -873,6 +1077,7 @@ def main() -> int:
         test_invalid_live_pages_do_not_contaminate_transcripts,
         test_live_idle_and_sequence_exhaustion_are_bounded,
         test_live_keyboard_interrupt_has_clean_cli_exit,
+        test_live_request_bounds_are_checked_before_execution,
     ]
     for test in tests:
         test()
