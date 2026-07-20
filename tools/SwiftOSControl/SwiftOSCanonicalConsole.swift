@@ -48,6 +48,12 @@ enum SwiftOSCanonicalConsoleDecoder {
             previousSequence = entry.sequence
 
             guard let chunk = KernelConsoleLogChunk(event: entry.event) else {
+                if inMessage {
+                    // Canonical chunks are appended atomically under the guest
+                    // log lock. Any intervening record means the retained
+                    // message can no longer be certified as complete.
+                    currentMessageIsIncomplete = true
+                }
                 if entry.event.eventCode == KernelConsoleLogChunk.eventCode {
                     malformedConsoleEntryCount += 1
                 } else {

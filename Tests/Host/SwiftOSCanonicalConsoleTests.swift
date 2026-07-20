@@ -4,7 +4,8 @@ struct SwiftOSCanonicalConsoleTests {
         reconstructsCanonicalBytesAndSkipsStructuredEvents()
         reportsSequenceGapsAndPartialMessages()
         reportsMalformedConsoleRecordsAndTrailingFragments()
-        print("SwiftOS canonical console host tests: 3 groups passed")
+        marksInterleavedCanonicalMessagesIncomplete()
+        print("SwiftOS canonical console host tests: 4 groups passed")
     }
 
     private static func reconstructsCanonicalBytesAndSkipsStructuredEvents() {
@@ -94,6 +95,62 @@ struct SwiftOSCanonicalConsoleTests {
         expect(result.incompleteMessageCount == 1, "trailing partial count")
         expect(!result.startsMidMessage, "valid first flag ignored")
         expect(result.endsMidMessage, "trailing fragment not reported")
+    }
+
+    private static func marksInterleavedCanonicalMessagesIncomplete() {
+        let first = consoleEntry(
+            sequence: 1,
+            bytes: Array("left".utf8),
+            source: .earlyConsole,
+            isFirst: true,
+            isLast: false
+        )
+        let malformed = KernelLogEntry(
+            sequence: 2,
+            event: KernelLogEvent(
+                timestampTicks: 2,
+                level: .info,
+                subsystem: .kernel,
+                eventCode: KernelConsoleLogChunk.eventCode,
+                flags: UInt32(KernelConsoleLogSource.earlyConsole.rawValue)
+                    << 16
+            )
+        )
+        let last = consoleEntry(
+            sequence: 3,
+            bytes: Array("right".utf8),
+            source: .earlyConsole,
+            isFirst: false,
+            isLast: true
+        )
+        let result = SwiftOSCanonicalConsoleDecoder.decode([
+            first,
+            malformed,
+            last,
+        ])
+        expect(result.bytes == Array("leftright".utf8), "interleaved bytes lost")
+        expect(result.malformedConsoleEntryCount == 1, "malformed CONS hidden")
+        expect(result.incompleteMessageCount == 1, "interleaving accepted")
+        expect(!result.endsMidMessage, "closed interleaved message left open")
+
+        let structured = KernelLogEntry(
+            sequence: 2,
+            event: KernelBootEpochLogEvent.event(
+                startedAtTicks: 2,
+                processorID: 0,
+                deviceTreeAddress: 0x300_0000,
+                counterFrequency: 54_000_000
+            )
+        )
+        let structuredResult = SwiftOSCanonicalConsoleDecoder.decode([
+            first,
+            structured,
+            last,
+        ])
+        expect(structuredResult.nonConsoleEntryCount == 1,
+               "structured interleave hidden")
+        expect(structuredResult.incompleteMessageCount == 1,
+               "structured interleave accepted")
     }
 
     private static func consoleEntry(
