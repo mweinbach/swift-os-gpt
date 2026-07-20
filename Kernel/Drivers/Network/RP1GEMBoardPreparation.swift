@@ -267,14 +267,27 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
         guard let address = Self.wordAddress(
                   in: resources.clocks.controllerRegisters,
                   offset: offset
+              ),
+              let setAddress = Self.wordAddress(
+                  in: resources.clocks.controllerRegisters,
+                  offset: RP1GEMBoardRegisterLayout.atomicSet + offset
               )
         else {
             recordFailure(stage: stage)
             return false
         }
         let current = access.read32(at: address)
-        let enabled = current | RP1GEMBoardRegisterLayout.clockEnable
-        access.write32(enabled, at: address)
+        if current & RP1GEMBoardRegisterLayout.clockEnable != 0 {
+            return true
+        }
+        // clocks_main implements RP1's published atomic register aliases. Use
+        // the SET aperture so the posted PCIe transaction carries only the
+        // ENABLE bit and cannot replay stale source/divider fields from the
+        // preceding read across the link.
+        access.write32(
+            RP1GEMBoardRegisterLayout.clockEnable,
+            at: setAddress
+        )
         access.synchronizePostedWrites()
         let observed = access.read32(at: address)
         guard observed & RP1GEMBoardRegisterLayout.clockEnable != 0 else {
@@ -495,8 +508,9 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
               validResource(resources.clocks.controllerRegisters),
               wordAddress(
                   in: resources.clocks.controllerRegisters,
-                  offset: RP1GEMBoardRegisterLayout
-                      .ethernetTimestampClockControl
+                  offset: RP1GEMBoardRegisterLayout.atomicSet
+                      + RP1GEMBoardRegisterLayout
+                          .ethernetTimestampClockControl
               ) != nil,
               resources.clocks.peripheralClockID
                   == RP1GEMBoardRegisterLayout.systemClockID,

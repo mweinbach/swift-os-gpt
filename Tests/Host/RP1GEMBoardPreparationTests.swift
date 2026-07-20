@@ -163,6 +163,12 @@ private final class TestBoardAccess: RP1GEMBoardRegisterDelayAccess {
     func write32(_ value: UInt32, at address: UInt) {
         events.append(.write(address, value))
         guard !ignoredWriteAddresses.contains(address) else { return }
+        let clockSetBase = UInt(TestAddress.clocks + 0x2_000)
+        let clockSetEnd = UInt(TestAddress.clocks + 0x3_000)
+        if address >= clockSetBase && address < clockSetEnd {
+            registers[address - 0x2_000, default: 0] |= value
+            return
+        }
         if let gpio {
             switch address {
             case gpio.outputSet:
@@ -261,6 +267,9 @@ struct RP1GEMBoardPreparationTests {
         let system = UInt(TestAddress.clocks + 0x014)
         let ethernet = UInt(TestAddress.clocks + 0x064)
         let timestamp = UInt(TestAddress.clocks + 0x134)
+        let systemSet = system + 0x2_000
+        let ethernetSet = ethernet + 0x2_000
+        let timestampSet = timestamp + 0x2_000
         access.registers[system] = 0x0101_0003
         access.registers[ethernet] = 0x0202_0005
         access.registers[timestamp] = 0x0404_0007
@@ -275,14 +284,14 @@ struct RP1GEMBoardPreparationTests {
         )
         expect(
             access.events == [
-                .read(system), .write(system, 0x0101_0803), .barrier,
+                .read(system), .write(systemSet, 0x0000_0800), .barrier,
                 .read(system),
-                .read(ethernet), .write(ethernet, 0x0202_0805), .barrier,
+                .read(ethernet), .write(ethernetSet, 0x0000_0800), .barrier,
                 .read(ethernet),
-                .read(timestamp), .write(timestamp, 0x0404_0807), .barrier,
+                .read(timestamp), .write(timestampSet, 0x0000_0800), .barrier,
                 .read(timestamp),
             ],
-            "clock enable ordering or posted-write readback changed"
+            "atomic clock enable ordering or posted-write readback changed"
         )
         expect(
             access.registers[system] == 0x0101_0803
@@ -486,8 +495,8 @@ struct RP1GEMBoardPreparationTests {
             expectedStage: .phyResetGPIOLayout
         )
         expectRejected(
-            makeResources(resetLine: nil, clockLength: 0x134),
-            "clock aperture missing ETH_TSU CTRL accepted"
+            makeResources(resetLine: nil, clockLength: 0x2_134),
+            "clock aperture missing ETH_TSU atomic SET register accepted"
         )
         expectRejected(
             makeResources(resetLine: nil, clockControllerPhandle: 0),
