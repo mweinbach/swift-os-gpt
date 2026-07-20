@@ -55,6 +55,7 @@ MAXIMUM_DIRECTORY_SCAN_BYTES = 64 * 1_024 * 1_024
 MAXIMUM_BOOT_FILE_COUNT = 4_096
 MAXIMUM_BOOT_FILE_BYTES = 512 * 1_024 * 1_024
 MAXIMUM_TOTAL_BOOT_FILE_BYTES = 512 * 1_024 * 1_024
+MAXIMUM_BOOT_MANIFEST_BYTES = 1 * 1_024 * 1_024
 
 KERNEL_LOG_LEVEL_NAMES = {
     0: "trace",
@@ -118,6 +119,18 @@ class FATNode:
     short_name: bytes = b""
     needs_lfn: bool = False
     clusters: list[int] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FATDirectoryEntry:
+    name: str
+    attributes: int
+    first_cluster: int
+    byte_count: int
+
+    @property
+    def is_directory(self) -> bool:
+        return bool(self.attributes & 0x10)
 
 
 class FAT32Volume:
@@ -681,7 +694,13 @@ def read_partition_entries(image) -> list[dict[str, int | bool]]:
 
 
 class FAT32Reader:
-    def __init__(self, image, partition: dict[str, int | bool]) -> None:
+    def __init__(
+        self,
+        image,
+        partition: dict[str, int | bool],
+        *,
+        validate_hidden_sectors: bool = True,
+    ) -> None:
         self.image = image
         self.start = int(partition["start_block"])
         self.count = int(partition["block_count"])
@@ -700,6 +719,7 @@ class FAT32Reader:
         self.fat_sectors = struct.unpack_from("<I", boot, 36)[0]
         self.root_cluster = struct.unpack_from("<I", boot, 44)[0]
         hidden_sectors = struct.unpack_from("<I", boot, 28)[0]
+        self.hidden_sectors = hidden_sectors
         total_sectors = struct.unpack_from("<I", boot, 32)[0]
         if (
             self.bytes_per_sector != SECTOR_SIZE
@@ -709,7 +729,7 @@ class FAT32Reader:
             or self.reserved < 2
             or self.fats != 2
             or self.fat_sectors == 0
-            or hidden_sectors != self.start
+            or (validate_hidden_sectors and hidden_sectors != self.start)
             or total_sectors != self.count
             or boot[82:90] != b"FAT32   "
         ):
@@ -897,6 +917,226 @@ class FAT32Reader:
 
         visit(self.root_cluster, "", 0)
         return output
+
+    def _directory_entries(self, first_cluster: int) -> list[FATDirectoryEntry]:
+        """Read one directory without following any of its child directories."""
+
+        data = self._chain(
+            first_cluster,
+            required_byte_count=None,
+            maximum_byte_count=MAXIMUM_DIRECTORY_BYTES,
+        )
+        output: list[FATDirectoryEntry] = []
+        folded_names: set[str] = set()
+        lfn: list[bytes] = []
+        for offset in range(0, len(data), 32):
+            entry = data[offset:offset + 32]
+            if entry[0] == 0:
+                break
+            if entry[0] == 0xE5:
+                lfn = []
+                continue
+            if entry[11] == 0x0F:
+                lfn.append(entry)
+                if len(lfn) > 20:
+                    raise MediaError("FAT32 long name exceeds the bounded limit")
+                continue
+            short_base = entry[0:8].decode("ascii").rstrip()
+            short_ext = entry[8:11].decode("ascii").rstrip()
+            name = (
+                self._decode_lfn(lfn, entry[0:11]) if lfn else short_base
+                + (("." + short_ext) if short_ext else "")
+            )
+            lfn = []
+            if name in (".", "..") or entry[11] & 0x08:
+                continue
+            folded = name.casefold()
+            if folded in folded_names:
+                raise MediaError("FAT32 directory contains duplicate names")
+            folded_names.add(folded)
+            output.append(FATDirectoryEntry(
+                name=name,
+                attributes=entry[11],
+                first_cluster=(
+                    struct.unpack_from("<H", entry, 20)[0] << 16
+                    | struct.unpack_from("<H", entry, 26)[0]
+                ),
+                byte_count=struct.unpack_from("<I", entry, 28)[0],
+            ))
+        return output
+
+    @staticmethod
+    def _safe_target_path(path_text: str) -> tuple[str, ...]:
+        path = PurePosixPath(path_text)
+        if (
+            not path_text
+            or path.is_absolute()
+            or path.as_posix() != path_text
+            or any(component in ("", ".", "..") for component in path.parts)
+            or "\\" in path_text
+        ):
+            raise MediaError(f"unsafe FAT32 target path: {path_text}")
+        return path.parts
+
+    def files_at_paths(
+        self,
+        paths: list[str],
+        *,
+        maximum_file_bytes: int = MAXIMUM_BOOT_FILE_BYTES,
+    ) -> dict[str, bytes]:
+        """Read only named files and the directories needed to resolve them.
+
+        This deliberately does not recurse through unrelated directory entries.
+        It is suitable for checking a signed boot manifest on media that a host
+        may have augmented with metadata directories.
+        """
+
+        if not 0 <= maximum_file_bytes <= MAXIMUM_BOOT_FILE_BYTES:
+            raise MediaError("invalid FAT32 target file-size limit")
+        if len(paths) > MAXIMUM_BOOT_FILE_COUNT:
+            raise MediaError("too many FAT32 target paths")
+        targets: list[tuple[str, tuple[str, ...]]] = []
+        folded_targets: set[str] = set()
+        for path_text in paths:
+            parts = self._safe_target_path(path_text)
+            folded = path_text.casefold()
+            if folded in folded_targets:
+                raise MediaError("duplicate case-folded FAT32 target path")
+            folded_targets.add(folded)
+            targets.append((path_text, parts))
+
+        directory_cache: dict[int, dict[str, FATDirectoryEntry]] = {}
+
+        def entries(first_cluster: int) -> dict[str, FATDirectoryEntry]:
+            if first_cluster not in directory_cache:
+                directory_cache[first_cluster] = {
+                    entry.name.casefold(): entry
+                    for entry in self._directory_entries(first_cluster)
+                }
+            return directory_cache[first_cluster]
+
+        output: dict[str, bytes] = {}
+        total_file_bytes = 0
+        for path_text, parts in targets:
+            directory_cluster = self.root_cluster
+            selected: FATDirectoryEntry | None = None
+            for index, component in enumerate(parts):
+                selected = entries(directory_cluster).get(component.casefold())
+                if selected is None:
+                    raise MediaError(f"FAT32 required file is missing: {path_text}")
+                is_last = index == len(parts) - 1
+                if not is_last:
+                    if not selected.is_directory:
+                        raise MediaError(
+                            f"FAT32 required path parent is not a directory: {path_text}"
+                        )
+                    directory_cluster = selected.first_cluster
+                elif selected.is_directory:
+                    raise MediaError(
+                        f"FAT32 required path is a directory: {path_text}"
+                    )
+            assert selected is not None
+            size = selected.byte_count
+            if size > maximum_file_bytes:
+                raise MediaError(f"FAT32 required file is too large: {path_text}")
+            total_file_bytes += size
+            if total_file_bytes > MAXIMUM_TOTAL_BOOT_FILE_BYTES:
+                raise MediaError("FAT32 required files exceed the total byte limit")
+            if size == 0 and selected.first_cluster == 0:
+                output[path_text] = b""
+            else:
+                output[path_text] = self._chain(
+                    selected.first_cluster,
+                    required_byte_count=size,
+                    maximum_byte_count=size if size else self.cluster_bytes,
+                )
+        return output
+
+    def file_at_path(
+        self,
+        path: str,
+        *,
+        maximum_file_bytes: int = MAXIMUM_BOOT_FILE_BYTES,
+    ) -> bytes:
+        return self.files_at_paths(
+            [path],
+            maximum_file_bytes=maximum_file_bytes,
+        )[path]
+
+
+def parse_sha256sums(contents: bytes) -> dict[str, str]:
+    try:
+        lines = contents.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise MediaError("FAT32 SHA256SUMS is not UTF-8") from error
+    expected: dict[str, str] = {}
+    folded_paths: set[str] = set()
+    if not lines:
+        raise MediaError("FAT32 SHA256SUMS is empty")
+    for line in lines:
+        if len(line) < 67 or line[64:66] != "  ":
+            raise MediaError("malformed FAT32 SHA256SUMS")
+        digest, path = line[:64], line[66:]
+        if any(character not in "0123456789abcdef" for character in digest):
+            raise MediaError("malformed FAT32 SHA256SUMS digest")
+        FAT32Reader._safe_target_path(path)
+        if path == "SHA256SUMS":
+            raise MediaError("FAT32 SHA256SUMS must not hash itself")
+        folded = path.casefold()
+        if folded in folded_paths:
+            raise MediaError("duplicate case-folded FAT32 SHA256SUMS path")
+        folded_paths.add(folded)
+        expected[path] = digest
+    if len(expected) > MAXIMUM_BOOT_FILE_COUNT - 1:
+        raise MediaError("FAT32 SHA256SUMS contains too many files")
+    return expected
+
+
+def verify_fat32_boot_manifest(
+    image,
+    partition: dict[str, int | bool],
+    *,
+    validate_hidden_sectors: bool = True,
+    expected_manifest: bytes | None = None,
+) -> dict[str, object]:
+    """Verify manifest-listed boot files without inspecting unrelated entries."""
+
+    reader = FAT32Reader(
+        image,
+        partition,
+        validate_hidden_sectors=validate_hidden_sectors,
+    )
+    manifest = reader.file_at_path(
+        "SHA256SUMS",
+        maximum_file_bytes=MAXIMUM_BOOT_MANIFEST_BYTES,
+    )
+    if expected_manifest is not None and manifest != expected_manifest:
+        raise MediaError("FAT32 SHA256SUMS differs from the expected manifest")
+    expected = parse_sha256sums(manifest)
+    files = reader.files_at_paths(list(expected))
+    for path, digest in expected.items():
+        if sha256(files[path]) != digest:
+            raise MediaError(f"FAT32 required-file checksum mismatch: {path}")
+    return {
+        "format": "swiftos-rpi5-boot-verification-v1",
+        "manifest": {
+            "path": "SHA256SUMS",
+            "byte_count": len(manifest),
+            "sha256": sha256(manifest),
+            "matched_expected_copy": expected_manifest is not None,
+        },
+        "required_file_count": len(files),
+        "required_files": {
+            path: {"byte_count": len(files[path]), "sha256": expected[path]}
+            for path in expected
+        },
+        "unrelated_entries": "not-traversed",
+        "fat32": {
+            "hidden_sectors": reader.hidden_sectors,
+            "partition_block_count": reader.count,
+            "sectors_per_cluster": reader.sectors_per_cluster,
+        },
+    }
 
 
 def decode_data_layout(block: bytes, expected_blocks: int) -> dict[str, int]:
