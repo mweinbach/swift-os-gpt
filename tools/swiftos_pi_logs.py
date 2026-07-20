@@ -43,6 +43,7 @@ MAXIMUM_DISKUTIL_OUTPUT_BYTES = 8 * 1024 * 1024
 MAXIMUM_LIVE_REPORT_BYTES = 32 * 1024 * 1024
 MAXIMUM_SAVED_CAPTURE_BYTES = 64 * 1024 * 1024
 LOGICAL_BLOCK_BYTES = 512
+MAXIMUM_SEQUENCE = (1 << 64) - 1
 
 
 class PiLogToolError(Exception):
@@ -572,6 +573,17 @@ class LiveResult:
     boot_session_id: str | None
 
 
+@dataclass(frozen=True)
+class ValidatedLivePage:
+    device_path: str
+    boot_session_id: str
+    next_sequence: int | None
+    more_available: bool
+    discontinuity_count: int
+    incomplete_message_count: int
+    sequence_exhausted: bool
+
+
 def _live_command(
     swiftosctl: Path,
     *,
@@ -618,6 +630,176 @@ def _decode_live_report(value: bytes) -> tuple[dict[str, object], bytes]:
     if byte_count != len(console):
         raise PiLogToolError("swiftosctl console byte count does not match its payload")
     return report, console
+
+
+def _live_report_integer(
+    report: Mapping[str, object],
+    key: str,
+    *,
+    maximum: int = MAXIMUM_SEQUENCE,
+) -> int:
+    value = report.get(key)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > maximum
+    ):
+        raise PiLogToolError(f"swiftosctl console returned invalid {key}")
+    return value
+
+
+def _live_report_sequence(
+    report: Mapping[str, object],
+    key: str,
+) -> int | None:
+    value = report.get(key)
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAXIMUM_SEQUENCE
+    ):
+        raise PiLogToolError(f"swiftosctl console returned invalid {key}")
+    return value
+
+
+def _validate_live_page(
+    report: Mapping[str, object],
+    console: bytes,
+    requested_cursor: int | None,
+    requested_count: int,
+) -> ValidatedLivePage:
+    if requested_cursor is not None and not 1 <= requested_cursor <= MAXIMUM_SEQUENCE:
+        raise PiLogToolError("live console cursor is outside the UInt64 sequence range")
+    if not 1 <= requested_count <= 4_096:
+        raise PiLogToolError("live console count is outside the protocol bound")
+
+    device_path = report.get("devicePath")
+    if not isinstance(device_path, str) or re.fullmatch(
+        r"/dev/cu\.usbmodem[^/]*",
+        device_path,
+    ) is None:
+        raise PiLogToolError("swiftosctl console returned an invalid devicePath")
+    boot_session = report.get("bootSessionID")
+    if not isinstance(boot_session, str) or re.fullmatch(
+        r"[0-9a-f]{32}",
+        boot_session,
+    ) is None:
+        raise PiLogToolError("swiftosctl console returned an invalid bootSessionID")
+
+    requested = _live_report_sequence(report, "requestedStartingSequence")
+    effective = _live_report_sequence(report, "effectiveStartingSequence")
+    next_sequence = _live_report_sequence(report, "nextSequence")
+    if requested != requested_cursor:
+        raise PiLogToolError("swiftosctl console changed the requested cursor")
+    if requested_cursor is not None and effective != requested_cursor:
+        raise PiLogToolError("swiftosctl console changed the effective cursor")
+
+    more_available = report.get("moreAvailable")
+    if not isinstance(more_available, bool):
+        raise PiLogToolError("swiftosctl console returned invalid moreAvailable")
+
+    oldest = _live_report_integer(report, "oldestAvailableSequence")
+    newest = _live_report_integer(report, "newestAvailableSequence")
+    _live_report_integer(report, "lostEntryCount")
+    if (oldest == 0) != (newest == 0) or (oldest != 0 and oldest > newest):
+        raise PiLogToolError("swiftosctl console returned an invalid available range")
+    console_chunks = _live_report_integer(
+        report,
+        "consoleChunkCount",
+        maximum=4_096,
+    )
+    non_console = _live_report_integer(
+        report,
+        "nonConsoleEntryCount",
+        maximum=4_096,
+    )
+    malformed_console = _live_report_integer(
+        report,
+        "malformedConsoleEntryCount",
+        maximum=4_096,
+    )
+    discontinuities = _live_report_integer(
+        report,
+        "sequenceDiscontinuityCount",
+        maximum=4_096,
+    )
+    incomplete = _live_report_integer(
+        report,
+        "incompleteMessageCount",
+        maximum=4_096,
+    )
+    for key in ("startsMidMessage", "endsMidMessage"):
+        if not isinstance(report.get(key), bool):
+            raise PiLogToolError(f"swiftosctl console returned invalid {key}")
+    entry_count = console_chunks + non_console + malformed_console
+    if entry_count > requested_count:
+        raise PiLogToolError("swiftosctl console exceeded the requested entry count")
+    if console and console_chunks == 0:
+        raise PiLogToolError("swiftosctl console returned bytes without CONS entries")
+
+    sequence_exhausted = False
+    if entry_count > 0:
+        if effective is None:
+            raise PiLogToolError("swiftosctl console omitted the effective cursor")
+        if oldest == 0 or not oldest <= effective <= newest:
+            raise PiLogToolError(
+                "swiftosctl console effective cursor is outside the available range"
+            )
+        if next_sequence is not None and next_sequence < effective:
+            raise PiLogToolError("swiftosctl console cursor moved backwards")
+        if next_sequence == effective:
+            raise PiLogToolError("swiftosctl console cursor did not advance")
+        if entry_count - 1 > MAXIMUM_SEQUENCE - effective:
+            raise PiLogToolError("swiftosctl console entry range overflowed UInt64")
+        last_sequence = effective + entry_count - 1
+        if newest < last_sequence:
+            raise PiLogToolError("swiftosctl console entries exceed the available range")
+        if last_sequence == MAXIMUM_SEQUENCE:
+            if next_sequence is not None or more_available or newest != MAXIMUM_SEQUENCE:
+                raise PiLogToolError("swiftosctl console malformed sequence exhaustion")
+            sequence_exhausted = True
+        else:
+            expected_next = last_sequence + 1
+            if next_sequence is None:
+                raise PiLogToolError(
+                    "swiftosctl console omitted a required nextSequence"
+                )
+            if next_sequence != expected_next:
+                raise PiLogToolError("swiftosctl console cursor did not advance exactly")
+            if more_available and newest < next_sequence:
+                raise PiLogToolError("swiftosctl console advertised unavailable entries")
+    elif requested_cursor is None:
+        if (
+            effective is not None
+            or next_sequence is not None
+            or oldest != 0
+            or newest != 0
+            or more_available
+        ):
+            raise PiLogToolError("swiftosctl console malformed an empty initial log")
+    else:
+        if (
+            console
+            or effective != requested_cursor
+            or next_sequence != requested_cursor
+            or more_available
+            or newest == MAXIMUM_SEQUENCE
+            or requested_cursor != newest + 1
+        ):
+            raise PiLogToolError("swiftosctl console malformed an idle tail cursor")
+
+    return ValidatedLivePage(
+        device_path=device_path,
+        boot_session_id=boot_session,
+        next_sequence=next_sequence,
+        more_available=more_available,
+        discontinuity_count=discontinuities,
+        incomplete_message_count=incomplete,
+        sequence_exhausted=sequence_exhausted,
+    )
 
 
 def run_live_console(
@@ -676,12 +858,9 @@ def run_live_console(
                     f"swiftosctl console exited with status {completed.returncode}"
                 )
             report, console = _decode_live_report(completed.stdout)
-            report_device = report.get("devicePath")
-            report_boot = report.get("bootSessionID")
-            if not isinstance(report_device, str) or not isinstance(report_boot, str):
-                raise PiLogToolError(
-                    "swiftosctl console report omitted device or boot-session identity"
-                )
+            page = _validate_live_page(report, console, cursor, count)
+            report_device = page.device_path
+            report_boot = page.boot_session_id
             if selected_device is None:
                 selected_device = report_device
                 stderr.write(f"live SwiftOS console: {selected_device}\n")
@@ -705,34 +884,25 @@ def run_live_console(
                     capture.write(console)
                     capture.flush()
                 total_bytes += len(console)
-            discontinuities = report.get("sequenceDiscontinuityCount", 0)
-            incomplete = report.get("incompleteMessageCount", 0)
-            if discontinuities or incomplete:
+            if page.discontinuity_count or page.incomplete_message_count:
                 stderr.write(
                     "warning: live console reports "
-                    f"{discontinuities} sequence discontinuities and "
-                    f"{incomplete} incomplete messages\n"
+                    f"{page.discontinuity_count} sequence discontinuities and "
+                    f"{page.incomplete_message_count} incomplete messages\n"
                 )
                 stderr.flush()
 
             polls += 1
-            next_sequence = report.get("nextSequence")
-            if next_sequence is not None and (
-                isinstance(next_sequence, bool)
-                or not isinstance(next_sequence, int)
-                or next_sequence <= 0
-            ):
-                raise PiLogToolError("swiftosctl console returned an invalid nextSequence")
-            if isinstance(next_sequence, int):
-                if cursor is not None and next_sequence < cursor:
-                    raise PiLogToolError("swiftosctl console cursor moved backwards")
-                cursor = next_sequence
+            cursor = page.next_sequence
             if not follow or (
                 maximum_polls is not None and polls >= maximum_polls
             ):
                 break
-            more_available = report.get("moreAvailable") is True
-            if not more_available:
+            if page.sequence_exhausted:
+                stderr.write("live console sequence space exhausted; follow stopped\n")
+                stderr.flush()
+                break
+            if not page.more_available:
                 sleeper(poll_interval_seconds)
 
     return LiveResult(

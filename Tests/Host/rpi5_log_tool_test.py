@@ -357,29 +357,58 @@ def test_card_summary_and_evidence_files_are_stable_and_non_overwriting() -> Non
         )
 
 
+_DEFAULT_EFFECTIVE = object()
+
+
 def live_report(
     console: bytes,
     *,
-    next_sequence: int,
-    more_available: bool = False,
+    next_sequence: int | None,
+    newest_sequence: int | None = None,
+    oldest_sequence: int | None = None,
+    requested_sequence: int | None = None,
+    effective_sequence: int | None | object = _DEFAULT_EFFECTIVE,
+    non_console_entry_count: int | None = None,
+    more_available: object = False,
     device: str = "/dev/cu.usbmodemSWIFTOS1",
     boot: str = "00112233445566778899aabbccddeeff",
 ) -> bytes:
+    if newest_sequence is None:
+        newest_sequence = 0 if next_sequence is None else next_sequence - 1
+    if oldest_sequence is None:
+        oldest_sequence = 0 if newest_sequence == 0 else 1
+    if effective_sequence is _DEFAULT_EFFECTIVE:
+        if requested_sequence is not None:
+            effective_sequence = requested_sequence
+        elif next_sequence is None and newest_sequence == 0 and not console:
+            effective_sequence = None
+        else:
+            effective_sequence = 1
+    console_chunk_count = 1 if console else 0
+    if non_console_entry_count is None:
+        if isinstance(effective_sequence, int) and next_sequence is not None:
+            non_console_entry_count = max(
+                0,
+                next_sequence - effective_sequence - console_chunk_count,
+            )
+        else:
+            non_console_entry_count = 0
     value = {
         "devicePath": device,
         "bootSessionID": boot,
-        "requestedStartingSequence": None,
-        "effectiveStartingSequence": 1,
-        "oldestAvailableSequence": 1,
-        "newestAvailableSequence": next_sequence - 1,
+        "requestedStartingSequence": requested_sequence,
+        "effectiveStartingSequence": effective_sequence,
+        "oldestAvailableSequence": oldest_sequence,
+        "newestAvailableSequence": newest_sequence,
         "lostEntryCount": 0,
         "moreAvailable": more_available,
         "nextSequence": next_sequence,
         "consoleByteCount": len(console),
         "consoleText": console.decode("utf-8"),
         "consoleBase64": base64.b64encode(console).decode("ascii"),
-        "consoleChunkCount": 1 if console else 0,
-        "nonConsoleEntryCount": 0,
+        "consoleChunkCount": console_chunk_count,
+        "nonConsoleEntryCount": non_console_entry_count,
+        "malformedConsoleEntryCount": 0,
         "sequenceDiscontinuityCount": 0,
         "incompleteMessageCount": 0,
         "startsMidMessage": False,
@@ -418,7 +447,11 @@ def test_live_follow_polls_cursor_and_tees_exact_console_bytes() -> None:
         output = directory / "live.log"
         runner = FakeLiveRunner([
             live_report(b"SWIFTOS:BOOT\r\n", next_sequence=5),
-            live_report(b"SWIFTOS:READY\r\n", next_sequence=9),
+            live_report(
+                b"SWIFTOS:READY\r\n",
+                next_sequence=9,
+                requested_sequence=5,
+            ),
         ])
         terminal = io.BytesIO()
         diagnostics = io.StringIO()
@@ -457,7 +490,13 @@ def test_live_once_validates_device_and_refuses_capture_overwrite() -> None:
     with tempfile.TemporaryDirectory() as directory_name:
         directory = Path(directory_name)
         executable = executable_fixture(directory)
-        runner = FakeLiveRunner([live_report(b"READY\n", next_sequence=2)])
+        runner = FakeLiveRunner([
+            live_report(
+                b"READY\n",
+                next_sequence=2,
+                requested_sequence=1,
+            )
+        ])
         result = logs.run_live_console(
             swiftosctl=executable,
             device="/dev/cu.usbmodemSWIFTOS1",
@@ -566,6 +605,7 @@ def test_live_report_corruption_and_device_switch_are_refused() -> None:
             live_report(
                 b"B",
                 next_sequence=3,
+                requested_sequence=2,
                 device="/dev/cu.usbmodemOTHER",
             ),
         ])
@@ -589,6 +629,226 @@ def test_live_report_corruption_and_device_switch_are_refused() -> None:
         )
 
 
+def test_invalid_live_pages_do_not_contaminate_transcripts() -> None:
+    with tempfile.TemporaryDirectory() as directory_name:
+        directory = Path(directory_name)
+        executable = executable_fixture(directory)
+        cases = [
+            (
+                live_report(
+                    b"BACKWARD",
+                    next_sequence=4,
+                    newest_sequence=9,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                ),
+                5,
+                "moved backwards",
+            ),
+            (
+                live_report(
+                    b"REPLAY",
+                    next_sequence=5,
+                    newest_sequence=9,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                ),
+                5,
+                "did not advance",
+            ),
+            (
+                live_report(
+                    b"FORWARD",
+                    next_sequence=100,
+                    newest_sequence=100,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                ),
+                5,
+                "did not advance exactly",
+            ),
+            (
+                live_report(
+                    b"",
+                    next_sequence=6,
+                    newest_sequence=9,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                ),
+                5,
+                "idle tail cursor",
+            ),
+            (
+                live_report(
+                    b"REQUEST",
+                    next_sequence=5,
+                    newest_sequence=9,
+                    requested_sequence=4,
+                    non_console_entry_count=0,
+                ),
+                5,
+                "changed the requested cursor",
+            ),
+            (
+                live_report(
+                    b"EFFECTIVE",
+                    next_sequence=5,
+                    newest_sequence=9,
+                    requested_sequence=5,
+                    effective_sequence=4,
+                    non_console_entry_count=0,
+                ),
+                5,
+                "changed the effective cursor",
+            ),
+            (
+                live_report(
+                    b"BAD-BOOL",
+                    next_sequence=6,
+                    newest_sequence=9,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                    more_available="true",
+                ),
+                5,
+                "invalid moreAvailable",
+            ),
+            (
+                live_report(
+                    b"NO-CURSOR",
+                    next_sequence=None,
+                    newest_sequence=9,
+                    requested_sequence=5,
+                ),
+                5,
+                "omitted a required nextSequence",
+            ),
+            (
+                live_report(
+                    b"DEVICE",
+                    next_sequence=6,
+                    newest_sequence=9,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                    device="/dev/tty.not-swiftos",
+                ),
+                5,
+                "invalid devicePath",
+            ),
+            (
+                live_report(
+                    b"BOOT",
+                    next_sequence=6,
+                    newest_sequence=9,
+                    requested_sequence=5,
+                    non_console_entry_count=0,
+                    boot="NOT-A-BOOT-ID",
+                ),
+                5,
+                "invalid bootSessionID",
+            ),
+        ]
+        for index, (response, start, message) in enumerate(cases):
+            terminal = io.BytesIO()
+            capture = directory / f"invalid-{index}.log"
+            expect_error(
+                lambda response=response, start=start, capture=capture: (
+                    logs.run_live_console(
+                        swiftosctl=executable,
+                        device=None,
+                        timeout_seconds=1.0,
+                        starting_sequence=start,
+                        count=8,
+                        follow=False,
+                        poll_interval_seconds=0.5,
+                        output=capture,
+                        runner=FakeLiveRunner([response]),
+                        stdout=terminal,
+                        stderr=io.StringIO(),
+                    )
+                ),
+                message,
+            )
+            require(terminal.getvalue() == b"", "invalid report reached terminal")
+            require(capture.read_bytes() == b"", "invalid report tainted capture")
+
+
+def test_live_idle_and_sequence_exhaustion_are_bounded() -> None:
+    with tempfile.TemporaryDirectory() as directory_name:
+        executable = executable_fixture(Path(directory_name))
+
+        idle_equal = logs.run_live_console(
+            swiftosctl=executable,
+            device=None,
+            timeout_seconds=1.0,
+            starting_sequence=5,
+            count=8,
+            follow=False,
+            poll_interval_seconds=0.5,
+            output=None,
+            runner=FakeLiveRunner([
+                live_report(
+                    b"",
+                    next_sequence=5,
+                    newest_sequence=4,
+                    requested_sequence=5,
+                ),
+            ]),
+            stdout=io.BytesIO(),
+            stderr=io.StringIO(),
+        )
+        require(idle_equal.byte_count == 0, "idle cursor produced bytes")
+
+        sleeps: list[float] = []
+        empty = logs.run_live_console(
+            swiftosctl=executable,
+            device=None,
+            timeout_seconds=1.0,
+            starting_sequence=None,
+            count=8,
+            follow=True,
+            poll_interval_seconds=0.25,
+            output=None,
+            runner=FakeLiveRunner([
+                live_report(b"", next_sequence=None, newest_sequence=0),
+                live_report(b"", next_sequence=None, newest_sequence=0),
+            ]),
+            stdout=io.BytesIO(),
+            stderr=io.StringIO(),
+            sleeper=sleeps.append,
+            maximum_polls=2,
+        )
+        require(empty.poll_count == 2, "empty log did not remain pollable")
+        require(sleeps == [0.25], "empty log follow did not use its idle bound")
+
+        terminal = io.BytesIO()
+        diagnostics = io.StringIO()
+        exhausted = logs.run_live_console(
+            swiftosctl=executable,
+            device=None,
+            timeout_seconds=1.0,
+            starting_sequence=logs.MAXIMUM_SEQUENCE,
+            count=1,
+            follow=True,
+            poll_interval_seconds=0.25,
+            output=None,
+            runner=FakeLiveRunner([
+                live_report(
+                    b"LAST",
+                    next_sequence=None,
+                    newest_sequence=logs.MAXIMUM_SEQUENCE,
+                    requested_sequence=logs.MAXIMUM_SEQUENCE,
+                ),
+            ]),
+            stdout=terminal,
+            stderr=diagnostics,
+        )
+        require(exhausted.poll_count == 1, "exhausted cursor was polled again")
+        require(terminal.getvalue() == b"LAST", "final sequence bytes were lost")
+        require("sequence space exhausted" in diagnostics.getvalue(),
+                "sequence exhaustion was not reported")
+
+
 def test_live_keyboard_interrupt_has_clean_cli_exit() -> None:
     error_output = io.StringIO()
     with mock.patch.object(logs, "run_live_console", side_effect=KeyboardInterrupt):
@@ -610,6 +870,8 @@ def main() -> int:
         test_live_once_validates_device_and_refuses_capture_overwrite,
         test_failure_markers_are_promoted_in_capture_order,
         test_live_report_corruption_and_device_switch_are_refused,
+        test_invalid_live_pages_do_not_contaminate_transcripts,
+        test_live_idle_and_sequence_exhaustion_are_bounded,
         test_live_keyboard_interrupt_has_clean_cli_exit,
     ]
     for test in tests:
