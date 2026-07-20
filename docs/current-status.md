@@ -310,20 +310,25 @@ routed file-manager interaction, or GPU rasterization.
 
 ## Physically verified Raspberry Pi 5 foundation
 
-Revision `9e93dac` booted on one Raspberry Pi 5 8 GB and returned 642 ordered,
-CRC-valid persistent records from a healthy type-`0xda` SwiftOS data volume.
-The trace proves EL1/FDT entry, roughly 8 GB memory discovery, final paging,
-GICv2 and timer delivery, CPU0 plus three PSCI-started secondaries with
-independent work, SD/MBR/data-volume access, and an initial SwiftFS format and
-mount. Its empty-arena log scan found no prior record; the current boot was then
-flushed durably. The exact artifact, card geometry, markers, and unproven
-boundaries are retained in the
-[2026-07-20 hardware evidence](hardware-evidence/2026-07-20-pi5-8gb-9e93dac.md).
+Three clean artifacts have booted consecutively on one Raspberry Pi 5 8 GB.
+The returned card contains 2,094 ordered, CRC-valid persistent records in three
+gap-free kernel epochs on a healthy type-`0xda` SwiftOS data volume. The newest
+epoch recovered the prior endpoint at sequence `0x555`, remounted SwiftFS, and
+flushed through `0x556`. Across those epochs the physical trace proves EL1/FDT
+entry, roughly 8 GB memory discovery, final paging, GICv2 and timer delivery,
+CPU0 plus three PSCI-started secondaries with independent work, exact
+SD/MBR/data-volume access, first format, two remounts, and durable log recovery.
+The exact artifacts, card geometry, markers, and unproven boundaries are in the
+[first](hardware-evidence/2026-07-20-pi5-8gb-9e93dac.md),
+[second](hardware-evidence/2026-07-20-pi5-8gb-a0bcee7.md), and
+[third](hardware-evidence/2026-07-20-pi5-8gb-fe25ec7.md) evidence notes.
 
-That boot did not enumerate USB, establish Ethernet, receive a firmware simple
-framebuffer, enter the EL0 scheduler, or prove HDMI/native GPU/input. Physical
-foundation evidence therefore narrows the remaining driver work without making
-the Pi 5 a supported target.
+The newest boot reached DWC2 software attachment and then faulted before host
+configuration. It stopped RP1 Ethernet at the SYS-clock readback before PHY or
+GEM traffic, and firmware provided no simple framebuffer. The physical path has
+not proved USB enumeration, Ethernet, the EL0 scheduler, HDMI, native GPU, or
+input. This foundation evidence narrows driver work without making the Pi 5 a
+supported target.
 
 ## Implemented Raspberry Pi display and I/O paths awaiting hardware completion
 
@@ -351,12 +356,15 @@ identity/capability probe, while malformed, cache, and transport responses still
 fail closed. The same completed simplefb surface is
 mirrored when HDMI exists; otherwise the kernel owns an 800 x 600 headless
 diagnostic surface and remains in the monitor loop so the polled controller
-progresses. The latest returned-card trace reached the validated
-`USB_POWER_STATE_MISMATCH` classification: Pi 5 firmware reported legacy HCD
-device 3 as existing but off. The board policy now records that as
-`USB_POWER_UNMANAGED_OFF` and continues to the DWC2 probe; its identity,
-capabilities, initialization, and USB enumeration still require a new physical
-boot.
+progresses. The newest returned-card trace recorded
+`USB_POWER_UNMANAGED_OFF`, passed DWC2 identity/capability, reset, device-mode,
+FIFO, and connect setup, and reached `USB_DEBUG_ATTACHED`. It then emitted
+`USB_DEBUG_FAULT` before `USB_DEBUG_CONFIGURED`, while macOS observed no USB
+descriptor. The EP0 service now retains setup data across DWC2's optional
+OUT-complete indication and waits for setup-done before running Chapter 9
+policy. One-shot bus-reset/enumeration markers and a bounded typed fault
+snapshot make the next physical result attributable; enumeration itself still
+requires that boot.
 
 The Pi image also binds the boot-DT's removable `brcm,bcm2712-sdhci` controller
 to the shared synchronous block contract. After the local HDMI/USB observation
@@ -366,9 +374,9 @@ log arena, and durably appends at most one retained 48-byte kernel event per
 cooperative pass. It never rewrites an ambiguous MBR or signed data-volume
 layout; once those validate, the disjoint user subrange may be opened or
 formatted as blank SwiftFS. Discovery, signature, bounds, or transport failure
-drops the relevant write authority. The returned-card trace proves the physical
-controller, validated data volume, empty-arena scan, current-boot log write, and
-initial SwiftFS format path, but not prior-boot recovery.
+drops the relevant write authority. Three returned-card epochs prove the
+physical controller, validated data volume, empty-arena initialization, initial
+SwiftFS format, two remounts, prior-boot recovery, and gap-free durable append.
 The SD controller record, SwiftFS scratch, and provider record use stable
 classified allocations. A host-tested policy derives disjoint absolute log and
 user-filesystem ranges. A resumable bootstrap performs at most one block

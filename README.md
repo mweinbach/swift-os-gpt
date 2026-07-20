@@ -358,13 +358,17 @@ layout, and can publish the same SwiftFS provider seam used by QEMU. The log
 service and filesystem share one serialized SD owner; raw blocks are never
 exposed to EL0. Each initialized retained ring starts with a structured `BOOT`
 epoch, and the read-only media inspector distinguishes an unused arena from a
-complete console capture. This Pi PIO/SwiftFS path remains
-physical-hardware-unverified.
-Physical Raspberry Pi 5 execution remains unverified. Static parsing of the
-pinned Pi DTB now confirms the non-secure physical timer as GIC PPI 14
-(architectural INTID 30) with a four-interface GICv2 mask, plus the removable
-SDHCI route as SPI `0x111` (architectural INTID `0x131`); none of those routes
-has delivered an interrupt on a Pi. The Pi path currently
+complete console capture. Three physical Pi 5 power-cycle epochs now prove the
+PIO SD path, type-`0xda` layout, SwiftFS remount, and gap-free persistent-log
+recovery; this remains a bounded bring-up result, not general storage support.
+A clean SwiftOS artifact has executed on a Raspberry Pi 5 8 GB through final
+paging, GICv2 timer delivery, four-core PSCI work, SD persistence, and the
+headless diagnostic renderer. The firmware-patched DT resolved the non-secure
+physical timer as GIC PPI 14 (architectural INTID 30) with a four-interface
+mask and the removable SDHCI route as SPI `0x111` (architectural INTID
+`0x131`). USB reached software DWC2 attachment but faulted before host
+configuration; RP1 Ethernet stopped before PHY traffic; HDMI, native GPU,
+input, and Pi EL0 migration remain unverified. The Pi path currently
 consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
 modesetting or V3D VII rendering. It can also export that completed diagnostic
 surface, or a headless kernel-owned surface, over its USB-C device controller to
