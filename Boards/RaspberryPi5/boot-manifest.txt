@@ -55,6 +55,13 @@ Later pre-gadget failures may also be read from the returned card. Use a
 data-capable cable and follow Raspberry Pi's power guidance rather than asking
 the USB-C OTG data cable to power the board.
 
+On DWC2 bring-up failure, retain the typed `SWIFTOS:USB_DWC2_*` marker and the
+pre-reset `GSNPSID` plus `GHWCFG1`-`GHWCFG4` values from UART or the persistent
+console capture. The kernel also reports whether the mailbox, DWC2 resource,
+and firmware simple framebuffer were discovered, missing, or unsupported.
+These diagnostics identify a failed stage; they are not hardware-success
+markers.
+
 The packaging script refuses a non-empty destination, records the exact SwiftOS
 revision/dirty state and DTB repository revision, validates the AArch64 Image
 magic and 4 KiB flag, and writes the files in the fixed order above. The firmware

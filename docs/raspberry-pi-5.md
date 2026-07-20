@@ -411,6 +411,13 @@ Expected UART markers are `SWIFTOS:USB_POWER_READY`,
 `SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, and
 `SWIFTOS:USB_DEBUG_FRAME`. Failures before SD log recovery remain visible only
 on UART10; later pre-USB failures can also be recovered from the returned card.
+Before activation, the kernel records whether the firmware mailbox, DWC2
+controller, and simple framebuffer were discovered, missing, or unsupported.
+If DWC2 initialization fails after MMIO becomes accessible, it emits one typed
+stage marker plus the read-only pre-reset `GSNPSID` and `GHWCFG1` through
+`GHWCFG4` words. Retain those values with the boot identity; they distinguish a
+wrong core/resource from AHB-idle, reset, mode, power-programming, and FIFO
+timeouts without treating any failed path as hardware support.
 The host-test suite covers descriptors, control transactions,
 reset/reconnect, DTR restart, frame chunking, CRC, damage assembly, and viewer
 bounds, but no physical Pi has passed this sequence yet.
