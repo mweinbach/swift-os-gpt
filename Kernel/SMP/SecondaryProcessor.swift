@@ -9,7 +9,10 @@ func swiftOSSecondaryMain(_ contextID: UInt64) -> Never {
     else {
         while true { AArch64.waitForEvent() }
     }
-    guard InterruptSubsystem.configureCurrentProcessor() else {
+    guard InterruptSubsystem.configureCurrentProcessor(
+              logicalProcessorID: contextID
+          )
+    else {
         SecondaryProcessorWorkRuntime
             .recordCurrentProcessorInitializationFailure(contextID: contextID)
         while true { AArch64.waitForEvent() }

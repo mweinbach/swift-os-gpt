@@ -27,7 +27,7 @@ enum PlatformInterruptTrigger: UInt32, Equatable {
 /// Tree binding rather than from a board-specific interrupt ID. `number` is
 /// relative to its interrupt class: SPIs begin at architectural INTID 32 and
 /// PPIs begin at INTID 16. The PPI processor mask is the binding's bits 15:8;
-/// firmware may publish zero when routing is fixed by hardware.
+/// GICv3 omits that legacy mask and publishes zero.
 enum PlatformGICInterrupt: Equatable {
     case sharedPeripheral(
         number: UInt32,
@@ -67,6 +67,29 @@ enum PlatformGICInterrupt: Equatable {
             return trigger.rawValue
         case .privatePeripheral(_, let trigger, let processorMask):
             return trigger.rawValue | (UInt32(processorMask) << 8)
+        }
+    }
+
+    /// Validates that this private route can reach every processor managed by
+    /// the current bounded kernel policy. GICv2's binding assigns mask bits to
+    /// CPU interfaces, so every selected interface must be present. GICv3
+    /// routes PPIs through each PE's redistributor and carries no CPU mask.
+    func supportsProcessorCount(
+        _ processorCount: Int,
+        through controller: InterruptControllerDescription
+    ) -> Bool {
+        guard processorCount > 0,
+              case let .privatePeripheral(_, _, processorMask) = self
+        else {
+            return false
+        }
+        switch controller {
+        case .gicV3:
+            return processorMask == 0
+        case .gicV2:
+            guard processorCount <= 8 else { return false }
+            let requiredMask = (UInt16(1) << processorCount) - 1
+            return UInt16(processorMask) & requiredMask == requiredMask
         }
     }
 }
@@ -210,17 +233,8 @@ struct Platform {
                 distributor: distributor,
                 redistributor: redistributor
             )
-        } else if let distributor = tree.resource(
-            compatibleWith: "arm,gic-400",
-            registerIndex: 0
-        ), let cpuInterface = tree.resource(
-            compatibleWith: "arm,gic-400",
-            registerIndex: 1
-        ) {
-            interruptController = .gicV2(
-                distributor: distributor,
-                cpuInterface: cpuInterface
-            )
+        } else if let gicV2 = gicV2InterruptController(in: tree) {
+            interruptController = gicV2
         } else {
             return nil
         }
@@ -315,6 +329,39 @@ struct Platform {
         }
 
         return .dwc2(registers: registers)
+    }
+
+    /// Both compatible strings implement the same architected GICv2 register
+    /// model. BCM2712 advertises GIC-400, while QEMU virt advertises the older
+    /// Cortex-A15 name; the driver and all higher-level policy remain shared.
+    private static func gicV2InterruptController(
+        in tree: FlattenedDeviceTree
+    ) -> InterruptControllerDescription? {
+        if let distributor = tree.resource(
+            compatibleWith: "arm,gic-400",
+            registerIndex: 0
+        ), let cpuInterface = tree.resource(
+            compatibleWith: "arm,gic-400",
+            registerIndex: 1
+        ) {
+            return .gicV2(
+                distributor: distributor,
+                cpuInterface: cpuInterface
+            )
+        }
+        if let distributor = tree.resource(
+            compatibleWith: "arm,cortex-a15-gic",
+            registerIndex: 0
+        ), let cpuInterface = tree.resource(
+            compatibleWith: "arm,cortex-a15-gic",
+            registerIndex: 1
+        ) {
+            return .gicV2(
+                distributor: distributor,
+                cpuInterface: cpuInterface
+            )
+        }
+        return nil
     }
 
     private static func raspberryPi5GraphicsResources(
@@ -537,6 +584,15 @@ struct Platform {
             count += 1
         }
         return count
+    }
+
+    /// Applies a kernel policy cap without hiding how many enabled processor
+    /// nodes firmware described. Both early interrupt banking and the later
+    /// PSCI startup plan consume this same bounded value.
+    func processorCount(limitedTo maximum: Int) -> Int? {
+        let discoveredCount = processorCount
+        guard maximum > 0, discoveredCount > 0 else { return nil }
+        return discoveredCount < maximum ? discoveredCount : maximum
     }
 
     private func flattenedResource(

@@ -52,6 +52,7 @@ _start:
 
 .Lenter_el1:
     msr     daifset, #0xf
+    msr     tpidr_el1, xzr         /* dense logical boot processor ID */
     msr     spsel, #1               /* kernel exceptions and code use SP_EL1 */
     ldr     x1, =__boot_stack_top
     mov     sp, x1
@@ -176,6 +177,18 @@ _secondary_start:
     mov     x1, #3
     msr     cnthctl_el2, x1
     msr     cntvoff_el2, xzr
+
+    /* Mirror the boot CPU's GIC system-register permission at EL2. */
+    mrs     x2, id_aa64pfr0_el1
+    ubfx    x2, x2, #24, #4
+    cbz     x2, .Lsecondary_no_gic_sre_el2
+    mrs     x2, icc_sre_el2
+    mov     x3, #9                  /* Enable | SRE */
+    orr     x2, x2, x3
+    msr     icc_sre_el2, x2
+    isb
+.Lsecondary_no_gic_sre_el2:
+
     mov     x1, #0x3c5
     msr     spsr_el2, x1
     adr     x1, .Lsecondary_el1
@@ -184,6 +197,8 @@ _secondary_start:
 
 .Lsecondary_el1:
     msr     daifset, #0xf
+    msr     tpidr_el1, x19         /* dense PSCI context/logical CPU ID */
+    isb
     msr     spsel, #1
     ldr     x1, =__secondary_stacks_start
     add     x1, x1, x19, lsl #16
@@ -741,6 +756,12 @@ arch_mpidr:
     mrs     x0, mpidr_el1
     ret
 
+.global arch_logical_processor_id
+.type arch_logical_processor_id, %function
+arch_logical_processor_id:
+    mrs     x0, tpidr_el1
+    ret
+
 .global arch_vector_base
 .type arch_vector_base, %function
 arch_vector_base:
@@ -889,6 +910,7 @@ ADDRESS_ACCESSOR arch_smp_work_context_storage, __smp_work_context_storage
 ADDRESS_ACCESSOR arch_smp_work_result_storage, __smp_work_result_storage
 ADDRESS_ACCESSOR arch_smp_work_state_storage, __smp_work_state_storage
 ADDRESS_ACCESSOR arch_smp_work_stack_storage, __smp_work_stack_storage
+ADDRESS_ACCESSOR arch_smp_work_timer_tick_storage, __smp_work_timer_tick_storage
 ADDRESS_ACCESSOR arch_paging_layout_storage, __paging_layout_storage
 ADDRESS_ACCESSOR arch_paging_layout_storage_end, __paging_layout_storage_end
 ADDRESS_ACCESSOR arch_debug_log_storage_start, __debug_log_storage_start

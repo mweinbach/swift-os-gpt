@@ -77,6 +77,18 @@ public func validateRaspberryPi5DeviceTree(
     else {
         return 18
     }
+    guard platform.nonSecurePhysicalTimerInterrupt?.supportsProcessorCount(
+              4,
+              through: platform.interruptController
+          ) == true,
+          platform.nonSecurePhysicalTimerInterrupt?.supportsProcessorCount(
+              5,
+              through: platform.interruptController
+          ) == false,
+          platform.processorCount(limitedTo: 4) == 4
+    else {
+        return 19
+    }
     guard platform.processorCount == 4,
           platform.processorAffinity(at: 0) == 0,
           platform.processorAffinity(at: 1) == 0x100,

@@ -161,6 +161,8 @@ SECTIONS
         . += 64;
         __smp_work_stack_storage = .;
         . += 64;
+        __smp_work_timer_tick_storage = .;
+        . += 64;
         . = ALIGN(4K);
         __smp_storage_end = .;
     }

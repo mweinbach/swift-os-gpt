@@ -35,8 +35,8 @@ enum SecondaryProcessorWorkQuantum: Equatable {
 }
 
 /// Resumable deterministic Swift work. Timing is deliberately absent from the
-/// executor: a cooperative counter today and a per-CPU timer tomorrow can each
-/// grant exactly one bounded quantum without changing scheduling policy.
+/// executor: the processor-local timer IRQ runtime grants exactly one bounded
+/// quantum without putting scheduling policy in the exception handler.
 struct SecondaryProcessorWorkExecutor {
     private static let mixingConstant: UInt64 = 0x9e37_79b9_7f4a_7c15
     private static let multiplier: UInt64 = 0xbf58_476d_1ce4_e5b9

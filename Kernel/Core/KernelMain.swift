@@ -127,11 +127,19 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
     }
     console.write(InterruptSubsystem.exceptionsReadyMarker)
 
-    guard let timerInterruptID = platform.nonSecurePhysicalTimerInterrupt?
-              .architecturalInterruptID,
+    guard let timerInterrupt = platform.nonSecurePhysicalTimerInterrupt,
+          let managedProcessorCount = platform.processorCount(
+              limitedTo: ProcessorStartupPlan.maximumOnlineProcessorCount
+          ),
+          timerInterrupt.supportsProcessorCount(
+              managedProcessorCount,
+              through: platform.interruptController
+          ),
+          let timerInterruptID = timerInterrupt.architecturalInterruptID,
           InterruptSubsystem.configure(
               platform.interruptController,
-              timerInterruptID: timerInterruptID
+              timerInterruptID: timerInterruptID,
+              processorCount: managedProcessorCount
           )
     else {
         console.write("SWIFTOS:PANIC:GIC\n")

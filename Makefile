@@ -1402,6 +1402,8 @@ qemu-fdt-test: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(QEMU) -machine virt,gic-version=3,dumpdtb=$(BUILD_DIR)/qemu-virt.dtb \
 		-cpu cortex-a72 -m 512M -display none -monitor none -serial none
+	$(QEMU) -machine virt,gic-version=2,dumpdtb=$(BUILD_DIR)/qemu-virt-gicv2.dtb \
+		-cpu cortex-a72 -smp 4 -m 512M -display none -monitor none -serial none
 	$(SWIFTC) -parse-as-library \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		-emit-library \
@@ -1411,6 +1413,9 @@ qemu-fdt-test: | $(BUILD_DIR)
 		-o $(BUILD_DIR)/libQEMUDeviceTreeProbe.dylib
 	$(PYTHON) Tests/Host/qemu_fdt_probe.py \
 		$(BUILD_DIR)/libQEMUDeviceTreeProbe.dylib $(BUILD_DIR)/qemu-virt.dtb
+	$(PYTHON) Tests/Host/qemu_fdt_probe.py \
+		$(BUILD_DIR)/libQEMUDeviceTreeProbe.dylib \
+		$(BUILD_DIR)/qemu-virt-gicv2.dtb
 
 rpi5-fdt-test: | $(BUILD_DIR)
 	@test -n "$(RPI5_DTB)" || \
@@ -1520,10 +1525,18 @@ smp-el0-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py $(KERNEL_BIN)
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
 		$(KERNEL_BIN) --virtualization
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
+		$(KERNEL_BIN) --gic-version 2
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
+		$(KERNEL_BIN) --gic-version 2 --virtualization
 
 cpu-config-smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
 		$(KERNEL_BIN) --cpu cortex-a76 --cpus 2
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
+		$(KERNEL_BIN) --cpus 8
+	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/smp_el0_smoke.py \
+		$(KERNEL_BIN) --gic-version 2 --cpus 8
 
 test: toolchain-check source-check host-test userland-test qemu-fdt-test rpi5-package-test inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-net-smoke virtio-input-smoke virtio-block-swiftfs-smoke smp-el0-smoke cpu-config-smoke rpi5-inspect
 

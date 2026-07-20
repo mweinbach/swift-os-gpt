@@ -28,7 +28,7 @@ struct GICv2Configuration {
     init(
         distributor: DeviceResource,
         cpuInterface: DeviceResource,
-        timerInterruptID: UInt32 = 30
+        timerInterruptID: UInt32
     ) {
         self.distributor = distributor
         self.cpuInterface = cpuInterface
@@ -44,7 +44,7 @@ struct GICv3Configuration {
     init(
         distributor: DeviceResource,
         redistributor: DeviceResource,
-        timerInterruptID: UInt32 = 30
+        timerInterruptID: UInt32
     ) {
         self.distributor = distributor
         self.redistributor = redistributor

@@ -120,7 +120,7 @@ struct PerCPUInterruptInitializationTests {
         expect(driver.initializeDistributor(), "global distributor setup")
         expect(
             TestHardware.operations == [
-                .store32(cpu: 0, address: distributorBase, value: 1)
+                .store32(cpu: 0, address: distributorBase, value: 3)
             ],
             "global setup touched processor-local state"
         )
@@ -138,7 +138,7 @@ struct PerCPUInterruptInitializationTests {
             )
             expect(
                 !localOperations.contains(
-                    .store32(cpu: cpu, address: distributorBase, value: 1)
+                    .store32(cpu: cpu, address: distributorBase, value: 3)
                 ),
                 "CPU \(cpu) rewrote global distributor control"
             )
@@ -193,7 +193,7 @@ struct PerCPUInterruptInitializationTests {
             )
             expect(
                 localOperations.contains(
-                    .store32(cpu: cpu, address: cpuBase, value: 1)
+                    .store32(cpu: cpu, address: cpuBase, value: 7)
                 ),
                 "CPU \(cpu) did not enable its GICC"
             )
@@ -201,7 +201,7 @@ struct PerCPUInterruptInitializationTests {
         }
 
         let globalControlWrites = TestHardware.operations.filter {
-            $0 == .store32(cpu: 0, address: distributorBase, value: 1)
+            $0 == .store32(cpu: 0, address: distributorBase, value: 3)
         }
         expect(
             globalControlWrites.count == 1,
@@ -304,7 +304,8 @@ struct PerCPUInterruptInitializationTests {
                 cpuInterface: DeviceResource(
                     baseAddress: UInt64(cpuBase),
                     length: 0x1_000
-                )
+                ),
+                timerInterruptID: timerInterruptID
             )
         )
         expect(

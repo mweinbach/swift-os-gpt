@@ -19,6 +19,14 @@ enum AArch64 {
         archMPIDR()
     }
 
+    /// Dense kernel processor identifier established by the reset/PSCI entry
+    /// veneers. It is intentionally independent of the hardware MPIDR layout
+    /// so processor-local runtime storage works across board CPU topologies.
+    @inline(__always)
+    static var logicalProcessorID: UInt64 {
+        archLogicalProcessorID()
+    }
+
     /// Aff3:Aff2:Aff1:Aff0 in the format used by GIC redistributor affinity.
     @inline(__always)
     static var redistributorAffinity: UInt32 {
@@ -225,6 +233,9 @@ private func archCounterValue() -> UInt64
 
 @_silgen_name("arch_mpidr")
 private func archMPIDR() -> UInt64
+
+@_silgen_name("arch_logical_processor_id")
+private func archLogicalProcessorID() -> UInt64
 
 @_silgen_name("arch_vector_base")
 private func archVectorBase() -> UInt64

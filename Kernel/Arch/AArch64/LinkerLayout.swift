@@ -90,6 +90,9 @@ enum KernelLinkerLayout {
     static var smpWorkResultStorage: UInt64 { archSMPWorkResultStorage() }
     static var smpWorkStateStorage: UInt64 { archSMPWorkStateStorage() }
     static var smpWorkStackStorage: UInt64 { archSMPWorkStackStorage() }
+    static var smpWorkTimerTickStorage: UInt64 {
+        archSMPWorkTimerTickStorage()
+    }
     static var pagingLayoutStorage: LinkerRegion {
         LinkerRegion(
             start: archPagingLayoutStorage(),
@@ -213,6 +216,8 @@ private func archSMPWorkResultStorage() -> UInt64
 private func archSMPWorkStateStorage() -> UInt64
 @_silgen_name("arch_smp_work_stack_storage")
 private func archSMPWorkStackStorage() -> UInt64
+@_silgen_name("arch_smp_work_timer_tick_storage")
+private func archSMPWorkTimerTickStorage() -> UInt64
 @_silgen_name("arch_paging_layout_storage") private func archPagingLayoutStorage() -> UInt64
 @_silgen_name("arch_paging_layout_storage_end") private func archPagingLayoutStorageEnd() -> UInt64
 @_silgen_name("arch_debug_log_storage_start") private func archDebugLogStorageStart() -> UInt64

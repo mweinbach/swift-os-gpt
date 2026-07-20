@@ -16,7 +16,11 @@ enum KernelSMP {
     /// including CPU0. Returns true only when every selected secondary entered
     /// our veneer, published online with release semantics, and is now parked.
     static func start(platform: Platform, console: EarlyConsole) -> Bool {
-        guard storageLayoutIsValid(),
+        guard let managedProcessorCount = platform.processorCount(
+                  limitedTo:
+                    ProcessorStartupPlan.maximumOnlineProcessorCount
+              ),
+              storageLayoutIsValid(),
               let topologyStorage:
                 UnsafeMutableBufferPointer<ProcessorDescription> = buffer(
                     at: KernelLinkerLayout.smpTopologyStorage,
@@ -63,7 +67,7 @@ enum KernelSMP {
         guard topology.count > 0,
               let configuration = ProcessorBootConfiguration(
                   requestedProcessorLimit:
-                    ProcessorStartupPlan.maximumOnlineProcessorCount,
+                    managedProcessorCount,
                   resources: resources
               ),
               let plan = ProcessorStartupPlan(
@@ -210,31 +214,49 @@ enum KernelSMP {
             console.write("SWIFTOS:SMP_CPU1_TASK1_OK\n")
             console.write("SWIFTOS:SMP_CPU1_TASK1_CHECKSUM=")
             console.writeHex(evidence.first.checksum)
+            console.write("\nSWIFTOS:SMP_CPU1_TASK1_QUANTA=")
+            console.writeHex(evidence.first.quantumCount)
             console.write("\nSWIFTOS:SMP_CPU1_TASK2_OK\n")
             console.write("SWIFTOS:SMP_CPU1_TASK2_CHECKSUM=")
             console.writeHex(evidence.second.checksum)
+            console.write("\nSWIFTOS:SMP_CPU1_TASK2_QUANTA=")
+            console.writeHex(evidence.second.quantumCount)
             console.write("\nSWIFTOS:SMP_CPU1_STACK=")
+            console.writeHex(evidence.observedStackPointer)
+            console.write("\nSWIFTOS:SMP_CPU1_TIMER_IRQS=")
         case 2:
             console.write("SWIFTOS:SMP_CPU2_TASK1_OK\n")
             console.write("SWIFTOS:SMP_CPU2_TASK1_CHECKSUM=")
             console.writeHex(evidence.first.checksum)
+            console.write("\nSWIFTOS:SMP_CPU2_TASK1_QUANTA=")
+            console.writeHex(evidence.first.quantumCount)
             console.write("\nSWIFTOS:SMP_CPU2_TASK2_OK\n")
             console.write("SWIFTOS:SMP_CPU2_TASK2_CHECKSUM=")
             console.writeHex(evidence.second.checksum)
+            console.write("\nSWIFTOS:SMP_CPU2_TASK2_QUANTA=")
+            console.writeHex(evidence.second.quantumCount)
             console.write("\nSWIFTOS:SMP_CPU2_STACK=")
+            console.writeHex(evidence.observedStackPointer)
+            console.write("\nSWIFTOS:SMP_CPU2_TIMER_IRQS=")
         case 3:
             console.write("SWIFTOS:SMP_CPU3_TASK1_OK\n")
             console.write("SWIFTOS:SMP_CPU3_TASK1_CHECKSUM=")
             console.writeHex(evidence.first.checksum)
+            console.write("\nSWIFTOS:SMP_CPU3_TASK1_QUANTA=")
+            console.writeHex(evidence.first.quantumCount)
             console.write("\nSWIFTOS:SMP_CPU3_TASK2_OK\n")
             console.write("SWIFTOS:SMP_CPU3_TASK2_CHECKSUM=")
             console.writeHex(evidence.second.checksum)
+            console.write("\nSWIFTOS:SMP_CPU3_TASK2_QUANTA=")
+            console.writeHex(evidence.second.quantumCount)
             console.write("\nSWIFTOS:SMP_CPU3_STACK=")
+            console.writeHex(evidence.observedStackPointer)
+            console.write("\nSWIFTOS:SMP_CPU3_TIMER_IRQS=")
         default:
             console.write("SWIFTOS:SMP_WORK_BAD_CONTEXT\n")
             return
         }
-        console.writeHex(evidence.observedStackPointer)
+        console.writeHex(evidence.timerInterruptCount)
         console.write("\n")
     }
 
@@ -249,6 +271,7 @@ enum KernelSMP {
         let workResults = KernelLinkerLayout.smpWorkResultStorage
         let workStates = KernelLinkerLayout.smpWorkStateStorage
         let workStacks = KernelLinkerLayout.smpWorkStackStorage
+        let workTimerTicks = KernelLinkerLayout.smpWorkTimerTickStorage
         let followingStorage = KernelLinkerLayout.pagingLayoutStorage.start
         guard topology <= targets,
               targets <= states,
@@ -259,7 +282,8 @@ enum KernelSMP {
               workContexts <= workResults,
               workResults <= workStates,
               workStates <= workStacks,
-              workStacks <= followingStorage
+              workStacks <= workTimerTicks,
+              workTimerTicks <= followingStorage
         else {
             return false
         }
@@ -290,7 +314,10 @@ enum KernelSMP {
         ) && workStacks - workStates >= requiredBytes(
             UInt64.self,
             count: ProcessorStartupPlan.maximumOnlineProcessorCount
-        ) && followingStorage - workStacks >= requiredBytes(
+        ) && workTimerTicks - workStacks >= requiredBytes(
+            UInt64.self,
+            count: ProcessorStartupPlan.maximumOnlineProcessorCount
+        ) && followingStorage - workTimerTicks >= requiredBytes(
             UInt64.self,
             count: ProcessorStartupPlan.maximumOnlineProcessorCount
         )

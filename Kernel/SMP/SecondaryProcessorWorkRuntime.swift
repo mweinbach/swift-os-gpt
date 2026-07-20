@@ -28,6 +28,7 @@ struct SecondaryProcessorWorkEvidence: Equatable {
     let first: SecondaryProcessorWorkResult
     let second: SecondaryProcessorWorkResult
     let observedStackPointer: UInt64
+    let timerInterruptCount: UInt64
 }
 
 enum SecondaryProcessorWorkEvidenceResult: Equatable {
@@ -51,31 +52,38 @@ private enum SecondaryProcessorQuantumTickResult: Equatable {
     case restartInterrupted
 }
 
-/// Counter-backed cooperative tick source. It is intentionally outside the
-/// scheduler model so a per-CPU timer interrupt can replace it without changing
-/// leases, contexts, or execution quanta.
-private struct SecondaryProcessorCounterTickSource {
-    private static let ticksPerSecondDivisor: UInt64 = 100_000
-    private static let pollLimit: UInt64 = 1_000_000
+/// Consumes timer-hook publications made by the local CPU's IRQ exception.
+/// Scheduler policy stays in mainline Swift: the exception hook only grants a
+/// tick, and each observed tick permits exactly one bounded work quantum.
+private struct SecondaryProcessorInterruptTickSource {
+    let logicalProcessorID: Int
+    private var observedTickCount: UInt64 = 0
 
-    let periodTicks: UInt64
-
-    init?() {
-        let frequency = AArch64.counterFrequency
-        guard frequency > 0 else { return nil }
-        let divided = frequency / Self.ticksPerSecondDivisor
-        periodTicks = divided > 0 ? divided : 1
+    init(logicalProcessorID: Int) {
+        self.logicalProcessorID = logicalProcessorID
     }
 
     mutating func awaitTick(
-        logicalProcessorID: UInt64,
+        contextID: UInt64,
         observedRestartEpoch: inout UInt64
     ) -> SecondaryProcessorQuantumTickResult {
-        let start = AArch64.counterValue
-        var pollCount: UInt64 = 0
         while true {
+            guard let deliveredTickCount =
+                    SecondaryProcessorWorkRuntime.timerHookTickCount(
+                        logicalProcessorID: logicalProcessorID
+                    )
+            else {
+                return .clockFailed
+            }
+            if deliveredTickCount > observedTickCount {
+                observedTickCount &+= 1
+                return .tick
+            }
+            if deliveredTickCount < observedTickCount {
+                return .clockFailed
+            }
             switch SMPKernelRestartRendezvous.checkpoint(
-                logicalProcessorID: logicalProcessorID,
+                logicalProcessorID: contextID,
                 observedEpoch: &observedRestartEpoch
             ) {
             case .idle:
@@ -83,12 +91,9 @@ private struct SecondaryProcessorCounterTickSource {
             case .invalidContext, .shutdownReturned:
                 return .restartInterrupted
             }
-            if AArch64.counterValue &- start >= periodTicks {
-                return .tick
-            }
-            pollCount &+= 1
-            if pollCount >= Self.pollLimit { return .clockFailed }
-            AArch64.spinHint()
+            // CNTP IRQs still vector from WFE. A restart request uses SEV, so
+            // it also wakes this processor if timer delivery itself failed.
+            AArch64.waitForEvent()
         }
     }
 }
@@ -111,6 +116,7 @@ enum SecondaryProcessorWorkRuntime {
     private static let stackCapacity =
         ProcessorStartupPlan.maximumOnlineProcessorCount
     private static let iterationBudgetPerQuantum: UInt64 = 64
+    private static let timerInterruptsPerSecond: UInt64 = 1_000
 
     private nonisolated(unsafe) static var scheduler:
         SecondaryProcessorWorkScheduler?
@@ -119,6 +125,8 @@ enum SecondaryProcessorWorkRuntime {
     private nonisolated(unsafe) static var stateStorage:
         UnsafeMutableBufferPointer<UInt64>?
     private nonisolated(unsafe) static var stackStorage:
+        UnsafeMutableBufferPointer<UInt64>?
+    private nonisolated(unsafe) static var timerTickStorage:
         UnsafeMutableBufferPointer<UInt64>?
     private nonisolated(unsafe) static var schedulerLock: UInt32 = 0
     private nonisolated(unsafe) static var publishedProcessorCount: UInt64 = 0
@@ -153,6 +161,10 @@ enum SecondaryProcessorWorkRuntime {
                   at: KernelLinkerLayout.smpWorkStackStorage,
                   count: stackCapacity
               ),
+              let timerTicks: UnsafeMutableBufferPointer<UInt64> = buffer(
+                  at: KernelLinkerLayout.smpWorkTimerTickStorage,
+                  count: stateCapacity
+              ),
               let active = SecondaryProcessorWorkScheduler(
                   threadStorage: threads,
                   currentIndexStorage: indices,
@@ -184,12 +196,18 @@ enum SecondaryProcessorWorkRuntime {
             stacks[index] = 0
             index += 1
         }
+        index = 0
+        while index < timerTicks.count {
+            smpStoreRelease(timerTicks.baseAddress!.advanced(by: index), 0)
+            index += 1
+        }
 
         let interruptState = lockScheduler()
         scheduler = active
         resultStorage = results
         stateStorage = states
         stackStorage = stacks
+        timerTickStorage = timerTicks
         unlockScheduler(restoring: interruptState)
 
         smpStoreRelease(&publishedProcessorCount, UInt64(processorCount))
@@ -223,7 +241,8 @@ enum SecondaryProcessorWorkRuntime {
                   slot: 1
               ) != nil,
               resultStorage != nil,
-              stackStorage != nil
+              stackStorage != nil,
+              timerTickStorage != nil
         else {
             return false
         }
@@ -244,13 +263,13 @@ enum SecondaryProcessorWorkRuntime {
         observedRestartEpoch: inout UInt64
     ) -> SecondaryProcessorWorkRunResult {
         guard let logicalProcessorID = validatedProcessorID(contextID),
+              AArch64.logicalProcessorID == contextID,
               let results = resultStorage,
               let states = stateStorage,
               let stateBase = states.baseAddress,
               let stacks = stackStorage,
               logicalProcessorID < states.count,
-              logicalProcessorID < stacks.count,
-              var tickSource = SecondaryProcessorCounterTickSource()
+              logicalProcessorID < stacks.count
         else {
             return .invalidContext
         }
@@ -261,7 +280,22 @@ enum SecondaryProcessorWorkRuntime {
             SecondaryProcessorWorkState.running.rawValue
         )
 
+        guard startTimerTickSource(
+                  logicalProcessorID: logicalProcessorID
+              )
+        else {
+            publishState(
+                logicalProcessorID: logicalProcessorID,
+                state: .clockFailed
+            )
+            return .clockFailed
+        }
+        var tickSource = SecondaryProcessorInterruptTickSource(
+            logicalProcessorID: logicalProcessorID
+        )
+
         guard var lease = begin(on: logicalProcessorID) else {
+            stopTimerTickSource()
             publishState(
                 logicalProcessorID: logicalProcessorID,
                 state: .schedulingFailed
@@ -276,6 +310,7 @@ enum SecondaryProcessorWorkRuntime {
                   context.logicalProcessorID == UInt32(logicalProcessorID),
                   var executor = SecondaryProcessorWorkExecutor(context: context)
             else {
+                stopTimerTickSource()
                 publishState(
                     logicalProcessorID: logicalProcessorID,
                     state: .schedulingFailed
@@ -286,18 +321,20 @@ enum SecondaryProcessorWorkRuntime {
             var completedChecksum: UInt64?
             while completedChecksum == nil {
                 switch tickSource.awaitTick(
-                    logicalProcessorID: contextID,
+                    contextID: contextID,
                     observedRestartEpoch: &observedRestartEpoch
                 ) {
                 case .tick:
                     break
                 case .clockFailed:
+                    stopTimerTickSource()
                     publishState(
                         logicalProcessorID: logicalProcessorID,
                         state: .clockFailed
                     )
                     return .clockFailed
                 case .restartInterrupted:
+                    stopTimerTickSource()
                     publishState(
                         logicalProcessorID: logicalProcessorID,
                         state: .restartInterrupted
@@ -313,6 +350,7 @@ enum SecondaryProcessorWorkRuntime {
                 case let .completed(checksum):
                     completedChecksum = checksum
                 case .invalidBudget:
+                    stopTimerTickSource()
                     publishState(
                         logicalProcessorID: logicalProcessorID,
                         state: .schedulingFailed
@@ -324,6 +362,7 @@ enum SecondaryProcessorWorkRuntime {
             guard let checksum = completedChecksum,
                   checksum == context.expectedChecksum
             else {
+                stopTimerTickSource()
                 publishState(
                     logicalProcessorID: logicalProcessorID,
                     state: .schedulingFailed
@@ -334,6 +373,7 @@ enum SecondaryProcessorWorkRuntime {
                 * SecondaryProcessorWorkScheduler.tasksPerSecondaryProcessor
                 + completedSlot
             guard resultIndex < results.count else {
+                stopTimerTickSource()
                 publishState(
                     logicalProcessorID: logicalProcessorID,
                     state: .schedulingFailed
@@ -353,6 +393,7 @@ enum SecondaryProcessorWorkRuntime {
                         < SecondaryProcessorWorkScheduler
                             .tasksPerSecondaryProcessor
                 else {
+                    stopTimerTickSource()
                     publishState(
                         logicalProcessorID: logicalProcessorID,
                         state: .schedulingFailed
@@ -365,6 +406,7 @@ enum SecondaryProcessorWorkRuntime {
                         == SecondaryProcessorWorkScheduler
                             .tasksPerSecondaryProcessor
                 else {
+                    stopTimerTickSource()
                     publishState(
                         logicalProcessorID: logicalProcessorID,
                         state: .schedulingFailed
@@ -372,6 +414,7 @@ enum SecondaryProcessorWorkRuntime {
                     return .schedulingFailed
                 }
             case .rejected:
+                stopTimerTickSource()
                 publishState(
                     logicalProcessorID: logicalProcessorID,
                     state: .schedulingFailed
@@ -381,6 +424,10 @@ enum SecondaryProcessorWorkRuntime {
             completedSlot += 1
         }
 
+        // Disabling CNTP and clearing the processor-local hook precede the
+        // completion release, so CPU0 never observes completed work while the
+        // worker can still mutate its timer evidence.
+        stopTimerTickSource()
         smpStoreRelease(
             stateBase.advanced(by: logicalProcessorID),
             SecondaryProcessorWorkState.completed.rawValue
@@ -476,6 +523,8 @@ enum SecondaryProcessorWorkRuntime {
         let first = results[resultIndex]
         let second = results[resultIndex + 1]
         let stacks = KernelLinkerLayout.secondaryStacks
+        let requiredTimerInterruptCount = first.quantumCount
+            &+ second.quantumCount
         guard first.taskIdentifier == firstContext.taskIdentifier,
               second.taskIdentifier == secondContext.taskIdentifier,
               first.taskIdentifier != second.taskIdentifier,
@@ -483,6 +532,17 @@ enum SecondaryProcessorWorkRuntime {
               second.checksum == secondContext.expectedChecksum,
               first.quantumCount > 1,
               second.quantumCount > 1,
+              requiredTimerInterruptCount >= first.quantumCount,
+              requiredTimerInterruptCount >= second.quantumCount,
+              let timerInterruptCount = InterruptSubsystem
+                  .timerInterruptCount(
+                      logicalProcessorID: logicalProcessorID
+                  ),
+              let timerHookTickCount = timerHookTickCount(
+                  logicalProcessorID: logicalProcessorID
+              ),
+              timerInterruptCount == timerHookTickCount,
+              timerInterruptCount >= requiredTimerInterruptCount,
               SecondaryProcessorStackOwnership.owns(
                   stackPointer: observedStackPointer,
                   logicalProcessorID: logicalProcessorID,
@@ -496,8 +556,91 @@ enum SecondaryProcessorWorkRuntime {
             logicalProcessorID: UInt32(logicalProcessorID),
             first: first,
             second: second,
-            observedStackPointer: observedStackPointer
+            observedStackPointer: observedStackPointer,
+            timerInterruptCount: timerInterruptCount
         ))
+    }
+
+    fileprivate static func recordTimerHookTick(
+        logicalProcessorID: UInt64
+    ) {
+        guard logicalProcessorID <= UInt64(Int.max),
+              let ticks = timerTickStorage,
+              let base = ticks.baseAddress,
+              Int(logicalProcessorID) < ticks.count
+        else { return }
+        incrementTimerHookTick(
+            base.advanced(by: Int(logicalProcessorID))
+        )
+    }
+
+    fileprivate static func timerHookTickCount(
+        logicalProcessorID: Int
+    ) -> UInt64? {
+        guard logicalProcessorID >= 0,
+              logicalProcessorID
+                < ProcessorStartupPlan.maximumOnlineProcessorCount
+        else {
+            return nil
+        }
+        guard let ticks = timerTickStorage,
+              let base = ticks.baseAddress,
+              logicalProcessorID < ticks.count
+        else { return nil }
+        return smpLoadAcquire(base.advanced(by: logicalProcessorID))
+    }
+
+    private static func startTimerTickSource(
+        logicalProcessorID: Int
+    ) -> Bool {
+        guard logicalProcessorID > 0,
+              AArch64.logicalProcessorID == UInt64(logicalProcessorID),
+              resetTimerHookTick(logicalProcessorID: logicalProcessorID),
+              InterruptSubsystem.setTimerInterruptHook(
+                  swiftOSSecondaryWorkTimerHook
+              )
+        else {
+            return false
+        }
+        let frequency = AArch64.counterFrequency
+        guard frequency > 0 else {
+            _ = InterruptSubsystem.setTimerInterruptHook(nil)
+            return false
+        }
+        let divided = frequency / timerInterruptsPerSecond
+        let periodTicks = divided > 0 ? divided : 1
+        guard InterruptSubsystem.startPhysicalTimer(
+                  periodTicks: periodTicks
+              )
+        else {
+            _ = InterruptSubsystem.setTimerInterruptHook(nil)
+            return false
+        }
+        return true
+    }
+
+    private static func stopTimerTickSource() {
+        InterruptSubsystem.stopPhysicalTimer()
+        _ = InterruptSubsystem.setTimerInterruptHook(nil)
+    }
+
+    private static func resetTimerHookTick(
+        logicalProcessorID: Int
+    ) -> Bool {
+        guard logicalProcessorID > 0,
+              let ticks = timerTickStorage,
+              let base = ticks.baseAddress,
+              logicalProcessorID < ticks.count
+        else { return false }
+        smpStoreRelease(base.advanced(by: logicalProcessorID), 0)
+        return true
+    }
+
+    private static func incrementTimerHookTick(
+        _ tick: UnsafeMutablePointer<UInt64>
+    ) {
+        let current = smpLoadAcquire(tick)
+        smpStoreRelease(tick, current &+ 1)
     }
 
     private static func publishedCount() -> Int? {
@@ -620,4 +763,14 @@ enum SecondaryProcessorWorkRuntime {
         }
         return UnsafeMutableBufferPointer(start: base, count: count)
     }
+}
+
+/// The IRQ path deliberately does not run scheduler code. It release-publishes
+/// one local tick, then exception return resumes the bounded Swift executor.
+@_cdecl("swiftos_secondary_work_timer_hook")
+func swiftOSSecondaryWorkTimerHook(_ rawFrame: UnsafeMutableRawPointer) {
+    _ = rawFrame
+    SecondaryProcessorWorkRuntime.recordTimerHookTick(
+        logicalProcessorID: AArch64.logicalProcessorID
+    )
 }

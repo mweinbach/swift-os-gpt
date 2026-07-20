@@ -629,6 +629,9 @@ struct FlattenedDeviceTree {
         let isGICV2 = node(
             at: specifier.controllerNodeOffset,
             isCompatibleWith: "arm,gic-400"
+        ) || node(
+            at: specifier.controllerNodeOffset,
+            isCompatibleWith: "arm,cortex-a15-gic"
         )
         let isGICV3 = node(
             at: specifier.controllerNodeOffset,

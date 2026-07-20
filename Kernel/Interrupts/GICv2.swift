@@ -13,6 +13,8 @@ struct GICv2: InterruptControllerDriver {
     private static let cpuBinaryPoint: UInt64 = 0x008
     private static let cpuAcknowledge: UInt64 = 0x00c
     private static let cpuEndOfInterrupt: UInt64 = 0x010
+    private static let enableSupportedDistributorGroups: UInt32 = 0x3
+    private static let enableSupportedCPUGroupsAndAcknowledge: UInt32 = 0x7
 
     private let configurationValue: GICv2Configuration
 
@@ -37,9 +39,12 @@ struct GICv2: InterruptControllerDriver {
             return false
         }
 
-        // In a non-secure view, bit zero enables delivery of Group 1 IRQs.
+        // A single-security-state GICv2 exposes separate Group 0/1 enables,
+        // while a non-secure alias maps its writable low enable to Group 1.
+        // Set both architected positions: unsupported/aliased bits are ignored,
+        // and every view forwards the DT-selected non-secure timer group.
         MMIO.store32(
-            1,
+            Self.enableSupportedDistributorGroups,
             at: UInt(configurationValue.distributor.baseAddress)
                 + UInt(Self.distributorControl)
         )
@@ -113,7 +118,13 @@ struct GICv2: InterruptControllerDriver {
         )
         MMIO.store32(0xff, at: cpu + UInt(Self.cpuPriorityMask))
         MMIO.store32(0, at: cpu + UInt(Self.cpuBinaryPoint))
-        MMIO.store32(1, at: cpu + UInt(Self.cpuControl))
+        // AckCtl lets a single-security-state CPU interface acknowledge the
+        // Group 1 timer through GICC_IAR. In a non-secure alias, inaccessible
+        // secure-view bits are ignored and the writable Group 1 enable remains.
+        MMIO.store32(
+            Self.enableSupportedCPUGroupsAndAcknowledge,
+            at: cpu + UInt(Self.cpuControl)
+        )
         AArch64.synchronizeData()
         return true
     }

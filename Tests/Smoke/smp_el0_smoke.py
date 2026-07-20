@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import selectors
 import signal
 import subprocess
@@ -49,8 +50,9 @@ def run_kernel(
     virtualization: bool,
     cpu: str,
     processor_count: int,
+    gic_version: int,
 ) -> str:
-    machine = "virt,gic-version=3"
+    machine = f"virt,gic-version={gic_version}"
     if virtualization:
         machine += ",virtualization=on"
     command = [
@@ -118,9 +120,12 @@ def validate(transcript: str, processor_count: int) -> None:
             for marker in (
                 f"SWIFTOS:SMP_CPU{processor_id}_TASK1_OK",
                 f"SWIFTOS:SMP_CPU{processor_id}_TASK1_CHECKSUM=0x",
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK1_QUANTA=0x",
                 f"SWIFTOS:SMP_CPU{processor_id}_TASK2_OK",
                 f"SWIFTOS:SMP_CPU{processor_id}_TASK2_CHECKSUM=0x",
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK2_QUANTA=0x",
                 f"SWIFTOS:SMP_CPU{processor_id}_STACK=0x",
+                f"SWIFTOS:SMP_CPU{processor_id}_TIMER_IRQS=0x",
             )
         ]
         + EXPECTED_AFTER_SMP
@@ -130,6 +135,58 @@ def validate(transcript: str, processor_count: int) -> None:
         if position < 0:
             raise AssertionError(f"missing ordered marker {marker}:\n{transcript}")
 
+    stack_addresses: set[int] = set()
+    checksums: set[int] = set()
+    for processor_id in range(1, processor_count):
+        first_quantum_count = marker_hex(
+            transcript,
+            f"SWIFTOS:SMP_CPU{processor_id}_TASK1_QUANTA=",
+        )
+        second_quantum_count = marker_hex(
+            transcript,
+            f"SWIFTOS:SMP_CPU{processor_id}_TASK2_QUANTA=",
+        )
+        timer_interrupt_count = marker_hex(
+            transcript,
+            f"SWIFTOS:SMP_CPU{processor_id}_TIMER_IRQS=",
+        )
+        if first_quantum_count <= 1 or second_quantum_count <= 1:
+            raise AssertionError(
+                f"CPU{processor_id} work was not split into bounded quanta"
+            )
+        if timer_interrupt_count < first_quantum_count + second_quantum_count:
+            raise AssertionError(
+                f"CPU{processor_id} timer IRQs do not cover its work quanta"
+            )
+
+        stack_address = marker_hex(
+            transcript,
+            f"SWIFTOS:SMP_CPU{processor_id}_STACK=",
+        )
+        if stack_address == 0 or stack_address in stack_addresses:
+            raise AssertionError(
+                f"CPU{processor_id} did not publish a unique nonzero stack"
+            )
+        stack_addresses.add(stack_address)
+
+        for task_slot in (1, 2):
+            checksum = marker_hex(
+                transcript,
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK{task_slot}_CHECKSUM=",
+            )
+            if checksum == 0 or checksum in checksums:
+                raise AssertionError(
+                    f"CPU{processor_id} task {task_slot} checksum is invalid"
+                )
+            checksums.add(checksum)
+
+
+def marker_hex(transcript: str, marker: str) -> int:
+    match = re.search(re.escape(marker) + r"0x([0-9a-fA-F]+)", transcript)
+    if match is None:
+        raise AssertionError(f"missing hexadecimal evidence {marker}")
+    return int(match.group(1), 16)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -138,9 +195,11 @@ def main() -> int:
     parser.add_argument("--virtualization", action="store_true")
     parser.add_argument("--cpu", default="cortex-a72")
     parser.add_argument("--cpus", type=int, default=4)
+    parser.add_argument("--gic-version", type=int, choices=(2, 3), default=3)
     arguments = parser.parse_args()
-    if arguments.cpus < 2 or arguments.cpus > 4:
-        parser.error("--cpus must be between 2 and 4")
+    if arguments.cpus < 2 or arguments.cpus > 64:
+        parser.error("--cpus must be between 2 and 64")
+    managed_processor_count = min(arguments.cpus, 4)
     transcript = run_kernel(
         os.environ.get("QEMU", "qemu-system-aarch64"),
         arguments.kernel.resolve(),
@@ -148,17 +207,19 @@ def main() -> int:
         arguments.virtualization,
         arguments.cpu,
         arguments.cpus,
+        arguments.gic_version,
     )
     try:
-        validate(transcript, arguments.cpus)
+        validate(transcript, managed_processor_count)
     except AssertionError as error:
         print(f"SMP/EL0 smoke failed: {error}", file=sys.stderr)
         return 1
     entry = "EL2 handoff" if arguments.virtualization else "EL1 entry"
     print(
         "SMP/EL0 smoke: "
-        f"{arguments.cpus} {arguments.cpu} CPUs, isolated Swift threads, "
-        f"and preemption passed ({entry})"
+        f"{managed_processor_count}/{arguments.cpus} {arguments.cpu} CPUs, "
+        f"GICv{arguments.gic_version}, isolated Swift threads, and "
+        f"preemption passed ({entry})"
     )
     return 0
 

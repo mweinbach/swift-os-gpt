@@ -1,6 +1,5 @@
 /// EL1 physical generic timer. Interrupt routing is owned by the GIC driver.
 struct GenericPhysicalTimer {
-    static let architecturalInterruptID: UInt32 = 30
     private static let maximumCatchUpPeriods = 8
 
     private(set) var periodTicks: UInt64 = 0
