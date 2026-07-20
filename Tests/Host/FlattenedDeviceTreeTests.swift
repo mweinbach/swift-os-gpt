@@ -9,8 +9,9 @@ struct FlattenedDeviceTreeTests {
         rejectsUnavailablePi5GraphicsResources()
         discoversPi5PeripheralUSBController()
         rejectsUnavailablePi5USBController()
+        rejectsNonoperationalStatusesAndUnavailableAncestors()
         rejectsBadMagicAndTruncatedStructure()
-        print("FDT host tests: 9 passed")
+        print("FDT host tests: 10 passed")
     }
 
     private static func translatesChainedPCIRangesAndRejectsMalformedMappings() {
@@ -95,6 +96,45 @@ struct FlattenedDeviceTreeTests {
                 expect(
                     platform.usbDeviceController == nil,
                     "unavailable or host-mode Pi USB controller was bound"
+                )
+            }
+        }
+    }
+
+    private static func rejectsNonoperationalStatusesAndUnavailableAncestors() {
+        let bytes = makeAvailabilityDeviceTree()
+        bytes.withUnsafeBytes { storage in
+            guard let tree = FlattenedDeviceTree(
+                      address: UInt64(UInt(bitPattern: storage.baseAddress!))
+                  )
+            else {
+                fatalError("availability fixture was rejected")
+            }
+
+            let operational: [StaticString] = [
+                "swiftos,status-absent",
+                "swiftos,status-okay",
+                "swiftos,status-ok",
+            ]
+            for compatibility in operational {
+                expect(
+                    tree.resource(compatibleWith: compatibility) != nil,
+                    "operational DT status was rejected"
+                )
+            }
+            let unavailable: [StaticString] = [
+                "swiftos,status-disabled",
+                "swiftos,status-reserved",
+                "swiftos,status-fail",
+                "swiftos,status-fail-detail",
+                "swiftos,status-unknown",
+                "swiftos,status-malformed",
+                "swiftos,child-of-disabled-bus",
+            ]
+            for compatibility in unavailable {
+                expect(
+                    tree.resource(compatibleWith: compatibility) == nil,
+                    "unavailable DT node was exposed to a driver"
                 )
             }
         }
@@ -509,6 +549,130 @@ private func makeRaspberryPiPCITranslationDeviceTree(
     appendBE32(2, to: &structure) // pcie
     appendBE32(2, to: &structure) // axi
     appendBE32(2, to: &structure) // root
+    appendBE32(9, to: &structure)
+
+    let headerSize = 40
+    let reservation = Array(repeating: UInt8(0), count: 16)
+    let structureOffset = headerSize + reservation.count
+    let stringsOffset = structureOffset + structure.count
+    let totalSize = stringsOffset + strings.count
+
+    var header: [UInt8] = []
+    appendBE32(0xd00d_feed, to: &header)
+    appendBE32(UInt32(totalSize), to: &header)
+    appendBE32(UInt32(structureOffset), to: &header)
+    appendBE32(UInt32(stringsOffset), to: &header)
+    appendBE32(UInt32(headerSize), to: &header)
+    appendBE32(17, to: &header)
+    appendBE32(16, to: &header)
+    appendBE32(0, to: &header)
+    appendBE32(UInt32(strings.count), to: &header)
+    appendBE32(UInt32(structure.count), to: &header)
+
+    return header + reservation + structure + strings
+}
+
+private func makeAvailabilityDeviceTree() -> [UInt8] {
+    let names = [
+        "#address-cells",
+        "#size-cells",
+        "compatible",
+        "ranges",
+        "reg",
+        "status",
+    ]
+    var strings: [UInt8] = []
+    var offsets: [String: UInt32] = [:]
+    for name in names {
+        offsets[name] = UInt32(strings.count)
+        strings.append(contentsOf: name.utf8)
+        strings.append(0)
+    }
+
+    let nodes: [(name: String, compatibility: String, status: [UInt8]?)] = [
+        ("absent@1000", "swiftos,status-absent", nil),
+        ("okay@2000", "swiftos,status-okay", Array("okay".utf8) + [0]),
+        ("ok@3000", "swiftos,status-ok", Array("ok".utf8) + [0]),
+        ("disabled@4000", "swiftos,status-disabled", Array("disabled".utf8) + [0]),
+        ("reserved@5000", "swiftos,status-reserved", Array("reserved".utf8) + [0]),
+        ("fail@6000", "swiftos,status-fail", Array("fail".utf8) + [0]),
+        ("fail-detail@7000", "swiftos,status-fail-detail", Array("fail-selftest".utf8) + [0]),
+        ("unknown@8000", "swiftos,status-unknown", Array("standby".utf8) + [0]),
+        ("malformed@9000", "swiftos,status-malformed", Array("okay".utf8)),
+    ]
+
+    var structure: [UInt8] = []
+    appendBeginNode("", to: &structure)
+    appendProperty(
+        nameOffset: offsets["#address-cells"]!,
+        value: be32(1),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#size-cells"]!,
+        value: be32(1),
+        to: &structure
+    )
+
+    var address: UInt32 = 0x1000
+    for node in nodes {
+        appendBeginNode(node.name, to: &structure)
+        appendProperty(
+            nameOffset: offsets["compatible"]!,
+            value: Array(node.compatibility.utf8) + [0],
+            to: &structure
+        )
+        appendProperty(
+            nameOffset: offsets["reg"]!,
+            value: be32(address) + be32(0x100),
+            to: &structure
+        )
+        if let status = node.status {
+            appendProperty(
+                nameOffset: offsets["status"]!,
+                value: status,
+                to: &structure
+            )
+        }
+        appendBE32(2, to: &structure)
+        address += 0x1000
+    }
+
+    appendBeginNode("disabled-bus", to: &structure)
+    appendProperty(
+        nameOffset: offsets["#address-cells"]!,
+        value: be32(1),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#size-cells"]!,
+        value: be32(1),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["ranges"]!,
+        value: [],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["status"]!,
+        value: Array("disabled".utf8) + [0],
+        to: &structure
+    )
+    appendBeginNode("child@a000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("swiftos,child-of-disabled-bus".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be32(0xa000) + be32(0x100),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+    appendBE32(2, to: &structure)
+    appendBE32(2, to: &structure)
     appendBE32(9, to: &structure)
 
     let headerSize = 40

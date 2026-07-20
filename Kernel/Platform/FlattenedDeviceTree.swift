@@ -1407,6 +1407,7 @@ struct FlattenedDeviceTree {
                 inheritedSizeCells: 1,
                 translationPath: .identity,
                 insideReservedMemory: false,
+                ancestorsAvailable: true,
                 compatibility: compatibility,
                 deviceType: deviceType,
                 reservedMemory: reservedMemory,
@@ -1425,6 +1426,7 @@ struct FlattenedDeviceTree {
         inheritedSizeCells: UInt32,
         translationPath: AddressTranslationPath,
         insideReservedMemory: Bool,
+        ancestorsAvailable: Bool,
         compatibility: StaticString?,
         deviceType: StaticString?,
         reservedMemory: Bool,
@@ -1453,7 +1455,10 @@ struct FlattenedDeviceTree {
         var compatibleMatches = compatibility == nil
         var deviceTypeMatches = deviceType == nil
         var propertyMatches = matchingPropertyName == nil
-        var enabled = true
+        // DTSpec defines a node as usable only when `status` is absent or an
+        // operational value. A globally searched child also cannot be usable
+        // through an unavailable parent bus, even when the child omits status.
+        var available = ancestorsAvailable
         var resource: DeviceResource?
         var widthInPixels: UInt32?
         var heightInPixels: UInt32?
@@ -1494,6 +1499,7 @@ struct FlattenedDeviceTree {
                     translationPath: childTranslationPath,
                     insideReservedMemory: insideReservedMemory
                         || nodeIntroducesReservedMemory,
+                    ancestorsAvailable: available,
                     compatibility: compatibility,
                     deviceType: deviceType,
                     reservedMemory: reservedMemory,
@@ -1559,11 +1565,16 @@ struct FlattenedDeviceTree {
                         )
                     }
                 } else if propertyName(at: UInt(nameOffset), equals: "status") {
-                    enabled = !cStringEquals(
-                        "disabled",
-                        at: valueOffset,
-                        length: valueLength
-                    )
+                    available = ancestorsAvailable
+                        && (cStringEquals(
+                            "okay",
+                            at: valueOffset,
+                            length: valueLength
+                        ) || cStringEquals(
+                            "ok",
+                            at: valueOffset,
+                            length: valueLength
+                        ))
                 } else if propertyName(at: UInt(nameOffset), equals: "reg") {
                     resource = decodeResource(
                         at: valueOffset,
@@ -1645,7 +1656,7 @@ struct FlattenedDeviceTree {
                 let reservedMemoryMatches = !reservedMemory
                     || (insideReservedMemory && resource != nil)
                 if compatibleMatches && deviceTypeMatches && propertyMatches
-                    && enabled
+                    && available
                     && reservedMemoryMatches {
                     if remainingMatches == 0 {
                         return DeviceTreeSearchResult(
