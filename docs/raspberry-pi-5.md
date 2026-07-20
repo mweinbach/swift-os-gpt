@@ -176,8 +176,8 @@ test -f "$BOOT_VOLUME/BOOT-MANIFEST.txt"
 test -f "$BOOT_VOLUME/MEDIA-LAYOUT.txt"
 test -f "$BOOT_VOLUME/SHA256SUMS"
 (cd "$BOOT_PACKAGE" && shasum -a 256 -c SHA256SUMS)
-rsync -rt --exclude SHA256SUMS "$BOOT_PACKAGE/" "$BOOT_VOLUME/"
-rsync -t "$BOOT_PACKAGE/SHA256SUMS" "$BOOT_VOLUME/SHA256SUMS"
+rsync -rt --checksum --exclude SHA256SUMS "$BOOT_PACKAGE/" "$BOOT_VOLUME/"
+rsync -t --checksum "$BOOT_PACKAGE/SHA256SUMS" "$BOOT_VOLUME/SHA256SUMS"
 (cd "$BOOT_VOLUME" && shasum -a 256 -c SHA256SUMS)
 sync
 diskutil unmountDisk /dev/diskN
@@ -194,9 +194,8 @@ partition. A card that was previously prepared as FAT-only therefore still has
 no SwiftFS or persistent-log arena after this update; perform a deliberate
 whole-card initialization when preserving its old contents is no longer
 required. The semantic verifier follows only paths named by the package hash
-manifest,
-so unrelated `.Spotlight-V100`, `.fseventsd`, and AppleDouble files neither
-invalidate the boot payload nor expand the verifier's read scope.
+manifest, so unrelated `.Spotlight-V100`, `.fseventsd`, and AppleDouble files
+neither invalidate the boot payload nor expand the verifier's read scope.
 
 ### Live USB kernel update: volatile
 
