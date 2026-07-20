@@ -164,6 +164,16 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
             recordFailure(stage: .invalidConfiguration)
             return .failed
         }
+        let resetGPIO: RP1GEMResetGPIOAddresses?
+        if let reset = resources.phyReset {
+            guard let gpio = Self.resetGPIOAddresses(for: reset) else {
+                recordFailure(stage: .phyResetGPIOLayout)
+                return .failed
+            }
+            resetGPIO = gpio
+        } else {
+            resetGPIO = nil
+        }
 
         guard enableClock(
                   at: RP1GEMBoardRegisterLayout.systemClockControl,
@@ -186,7 +196,7 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
             isPrepared = true
             return .ready
         }
-        guard let gpio = Self.resetGPIOAddresses(for: reset) else {
+        guard let gpio = resetGPIO else {
             recordFailure(stage: .phyResetGPIOLayout)
             return .failed
         }
@@ -509,7 +519,6 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
         return reset.gpioControllerPhandle != 0
             && reset.durationMilliseconds > 0
             && reset.durationMilliseconds <= 1_000
-            && resetGPIOAddresses(for: reset) != nil
     }
 
     private static func validResource(

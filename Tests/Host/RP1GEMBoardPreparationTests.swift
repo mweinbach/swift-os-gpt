@@ -464,7 +464,8 @@ struct RP1GEMBoardPreparationTests {
     private static func rejectsMalformedResourcesBeforeTouchingHardware() {
         expectRejected(
             makeResources(resetLine: 54),
-            "GPIO line 54 accepted"
+            "GPIO line 54 accepted",
+            expectedStage: .phyResetGPIOLayout
         )
         expectRejected(
             makeResources(resetLine: 32, durationMilliseconds: 0),
@@ -476,11 +477,13 @@ struct RP1GEMBoardPreparationTests {
         )
         expectRejected(
             makeResources(resetLine: 32, gpioLength: 0x8_000),
-            "short aggregate GPIO resources accepted"
+            "short aggregate GPIO resources accepted",
+            expectedStage: .phyResetGPIOLayout
         )
         expectRejected(
             makeResources(resetLine: 32, rioBaseAddress: TestAddress.rio + 4),
-            "noncontiguous RP1 GPIO resources accepted"
+            "noncontiguous RP1 GPIO resources accepted",
+            expectedStage: .phyResetGPIOLayout
         )
         expectRejected(
             makeResources(resetLine: nil, clockLength: 0x134),
@@ -781,7 +784,8 @@ struct RP1GEMBoardPreparationTests {
 
     private static func expectRejected(
         _ resources: RP1GEMBoardResources,
-        _ message: StaticString
+        _ message: StaticString,
+        expectedStage: RP1GEMBoardPreparationStage = .invalidConfiguration
     ) {
         let access = TestBoardAccess()
         var preparation = RP1GEMBoardPreparation(
@@ -790,7 +794,14 @@ struct RP1GEMBoardPreparationTests {
         )
         expect(
             preparation.prepareRP1Ethernet(maximumPollCount: 8) == .failed
-                && access.events.isEmpty,
+                && access.events.isEmpty
+                && preparation.lastDiagnostic
+                    == RP1GEMBoardPreparationDiagnostic(
+                        stage: expectedStage,
+                        registerAddress: 0,
+                        expectedValue: 0,
+                        observedValue: 0
+                    ),
             message
         )
     }
