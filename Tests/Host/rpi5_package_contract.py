@@ -106,6 +106,18 @@ def validate_successful_package(
             "config does not retain bootloader RP1 PCIe configuration")
     require("os_check=0\n" in config,
             "config does not disable Linux-specific firmware image checks")
+    require("enable_uart=1\n" in config,
+            "config does not retain the UART10 early console")
+    require("uart_2ndstage=1\n" in config,
+            "config does not enable second-stage firmware diagnostics")
+    require("sha256=1\n" in config,
+            "config does not hash firmware-loaded boot files")
+    require("disable_fw_kms_setup=0\n" in config,
+            "config does not request a firmware-selected HDMI mode")
+    require("framebuffer_depth=32\n" in config,
+            "config does not request the supported 32-bit framebuffer")
+    require("framebuffer_ignore_alpha=1\n" in config,
+            "config does not request XRGB framebuffer semantics")
     manifest = (output / "BOOT-MANIFEST.txt").read_text()
     require("overlays/dwc2.dtbo" in manifest,
             "human-readable manifest omits the DWC2 overlay")
