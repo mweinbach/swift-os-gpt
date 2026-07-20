@@ -168,8 +168,10 @@ struct RP1GEMSystemClockSnapshot: Equatable {
 }
 
 /// Exact clock-attempt telemetry retained even when preparation advances to a
-/// later clock or GPIO stage. Reads through the SET alias are defined by RP1
-/// as normal CTRL reads and also drain the posted write.
+/// later clock or GPIO stage. The RP1 specification describes SET-alias reads
+/// as normal reads, but physical Pi 5 traces have returned zero there while
+/// the normal CTRL register remained readable. Alias values are consequently
+/// diagnostic only; normal CTRL polling is authoritative.
 struct RP1GEMClockEnableDiagnostic: Equatable {
     let stage: RP1GEMBoardPreparationStage
     let method: RP1GEMClockEnableMethod
@@ -397,27 +399,6 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
         }
         let initial = access.read32(at: address)
         let initialAlias = access.read32(at: setAddress)
-        guard initialAlias == initial else {
-            clockDiagnostics.record(RP1GEMClockEnableDiagnostic(
-                stage: stage,
-                method: .none,
-                result: .aliasMismatch,
-                initialControl: initial,
-                initialSetAlias: initialAlias,
-                atomicDrain: initialAlias,
-                finalControl: initial,
-                pollCount: 0,
-                elapsedTicks: 0,
-                system: systemSnapshot
-            ))
-            recordFailure(
-                stage: stage,
-                registerAddress: UInt64(address),
-                expectedValue: UInt64(initial),
-                observedValue: UInt64(initialAlias)
-            )
-            return false
-        }
         if initial & RP1GEMBoardRegisterLayout.clockEnable != 0 {
             clockDiagnostics.record(RP1GEMClockEnableDiagnostic(
                 stage: stage,
@@ -433,10 +414,12 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
             ))
             return true
         }
-        // clocks_main implements RP1's published atomic register aliases. Use
-        // the SET aperture so the posted PCIe transaction carries only the
-        // ENABLE bit and cannot replay stale source/divider fields from the
-        // preceding read across the link.
+        // clocks_main publishes an atomic SET aperture. Use it first so the
+        // posted PCIe transaction carries only the ENABLE bit. Some physical
+        // Pi 5 executions return zero from the alias even though RP1 documents
+        // normal read semantics, so never use the alias value as a validity
+        // gate: poll the normal CTRL register and retain the alias only as
+        // evidence.
         access.write32(
             RP1GEMBoardRegisterLayout.clockEnable,
             at: setAddress

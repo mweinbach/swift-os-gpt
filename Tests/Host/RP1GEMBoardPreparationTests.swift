@@ -452,6 +452,10 @@ struct RP1GEMBoardPreparationTests {
             let system = UInt(TestAddress.clocks + 0x014)
             let systemSet = system + 0x2_000
             access.registers[system] = 2
+            // Returned Pi 5 media proved that the normal CTRL register can
+            // read 0x2 while the SET alias reads zero. The alias observation
+            // must not prevent the documented normal-register fallback.
+            access.forcedReadValues[systemSet] = 0
             access.ignoredWriteAddresses.insert(systemSet)
             var preparation = RP1GEMBoardPreparation(
                 resources: makeResources(resetLine: nil),
@@ -474,8 +478,8 @@ struct RP1GEMBoardPreparationTests {
                         method: .normalReadModifyWrite,
                         result: .ready,
                         initialControl: 2,
-                        initialSetAlias: 2,
-                        atomicDrain: 2,
+                        initialSetAlias: 0,
+                        atomicDrain: 0,
                         finalControl: 0x802,
                         pollCount: 3,
                         elapsedTicks: 1,
