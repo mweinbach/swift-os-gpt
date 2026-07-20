@@ -1,12 +1,13 @@
 # Raspberry Pi 5 board target
 
-> **Hardware status: early bring-up verified, target not supported.** One exact
-> SwiftOS artifact has booted on a Raspberry Pi 5 8 GB through FDT parsing,
+> **Hardware status: early bring-up verified, target not supported.** Four exact
+> SwiftOS artifacts have booted on a Raspberry Pi 5 8 GB through FDT parsing,
 > memory ownership and final paging, GICv2/timers, CPU0 plus three PSCI-started
-> secondaries, SD, SwiftFS, and first persistent-log flush. USB enumeration,
+> secondaries, SD, SwiftFS, and persistent-log recovery. DWC2 bus reset and
+> high-speed enumeration-done are proven, but USB descriptor/configuration,
 > Ethernet link, HDMI,
 > native V3D VII/HVS rendering, input, and Pi EL0 scheduling remain unverified.
-> See the [2026-07-20 returned-card evidence](hardware-evidence/2026-07-20-pi5-8gb-9e93dac.md).
+> See the [latest 2026-07-20 returned-card evidence](hardware-evidence/2026-07-20-pi5-8gb-64dae29.md).
 > No general hardware-support claim is permitted until the validation gate
 > below passes.
 
@@ -417,16 +418,21 @@ Clock attempts also emit `RP1_NET_CLOCK_STAGE`, `_METHOD`, `_RESULT`,
 `_INITIAL`, `_ALIAS_INITIAL`, `_ALIAS_DRAIN`, `_FINAL`, `_POLLS`, and
 `_ELAPSED_TICKS`. Method values are `0x0` no write, `0x1` already enabled,
 `0x2` atomic SET, and `0x3` normal-register read/modify/write fallback. Result
-values are `0x1` ready, `0x2` inconsistent normal/SET-alias pre-read, and `0x3`
-bounded failure. Before any clock write, the driver takes a read-only snapshot
-reported as `_SYS_CTRL`, `_SYS_DIV_INT`, `_SYS_SEL`, `_PLL_SYS_CS`,
-`_PLL_SYS_PWR`, `_PLL_SYS_PRIM`, and `_PLL_SYS_SEC`. The atomic attempt and its
-normal-register fallback each use an architectural-counter deadline when the
-counter is usable plus an independent read cap, so an absent or frozen counter
-cannot leave boot stuck in clock preparation. One complete marker group is
-emitted in stage order for each attempted clock, following one shared SYS/PLL
-snapshot group, so a successful SYS fallback remains visible after the
-Ethernet and timestamp stages run without repeating immutable snapshot data.
+values are `0x1` ready and `0x3` bounded failure; `0x2` remains reserved so
+returned-card traces from older kernels that terminally rejected a divergent
+normal/SET-alias pre-read remain decodable. Before any clock write, the driver
+takes a read-only snapshot reported as `_SYS_CTRL`, `_SYS_DIV_INT`, `_SYS_SEL`,
+`_PLL_SYS_CS`, `_PLL_SYS_PWR`, `_PLL_SYS_PRIM`, and `_PLL_SYS_SEC`. If the normal
+CTRL register is already enabled, it performs no write. If the SET-alias
+pre-read diverges from normal CTRL, it treats the alias as telemetry, skips the
+suspect atomic aperture, and uses a fresh normal-register read/modify/write. An
+agreeing alias retains the atomic SET attempt and the same normal fallback. All
+polling paths use an architectural-counter deadline when usable plus an
+independent read cap, so an absent or frozen counter cannot leave boot stuck in
+clock preparation. One complete marker group is emitted in stage order for each
+attempted clock, following one shared SYS/PLL snapshot group, so a successful
+SYS fallback remains visible after later stages without repeating immutable
+snapshot data.
 
 ## USB-C diagnostic display
 
@@ -490,21 +496,24 @@ endpoint interrupts, bus speed, and the active receive status. Reason values
 `0x2` through `0x9` identify bus reset, enumeration, malformed receive status,
 receive protocol, endpoint zero, endpoint two, endpoint-two protocol, and
 display transmission respectively; `0x1` is an internal invariant fallback.
-The host-test suite covers descriptors, control transactions,
-reset/reconnect, DTR restart, frame chunking, CRC, damage assembly, and viewer
-bounds, but no physical Pi has passed the complete enumeration sequence yet.
+The host-test suite covers descriptors, control transactions, reset/reconnect,
+DTR restart, frame chunking, CRC, damage assembly, and viewer bounds, but no
+physical Pi has completed descriptor exchange and Chapter 9 configuration yet.
 The first 2026-07-20 artifact stopped at its former generic `USB_POWER_STATE`
 marker. The next artifact classified the firmware's validated response as
 `USB_POWER_STATE_MISMATCH`, proving that legacy HCD device 3 was reported as
 existing but off. The Pi 5 policy now retains that distinction as
 `USB_POWER_UNMANAGED_OFF` and continues to DWC2's typed identity/capability
-probe. The following physical trace reached `USB_DEBUG_ATTACHED` but then
-faulted before macOS received a descriptor. The device engine now accepts the
-valid DWC2 control-transfer ordering `SETUPRX`, optional `OUTDONE`, then
-`SETUPDONE`: the optional OUT completion retains the staged eight-byte request,
-and only setup completion executes Chapter 9 policy. This ordering and the new
-service markers still require another physical boot before enumeration can be
-claimed.
+probe. The third physical trace reached `USB_DEBUG_ATTACHED` but faulted before
+macOS received a descriptor. The fourth reached a bus reset and high-speed
+enumeration-done, then terminally rejected a valid second eight-byte EP0
+`SETUPRX` while an earlier setup remained staged. The device engine now lets a
+valid newer setup abort the older transfer, accepts `SETUPRX`, optional
+`OUTDONE`, then `SETUPDONE`, and drains at most eight RX-status entries per
+cooperative pass so a backlog cannot strand EP0 indefinitely. Tests prove the
+latest setup executes and the ninth entry remains for the next pass. These
+corrections still require another physical boot before descriptor/configuration
+success can be claimed.
 
 ## Interrupt controller and timer
 
@@ -655,8 +664,8 @@ unverified.
 ## Hardware validation gate
 
 The target remains **unsupported** until one exact build passes all of the
-following on an 8 GB Raspberry Pi 5 Model B. The first returned-card capture
-satisfies a meaningful subset but not the gate. Retain the complete
+following on an 8 GB Raspberry Pi 5 Model B. The four returned-card captures
+satisfy a meaningful subset but not the gate. Retain the complete
 serial log, exact SwiftOS commit and dirty state, firmware-repository revision,
 separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 
