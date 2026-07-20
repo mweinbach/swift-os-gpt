@@ -127,7 +127,13 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
     }
     console.write(InterruptSubsystem.exceptionsReadyMarker)
 
-    guard InterruptSubsystem.configure(platform.interruptController) else {
+    guard let timerInterruptID = platform.nonSecurePhysicalTimerInterrupt?
+              .architecturalInterruptID,
+          InterruptSubsystem.configure(
+              platform.interruptController,
+              timerInterruptID: timerInterruptID
+          )
+    else {
         console.write("SWIFTOS:PANIC:GIC\n")
         park()
     }
@@ -146,6 +152,15 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             platform: platform,
             display: drivers.display
         )
+        var raspberryPiSMPStartupHandled = false
+        if platform.processorCount > 1 {
+            raspberryPiSMPStartupHandled = true
+            if !KernelSMP.start(platform: platform, console: console) {
+                // Pi debug/display services remain usable when physical SMP
+                // bring-up needs another hardware iteration.
+                console.write("SWIFTOS:SMP_DEFERRED\n")
+            }
+        }
         RaspberryPi5CooperativeRuntime.scheduleActivation(
             console: console,
             platform: platform
@@ -180,7 +195,8 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
         runScheduledOrPark(
             console: console,
             platform: platform,
-            memory: memory
+            memory: memory,
+            smpStartupHandled: raspberryPiSMPStartupHandled
         )
     }
 }
@@ -1223,8 +1239,15 @@ private func activateVirtIOGPU(
 private func runScheduledOrPark(
     console: EarlyConsole,
     platform: Platform,
-    memory: KernelMemoryActivation
+    memory: KernelMemoryActivation,
+    smpStartupHandled: Bool = false
 ) -> Never {
+    if platform.processorCount > 1 && !smpStartupHandled {
+        guard KernelSMP.start(platform: platform, console: console) else {
+            console.write("SWIFTOS:PANIC:SMP\n")
+            park()
+        }
+    }
     // A headless physical board still needs its bounded service work to make
     // progress when both display and USB discovery fail. This path deliberately
     // keeps the BSP observable instead of parking or handing it to EL0.
@@ -1239,10 +1262,6 @@ private func runScheduledOrPark(
     }
     guard platform.processorCount > 1 else {
         console.write("SWIFTOS:READY\n")
-        park()
-    }
-    guard KernelSMP.start(platform: platform, console: console) else {
-        console.write("SWIFTOS:PANIC:SMP\n")
         park()
     }
     let frequency = AArch64.counterFrequency

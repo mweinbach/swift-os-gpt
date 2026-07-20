@@ -84,6 +84,12 @@ enum KernelLinkerLayout {
     static var smpTargetStorage: UInt64 { archSMPTargetStorage() }
     static var smpStateStorage: UInt64 { archSMPStateStorage() }
     static var smpReportStorage: UInt64 { archSMPReportStorage() }
+    static var smpWorkThreadStorage: UInt64 { archSMPWorkThreadStorage() }
+    static var smpWorkIndexStorage: UInt64 { archSMPWorkIndexStorage() }
+    static var smpWorkContextStorage: UInt64 { archSMPWorkContextStorage() }
+    static var smpWorkResultStorage: UInt64 { archSMPWorkResultStorage() }
+    static var smpWorkStateStorage: UInt64 { archSMPWorkStateStorage() }
+    static var smpWorkStackStorage: UInt64 { archSMPWorkStackStorage() }
     static var pagingLayoutStorage: LinkerRegion {
         LinkerRegion(
             start: archPagingLayoutStorage(),
@@ -195,6 +201,18 @@ private func archClassifiedAllocationLedgerStorageEnd() -> UInt64
 @_silgen_name("arch_smp_target_storage") private func archSMPTargetStorage() -> UInt64
 @_silgen_name("arch_smp_state_storage") private func archSMPStateStorage() -> UInt64
 @_silgen_name("arch_smp_report_storage") private func archSMPReportStorage() -> UInt64
+@_silgen_name("arch_smp_work_thread_storage")
+private func archSMPWorkThreadStorage() -> UInt64
+@_silgen_name("arch_smp_work_index_storage")
+private func archSMPWorkIndexStorage() -> UInt64
+@_silgen_name("arch_smp_work_context_storage")
+private func archSMPWorkContextStorage() -> UInt64
+@_silgen_name("arch_smp_work_result_storage")
+private func archSMPWorkResultStorage() -> UInt64
+@_silgen_name("arch_smp_work_state_storage")
+private func archSMPWorkStateStorage() -> UInt64
+@_silgen_name("arch_smp_work_stack_storage")
+private func archSMPWorkStackStorage() -> UInt64
 @_silgen_name("arch_paging_layout_storage") private func archPagingLayoutStorage() -> UInt64
 @_silgen_name("arch_paging_layout_storage_end") private func archPagingLayoutStorageEnd() -> UInt64
 @_silgen_name("arch_debug_log_storage_start") private func archDebugLogStorageStart() -> UInt64

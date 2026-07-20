@@ -31,6 +31,7 @@ EXPECTED_BEFORE_SMP = [
 ]
 
 EXPECTED_AFTER_SMP = [
+    "SWIFTOS:SMP_WORK_OK",
     "SWIFTOS:SMP_OK",
     "SWIFTOS:READY",
     "SWIFTOS:SCHEDULER_READY",
@@ -110,6 +111,17 @@ def validate(transcript: str, processor_count: int) -> None:
         + [
             f"SWIFTOS:SMP_CPU{processor_id}_ONLINE"
             for processor_id in range(1, processor_count)
+        ]
+        + [
+            marker
+            for processor_id in range(1, processor_count)
+            for marker in (
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK1_OK",
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK1_CHECKSUM=0x",
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK2_OK",
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK2_CHECKSUM=0x",
+                f"SWIFTOS:SMP_CPU{processor_id}_STACK=0x",
+            )
         ]
         + EXPECTED_AFTER_SMP
     )

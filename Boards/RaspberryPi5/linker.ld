@@ -149,6 +149,18 @@ SECTIONS
         . += 64;
         __smp_report_storage = .;
         . += 512;
+        __smp_work_thread_storage = .;
+        . += 512;
+        __smp_work_index_storage = .;
+        . += 64;
+        __smp_work_context_storage = .;
+        . += 512;
+        __smp_work_result_storage = .;
+        . += 256;
+        __smp_work_state_storage = .;
+        . += 64;
+        __smp_work_stack_storage = .;
+        . += 64;
         . = ALIGN(4K);
         __smp_storage_end = .;
     }

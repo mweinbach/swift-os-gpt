@@ -385,6 +385,30 @@ func swiftOSSMPPublishOnline(_ contextID: UInt64) -> UInt64 {
     return contextID
 }
 
+/// Shared release/acquire primitives for SMP subsystems that publish storage
+/// before CPU_ON or completion evidence back to CPU0. Keeping these wrappers
+/// beside the boot-state protocol gives every secondary runtime one memory-
+/// ordering contract rather than duplicating architecture declarations.
+@inline(__always)
+func smpStoreRelease(
+    _ address: UnsafeMutablePointer<UInt64>,
+    _ value: UInt64
+) {
+    archSMPStoreRelease(address, value)
+}
+
+@inline(__always)
+func smpLoadAcquire(
+    _ address: UnsafePointer<UInt64>
+) -> UInt64 {
+    archSMPLoadAcquire(address)
+}
+
+@inline(__always)
+func smpSendEvent() {
+    archSMPSendEvent()
+}
+
 // STLR/LDAR give the online state contract release/acquire semantics.
 @_silgen_name("arch_smp_store_release")
 private func archSMPStoreRelease(

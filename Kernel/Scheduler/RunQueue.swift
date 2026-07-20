@@ -78,6 +78,22 @@ struct RunQueue {
         return threads[index]
     }
 
+    /// Returns the thread currently owned by one logical processor. Keeping
+    /// this lookup inside the queue lets higher-level schedulers validate a
+    /// completion lease before changing shared state.
+    func currentThread(on processor: Int) -> ScheduledThread? {
+        guard validProcessor(processor) else { return nil }
+        let rawIndex = currentIndices[processor]
+        guard rawIndex >= 0 else { return nil }
+        let index = Int(rawIndex)
+        guard index < threadCount,
+              threads[index].state == .running
+        else {
+            return nil
+        }
+        return threads[index]
+    }
+
     @discardableResult
     mutating func add(
         identifier: UInt32,

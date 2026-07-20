@@ -1,8 +1,10 @@
 /// Binds device-tree topology and linker-owned early storage to the allocation-
 /// free PSCI runtime. CPU0 reports evidence only after acquire-loading each
-/// secondary's publication; secondaries themselves publish once and park.
+/// secondary's publication. Each secondary then consumes two affinity-pinned
+/// Swift work slots and release-publishes deterministic completion evidence.
 enum KernelSMP {
     static let onlineMarker: StaticString = "SWIFTOS:SMP_OK\n"
+    static let workReadyMarker: StaticString = "SWIFTOS:SMP_WORK_OK\n"
 
     private static let topologyCapacity = 64
     private static let targetCapacity = 3
@@ -94,6 +96,13 @@ enum KernelSMP {
             console.write("SWIFTOS:SMP_BAD_STORAGE\n")
             return false
         }
+        guard SecondaryProcessorWorkRuntime.configure(
+                  processorCount: plan.processorCount
+              )
+        else {
+            console.write("SWIFTOS:SMP_WORK_BAD_STORAGE\n")
+            return false
+        }
 
         let result = runtime.startSecondaryProcessors(
             secondaryEntryPhysicalAddress:
@@ -120,6 +129,12 @@ enum KernelSMP {
                         console: console
                     )
                 case .timedOut:
+                    if SecondaryProcessorWorkRuntime.state(
+                        logicalProcessorID:
+                            Int(report.target.logicalProcessorID)
+                    ) == .currentProcessorInitializationFailed {
+                        console.write("SWIFTOS:SMP_CPU_LOCAL_INIT_FAILED\n")
+                    }
                     console.write("SWIFTOS:SMP_TIMEOUT\n")
                     everySecondaryOnline = false
                 case .firmwareAlreadyOn:
@@ -141,6 +156,34 @@ enum KernelSMP {
             else {
                 return false
             }
+            reportIndex = 0
+            while reportIndex < plan.secondaryProcessorCount {
+                guard let report = runtime.report(at: reportIndex) else {
+                    console.write("SWIFTOS:SMP_BAD_REPORT\n")
+                    return false
+                }
+                let logicalProcessorID = Int(
+                    report.target.logicalProcessorID
+                )
+                switch SecondaryProcessorWorkRuntime.waitForEvidence(
+                    logicalProcessorID: logicalProcessorID,
+                    pollLimit: pollLimit
+                ) {
+                case let .complete(evidence):
+                    writeWorkEvidence(evidence, console: console)
+                case .timedOut:
+                    console.write("SWIFTOS:SMP_WORK_TIMEOUT\n")
+                    return false
+                case .failed:
+                    console.write("SWIFTOS:SMP_WORK_FAILED\n")
+                    return false
+                case .invalidContext:
+                    console.write("SWIFTOS:SMP_WORK_BAD_CONTEXT\n")
+                    return false
+                }
+                reportIndex += 1
+            }
+            console.write(workReadyMarker)
             console.write(onlineMarker)
             return true
         }
@@ -158,16 +201,65 @@ enum KernelSMP {
         }
     }
 
+    private static func writeWorkEvidence(
+        _ evidence: SecondaryProcessorWorkEvidence,
+        console: EarlyConsole
+    ) {
+        switch evidence.logicalProcessorID {
+        case 1:
+            console.write("SWIFTOS:SMP_CPU1_TASK1_OK\n")
+            console.write("SWIFTOS:SMP_CPU1_TASK1_CHECKSUM=")
+            console.writeHex(evidence.first.checksum)
+            console.write("\nSWIFTOS:SMP_CPU1_TASK2_OK\n")
+            console.write("SWIFTOS:SMP_CPU1_TASK2_CHECKSUM=")
+            console.writeHex(evidence.second.checksum)
+            console.write("\nSWIFTOS:SMP_CPU1_STACK=")
+        case 2:
+            console.write("SWIFTOS:SMP_CPU2_TASK1_OK\n")
+            console.write("SWIFTOS:SMP_CPU2_TASK1_CHECKSUM=")
+            console.writeHex(evidence.first.checksum)
+            console.write("\nSWIFTOS:SMP_CPU2_TASK2_OK\n")
+            console.write("SWIFTOS:SMP_CPU2_TASK2_CHECKSUM=")
+            console.writeHex(evidence.second.checksum)
+            console.write("\nSWIFTOS:SMP_CPU2_STACK=")
+        case 3:
+            console.write("SWIFTOS:SMP_CPU3_TASK1_OK\n")
+            console.write("SWIFTOS:SMP_CPU3_TASK1_CHECKSUM=")
+            console.writeHex(evidence.first.checksum)
+            console.write("\nSWIFTOS:SMP_CPU3_TASK2_OK\n")
+            console.write("SWIFTOS:SMP_CPU3_TASK2_CHECKSUM=")
+            console.writeHex(evidence.second.checksum)
+            console.write("\nSWIFTOS:SMP_CPU3_STACK=")
+        default:
+            console.write("SWIFTOS:SMP_WORK_BAD_CONTEXT\n")
+            return
+        }
+        console.writeHex(evidence.observedStackPointer)
+        console.write("\n")
+    }
+
     private static func storageLayoutIsValid() -> Bool {
         let topology = KernelLinkerLayout.smpTopologyStorage
         let targets = KernelLinkerLayout.smpTargetStorage
         let states = KernelLinkerLayout.smpStateStorage
         let reports = KernelLinkerLayout.smpReportStorage
-        let followingStorage = KernelLinkerLayout.memoryMapStorage
+        let workThreads = KernelLinkerLayout.smpWorkThreadStorage
+        let workIndices = KernelLinkerLayout.smpWorkIndexStorage
+        let workContexts = KernelLinkerLayout.smpWorkContextStorage
+        let workResults = KernelLinkerLayout.smpWorkResultStorage
+        let workStates = KernelLinkerLayout.smpWorkStateStorage
+        let workStacks = KernelLinkerLayout.smpWorkStackStorage
+        let followingStorage = KernelLinkerLayout.pagingLayoutStorage.start
         guard topology <= targets,
               targets <= states,
               states <= reports,
-              reports <= followingStorage
+              reports <= workThreads,
+              workThreads <= workIndices,
+              workIndices <= workContexts,
+              workContexts <= workResults,
+              workResults <= workStates,
+              workStates <= workStacks,
+              workStacks <= followingStorage
         else {
             return false
         }
@@ -180,9 +272,27 @@ enum KernelSMP {
         ) && reports - states >= requiredBytes(
             UInt64.self,
             count: stateCapacity
-        ) && followingStorage - reports >= requiredBytes(
+        ) && workThreads - reports >= requiredBytes(
             SecondaryProcessorStartReport.self,
             count: reportCapacity
+        ) && workIndices - workThreads >= requiredBytes(
+            ScheduledThread.self,
+            count: SecondaryProcessorWorkScheduler.maximumTaskCount
+        ) && workContexts - workIndices >= requiredBytes(
+            Int32.self,
+            count: ProcessorStartupPlan.maximumOnlineProcessorCount
+        ) && workResults - workContexts >= requiredBytes(
+            SecondaryProcessorWorkContext.self,
+            count: SecondaryProcessorWorkScheduler.maximumTaskCount
+        ) && workStates - workResults >= requiredBytes(
+            SecondaryProcessorWorkResult.self,
+            count: SecondaryProcessorWorkScheduler.maximumTaskCount
+        ) && workStacks - workStates >= requiredBytes(
+            UInt64.self,
+            count: ProcessorStartupPlan.maximumOnlineProcessorCount
+        ) && followingStorage - workStacks >= requiredBytes(
+            UInt64.self,
+            count: ProcessorStartupPlan.maximumOnlineProcessorCount
         )
     }
 
