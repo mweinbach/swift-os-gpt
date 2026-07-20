@@ -26,3 +26,28 @@ link against Darwin or any Apple framework.
 - Commit coherent milestones with an imperative subject and an explanatory body.
 - Never claim hardware support that has only been exercised in QEMU.
 
+## Raspberry Pi microSD safety
+
+- Treat first-time media initialization and routine boot updates as different
+  operations. Writing `swiftos-rpi5-media.img` to a whole card is destructive;
+  it creates both the FAT32 firmware partition and the type-`0xda` SwiftOS data
+  partition. Copying `.build/raspberry-pi-5/boot/` onto the mounted FAT32
+  partition updates boot files only and must preserve the data partition.
+- Before every physical-media operation, power the Pi off, re-run
+  `diskutil list external physical`, and resolve the removable whole disk from
+  current capacity/device information. Never reuse a cached `/dev/diskN`, never
+  substitute a partition node for the whole disk, and never touch a protected
+  or unrelated disk. Stop if identity, geometry, or ownership is ambiguous.
+- A routine update must target only the verified mounted SwiftOS FAT32 boot
+  volume. Do not repartition it, format it, or write the whole-card image. Copy
+  the packaged boot tree without deleting unrelated files, verify the mounted
+  result against its new `SHA256SUMS`, synchronize, and eject the card before
+  removal. Copying files to FAT is not a whole-card flash and cannot create a
+  missing SwiftFS/log partition.
+- A live USB `SUPD` kernel update is volatile. `COMMITTED` seals the RAM-staged
+  image; it does not install that image to microSD. Re-enumeration and a new
+  boot identity verify the live handoff, while a persistent update still
+  requires the routine FAT32 procedure after powering down.
+- Persistent-log claims require a card initialized with the signed type-`0xda`
+  partition. Inspect returned media read-only as documented in
+  `docs/raspberry-pi-5.md`; a FAT-only update provides no persistent log arena.

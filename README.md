@@ -238,6 +238,26 @@ SwiftOS's `1209:5a17` identity and associate the exact CDC tty; `--json` makes
 the same state available to scripts and agents without scraping System
 Profiler output.
 
+### Raspberry Pi microSD lifecycle
+
+There are three intentionally separate update paths:
+
+| Operation | Persistence and data effect |
+| --- | --- |
+| First whole-card initialization | Destructively writes `swiftos-rpi5-media.img`, creating the FAT32 boot partition plus the signed type-`0xda` SwiftFS/persistent-log partition. |
+| Normal boot update | Copies `.build/raspberry-pi-5/boot/` only to the verified mounted FAT32 boot volume. It does not repartition the card and preserves the type-`0xda` user-data/log partition. |
+| Live USB kernel update | Stages and chainloads a verified kernel in RAM. It is volatile; a power cycle returns to the microSD kernel. |
+
+For every card operation, power the Pi off and re-resolve the current removable
+whole disk; never reuse an earlier `/dev/diskN` or touch an unrelated disk. A
+normal update must identify the existing SwiftOS FAT boot volume, copy without
+deleting unrelated files, validate the destination with `SHA256SUMS`,
+synchronize, and eject. Copying files to FAT is **not** a whole-card flash and
+does not create a missing SwiftFS/log partition. The repository does not yet
+install a live USB update to microSD. See the
+[Pi media lifecycle and returned-card diagnostics](docs/raspberry-pi-5.md#physical-media-lifecycle-and-returned-card-diagnostics)
+for the exact safety checks and commands.
+
 The guest-side control foundation is transport-neutral. `SDBG` frames carry a
 full 128-bit boot-session identity, 64-bit request identity, bounded payload,
 and CRC-32 over USB CDC today and future serial or network adapters. A fixed,

@@ -96,14 +96,27 @@ the EEPROM firmware to log
 the hashes of loaded files; it does not replace checking `SHA256SUMS` before
 writing media.
 
-## Physical media and returned-card diagnostics
+## Physical media lifecycle and returned-card diagnostics
 
-Treat a removable card as destructive media. Power the Pi down before moving
-the card, run `diskutil list external physical`, and resolve the whole removable
-disk again immediately before every operation. Verify that `diskutil info
-/dev/diskN` reports the expected capacity, a 512-byte device block size,
-`Internal: No`, and the complete disk rather than `diskNs1`. Never reuse a disk
-number from an earlier insertion.
+SwiftOS uses three separate media workflows. Do not describe a boot-partition
+copy as flashing a card, and do not describe a live USB update as installed.
+
+Before **every** card operation, power the Pi off, insert the card into the Mac,
+and run `diskutil list external physical`. Resolve the removable whole disk
+again from current media name, capacity, and partition layout. Verify with
+`diskutil info /dev/diskN` that it has the expected exact capacity, a 512-byte
+device block size, `Internal: No`, and `Whole: Yes`. Trace any mounted boot
+volume back to that same whole disk. Never reuse a disk number from an earlier
+insertion, never use `diskNs1` where a whole-disk operation is required, and
+never touch a protected or unrelated disk. Stop when identity, geometry, or
+ownership is ambiguous.
+
+### First whole-card initialization: destructive
+
+This is the only current workflow that creates the complete media layout. It
+overwrites the whole card with an MBR, a FAT32 firmware boot partition, and a
+signed type-`0xda` data partition containing the persistent-log arena and
+SwiftFS range. It destroys every previous partition and file on that card.
 
 Build the image with that card's exact 512-byte block count, inspect it, and
 independently check the default 256 MiB FAT32 boot partition before flashing:
@@ -133,8 +146,55 @@ diskutil eject /dev/diskN
 ```
 
 This full initial write can be slow because the sparse image expands to the
-card's exact geometry. Later development kernels can use the existing bounded
-USB RAM updater without rewriting the card, but that update remains volatile.
+card's exact geometry. After ejection completes, remove the card, place it in
+the powered-off Pi, and only then apply power.
+
+### Normal boot-partition update: preserves user data
+
+Once the card has the complete SwiftOS layout, later persistent kernel and
+firmware updates normally replace files on partition one only. This procedure
+does not change the MBR or type-`0xda` partition, so existing SwiftFS files and
+persistent logs remain intact.
+
+Power the Pi down and re-resolve the whole card as above. Mount its FAT32 boot
+partition and trace that mount back to the verified whole disk. Before copying,
+require the existing volume to contain `BOOT-MANIFEST.txt`,
+`MEDIA-LAYOUT.txt`, and `SHA256SUMS`; otherwise stop instead of guessing that an
+arbitrary FAT volume is SwiftOS media. Then copy the package contents without a
+deleting sync and verify every new packaged byte on the destination:
+
+```sh
+BOOT_PACKAGE=.build/raspberry-pi-5/boot
+BOOT_VOLUME=/Volumes/SWIFTOS
+test -f "$BOOT_VOLUME/BOOT-MANIFEST.txt"
+test -f "$BOOT_VOLUME/MEDIA-LAYOUT.txt"
+test -f "$BOOT_VOLUME/SHA256SUMS"
+(cd "$BOOT_PACKAGE" && shasum -a 256 -c SHA256SUMS)
+rsync -rt "$BOOT_PACKAGE/" "$BOOT_VOLUME/"
+(cd "$BOOT_VOLUME" && shasum -a 256 -c SHA256SUMS)
+sync
+diskutil eject /dev/diskN
+```
+
+Substitute the actual verified mount and freshly resolved whole-disk number.
+Do not use `dd`, repartition, erase, or format during this workflow. A plain FAT
+copy is not a whole-card flash: it cannot create a missing type-`0xda`
+partition. A card that was previously prepared as FAT-only therefore still has
+no SwiftFS or persistent-log arena after this update; perform a deliberate
+whole-card initialization when preserving its old contents is no longer
+required.
+
+### Live USB kernel update: volatile
+
+The bounded USB updater can stage and chainload `kernel8.img` in RAM without
+rewriting either partition. A `COMMITTED` response proves sealed staging, not a
+microSD installation. Verify the disconnect, re-enumeration, and changed boot
+identity for the live handoff. A power cycle returns to the kernel already on
+the FAT32 partition. There is no supported guest-side command that installs the
+RAM image to microSD; use the normal boot-partition procedure after powering
+down when the update must persist.
+
+### Returned-card persistent logs
 
 After a failed physical boot, power down, return the card to the Mac, resolve
 the whole disk and exact block count again, unmount it, then extract logs with
@@ -153,6 +213,9 @@ only the MBR, two signed superblocks, and bounded log arena. Its JSON preserves
 structured records and reconstructs retained canonical console bytes in
 chronological order. An empty arena means the boot never reached a successful
 SD/log recovery crossing; use UART10 or HDMI evidence for that earlier failure.
+If the card never received a destructive whole-card initialization, the signed
+type-`0xda` partition does not exist and there are no persistent SwiftOS logs to
+inspect, regardless of how recently its FAT boot files were updated.
 
 ## SwiftOS data partition
 
