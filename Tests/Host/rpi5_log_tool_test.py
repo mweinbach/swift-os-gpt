@@ -84,7 +84,7 @@ def disk_info(
     return {
         "DeviceIdentifier": identifier,
         "DeviceNode": f"/dev/{identifier}",
-        "Whole": True,
+        "WholeDisk": True,
         "Internal": False,
         "RemovableMedia": removable,
         "VirtualOrPhysical": "Physical",
@@ -231,6 +231,28 @@ def test_geometry_and_removability_must_match_fresh_info() -> None:
         expect_error(
             lambda: logs.discover_swiftos_card(runner=fixed),
             "RemovableMedia must be true",
+        )
+
+    legacy_info = disk_info("disk4", size)
+    legacy_info["Whole"] = legacy_info.pop("WholeDisk")
+    legacy = FakeDiskutil(
+        [whole_record("disk4", size, swiftos=True)],
+        {"disk4": legacy_info},
+    )
+    with darwin_platform():
+        require(logs.discover_swiftos_card(runner=legacy).identifier == "disk4",
+                "legacy diskutil Whole field was rejected")
+
+    contradictory_info = disk_info("disk4", size)
+    contradictory_info["Whole"] = False
+    contradictory = FakeDiskutil(
+        [whole_record("disk4", size, swiftos=True)],
+        {"disk4": contradictory_info},
+    )
+    with darwin_platform():
+        expect_error(
+            lambda: logs.discover_swiftos_card(runner=contradictory),
+            "WholeDisk/Whole must be true",
         )
 
     mounted_record = whole_record("disk4", size, swiftos=True)

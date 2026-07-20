@@ -166,6 +166,22 @@ def _require_bool(
         )
 
 
+def _require_bool_alias(
+    info: Mapping[str, Any],
+    keys: tuple[str, ...],
+    expected: bool,
+    *,
+    identifier: str,
+) -> None:
+    present = [(key, info[key]) for key in keys if key in info]
+    if not present or any(value is not expected for _, value in present):
+        expectation = "true" if expected else "false"
+        names = "/".join(keys)
+        raise PiLogToolError(
+            f"{identifier} is not eligible: diskutil {names} must be {expectation}"
+        )
+
+
 def _require_string_if_present(
     info: Mapping[str, Any],
     key: str,
@@ -197,7 +213,14 @@ def _validate_candidate(
         raise PiLogToolError(f"diskutil list record changed for {identifier}")
     if info.get("DeviceIdentifier") != identifier:
         raise PiLogToolError(f"diskutil info returned a different device identifier")
-    _require_bool(info, "Whole", True, identifier=identifier)
+    # `diskutil info -plist` calls this field WholeDisk on current macOS and
+    # Whole on older releases. If both are ever present, both must agree.
+    _require_bool_alias(
+        info,
+        ("WholeDisk", "Whole"),
+        True,
+        identifier=identifier,
+    )
     _require_bool(info, "Internal", False, identifier=identifier)
     _require_bool(info, "RemovableMedia", True, identifier=identifier)
     _require_string_if_present(
