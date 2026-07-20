@@ -14,6 +14,12 @@ private enum SwiftOSControlCommand {
         startingSequence: UInt64?,
         maximumEntryCount: UInt32
     )
+    case console(
+        SwiftOSRemoteOptions,
+        startingSequence: UInt64?,
+        maximumEntryCount: UInt32,
+        raw: Bool
+    )
     case help
 }
 
@@ -29,6 +35,7 @@ private enum SwiftOSControlOptionError: Error, CustomStringConvertible {
     case missingValue(String)
     case invalidTimeout(String)
     case invalidInteger(option: String, value: String)
+    case conflictingOptions(String, String)
 
     var description: String {
         switch self {
@@ -42,6 +49,8 @@ private enum SwiftOSControlOptionError: Error, CustomStringConvertible {
             return "invalid timeout: \(value)"
         case .invalidInteger(let option, let value):
             return "invalid integer for \(option): \(value)"
+        case .conflictingOptions(let first, let second):
+            return "\(first) and \(second) cannot be used together"
         }
     }
 }
@@ -53,7 +62,7 @@ private enum SwiftOSControlArguments {
         if name == "help" || name == "--help" || name == "-h" {
             return .help
         }
-        let remoteCommands = ["identity", "status", "ping", "logs"]
+        let remoteCommands = ["identity", "status", "ping", "logs", "console"]
         guard ["discover", "doctor", "wait-ready"].contains(name)
                 || remoteCommands.contains(name)
         else {
@@ -65,12 +74,15 @@ private enum SwiftOSControlArguments {
         var devicePath: String?
         var pingToken: UInt64?
         var logStartingSequence: UInt64?
-        var logEntryCount: UInt32 = 32
+        var logEntryCount: UInt32 = name == "console" ? 4_096 : 32
+        var rawConsole = false
         var index = 2
         while index < arguments.count {
             switch arguments[index] {
             case "--json":
                 json = true
+            case "--raw" where name == "console":
+                rawConsole = true
             case "--timeout" where name == "wait-ready"
                     || remoteCommands.contains(name):
                 index += 1
@@ -101,7 +113,7 @@ private enum SwiftOSControlArguments {
                     arguments[index],
                     option: "--token"
                 )
-            case "--start" where name == "logs":
+            case "--start" where name == "logs" || name == "console":
                 index += 1
                 guard index < arguments.count else {
                     throw SwiftOSControlOptionError.missingValue("--start")
@@ -117,7 +129,7 @@ private enum SwiftOSControlArguments {
                     )
                 }
                 logStartingSequence = value
-            case "--count" where name == "logs":
+            case "--count" where name == "logs" || name == "console":
                 index += 1
                 guard index < arguments.count else {
                     throw SwiftOSControlOptionError.missingValue("--count")
@@ -139,6 +151,13 @@ private enum SwiftOSControlArguments {
             index += 1
         }
 
+        if json && rawConsole {
+            throw SwiftOSControlOptionError.conflictingOptions(
+                "--json",
+                "--raw"
+            )
+        }
+
         switch name {
         case "discover": return .discover(json: json)
         case "doctor": return .doctor(json: json)
@@ -153,6 +172,13 @@ private enum SwiftOSControlArguments {
             case "identity": return .identity(options)
             case "status": return .status(options)
             case "ping": return .ping(options, token: pingToken)
+            case "console":
+                return .console(
+                    options,
+                    startingSequence: logStartingSequence,
+                    maximumEntryCount: logEntryCount,
+                    raw: rawConsole
+                )
             default:
                 return .logs(
                     options,
@@ -500,7 +526,7 @@ private struct SwiftOSLogEntryReport: Codable {
     }
 }
 
-private struct SwiftOSLogsReport: Codable {
+private struct SwiftOSLogsReport: Encodable {
     let devicePath: String
     let bootSessionID: String
     let requestedStartingSequence: UInt64?
@@ -510,6 +536,19 @@ private struct SwiftOSLogsReport: Codable {
     let lostEntryCount: UInt64
     let moreAvailable: Bool
     let entries: [SwiftOSLogEntryReport]
+    fileprivate let rawEntries: [KernelLogEntry]
+
+    private enum CodingKeys: String, CodingKey {
+        case devicePath
+        case bootSessionID
+        case requestedStartingSequence
+        case effectiveStartingSequence
+        case oldestAvailableSequence
+        case newestAvailableSequence
+        case lostEntryCount
+        case moreAvailable
+        case entries
+    }
 
     var text: [String] {
         var lines = [
@@ -521,6 +560,101 @@ private struct SwiftOSLogsReport: Codable {
         else { lines.append(contentsOf: entries.map(\.text)) }
         if moreAvailable { lines.append("logs: more entries available") }
         return lines
+    }
+}
+
+private struct SwiftOSConsoleReport: Encodable {
+    let devicePath: String
+    let bootSessionID: String
+    let requestedStartingSequence: UInt64?
+    let effectiveStartingSequence: UInt64?
+    let oldestAvailableSequence: UInt64
+    let newestAvailableSequence: UInt64
+    let lostEntryCount: UInt64
+    let moreAvailable: Bool
+    let nextSequence: UInt64?
+    let consoleByteCount: Int
+    let consoleText: String
+    let consoleBase64: String
+    let consoleChunkCount: Int
+    let nonConsoleEntryCount: Int
+    let malformedConsoleEntryCount: Int
+    let sequenceDiscontinuityCount: Int
+    let incompleteMessageCount: Int
+    let startsMidMessage: Bool
+    let endsMidMessage: Bool
+    fileprivate let consoleBytes: [UInt8]
+
+    private enum CodingKeys: String, CodingKey {
+        case devicePath
+        case bootSessionID
+        case requestedStartingSequence
+        case effectiveStartingSequence
+        case oldestAvailableSequence
+        case newestAvailableSequence
+        case lostEntryCount
+        case moreAvailable
+        case nextSequence
+        case consoleByteCount
+        case consoleText
+        case consoleBase64
+        case consoleChunkCount
+        case nonConsoleEntryCount
+        case malformedConsoleEntryCount
+        case sequenceDiscontinuityCount
+        case incompleteMessageCount
+        case startsMidMessage
+        case endsMidMessage
+    }
+
+    init(
+        logs: SwiftOSLogsReport,
+        decoded: SwiftOSCanonicalConsoleDecodeResult
+    ) {
+        devicePath = logs.devicePath
+        bootSessionID = logs.bootSessionID
+        requestedStartingSequence = logs.requestedStartingSequence
+        effectiveStartingSequence = logs.effectiveStartingSequence
+        oldestAvailableSequence = logs.oldestAvailableSequence
+        newestAvailableSequence = logs.newestAvailableSequence
+        lostEntryCount = logs.lostEntryCount
+        moreAvailable = logs.moreAvailable
+        if let lastSequence = logs.rawEntries.last?.sequence,
+           lastSequence != UInt64.max {
+            nextSequence = lastSequence + 1
+        } else if logs.rawEntries.last?.sequence == UInt64.max {
+            nextSequence = nil
+        } else if let cursor = logs.effectiveStartingSequence,
+                  logs.newestAvailableSequence != UInt64.max,
+                  cursor == logs.newestAvailableSequence + 1 {
+            // An idle tail cursor remains stable until a later poll observes
+            // a newly retained structured entry.
+            nextSequence = cursor
+        } else {
+            nextSequence = nil
+        }
+        consoleBytes = decoded.bytes
+        consoleByteCount = decoded.bytes.count
+        consoleText = String(decoding: decoded.bytes, as: UTF8.self)
+        consoleBase64 = Data(decoded.bytes).base64EncodedString()
+        consoleChunkCount = decoded.consoleChunkCount
+        nonConsoleEntryCount = decoded.nonConsoleEntryCount
+        malformedConsoleEntryCount = decoded.malformedConsoleEntryCount
+        sequenceDiscontinuityCount = decoded.sequenceDiscontinuityCount
+        incompleteMessageCount = decoded.incompleteMessageCount
+        startsMidMessage = decoded.startsMidMessage
+        endsMidMessage = decoded.endsMidMessage
+    }
+
+    var textHeader: [String] {
+        let next = nextSequence.map(String.init) ?? "unavailable"
+        return [
+            "device: \(devicePath)",
+            "boot-session: \(bootSessionID)",
+            "available: \(oldestAvailableSequence)...\(newestAvailableSequence); lost \(lostEntryCount)",
+            "console: \(consoleByteCount) bytes from \(consoleChunkCount) chunks; next sequence \(next)",
+            "diagnostics: \(nonConsoleEntryCount) structured, \(malformedConsoleEntryCount) malformed CONS, \(sequenceDiscontinuityCount) sequence gaps, \(incompleteMessageCount) incomplete messages",
+        ]
     }
 }
 
@@ -590,19 +724,19 @@ private struct SwiftOSRemoteRunner {
         var newest: UInt64 = 0
         var lost: UInt64 = 0
 
-        if cursor == nil {
-            let statusResult = try connection.session.perform(.status)
-            switch statusResult {
-            case .status(let status):
-                oldest = status.oldestLogSequence
-                newest = status.newestLogSequence
-                lost = status.lostLogEntryCount
+        let statusResult = try connection.session.perform(.status)
+        switch statusResult {
+        case .status(let status):
+            oldest = status.oldestLogSequence
+            newest = status.newestLogSequence
+            lost = status.lostLogEntryCount
+            if cursor == nil {
                 cursor = oldest == 0 ? nil : oldest
-            case .remoteError(let error):
-                throw SwiftOSRemoteRunError.remoteError(error)
-            default:
-                throw SwiftOSRemoteRunError.unexpectedResponse(expected: "status")
             }
+        case .remoteError(let error):
+            throw SwiftOSRemoteRunError.remoteError(error)
+        default:
+            throw SwiftOSRemoteRunError.unexpectedResponse(expected: "status")
         }
 
         guard var nextSequence = cursor else {
@@ -617,7 +751,25 @@ private struct SwiftOSRemoteRunner {
                 newestAvailableSequence: newest,
                 lostEntryCount: lost,
                 moreAvailable: false,
-                entries: []
+                entries: [],
+                rawEntries: []
+            )
+        }
+
+        if newest != UInt64.max, nextSequence == newest + 1 {
+            return SwiftOSLogsReport(
+                devicePath: connection.path,
+                bootSessionID: SwiftOSControlFormat.identity(
+                    connection.handshake.hello.bootSessionID
+                ),
+                requestedStartingSequence: startingSequence,
+                effectiveStartingSequence: nextSequence,
+                oldestAvailableSequence: oldest,
+                newestAvailableSequence: newest,
+                lostEntryCount: lost,
+                moreAvailable: false,
+                entries: [],
+                rawEntries: []
             )
         }
 
@@ -628,6 +780,8 @@ private struct SwiftOSRemoteRunner {
         )
         var reports: [SwiftOSLogEntryReport] = []
         reports.reserveCapacity(Int(maximumEntryCount))
+        var rawEntries: [KernelLogEntry] = []
+        rawEntries.reserveCapacity(Int(maximumEntryCount))
         var moreAvailable = false
         var retriedRotatedDefaultCursor = false
 
@@ -648,6 +802,7 @@ private struct SwiftOSRemoteRunner {
                 newest = snapshot.newestAvailableSequence
                 lost = snapshot.lostEntryCount
                 reports.append(contentsOf: snapshot.entries.map(SwiftOSLogEntryReport.init))
+                rawEntries.append(contentsOf: snapshot.entries)
                 moreAvailable = snapshot.flags.contains(.moreEntries)
                 guard moreAvailable else { break pageLoop }
                 guard snapshot.nextSequence != 0,
@@ -687,7 +842,24 @@ private struct SwiftOSRemoteRunner {
             newestAvailableSequence: newest,
             lostEntryCount: lost,
             moreAvailable: moreAvailable,
-            entries: reports
+            entries: reports,
+            rawEntries: rawEntries
+        )
+    }
+
+    func console(
+        _ options: SwiftOSRemoteOptions,
+        startingSequence: UInt64?,
+        maximumEntryCount: UInt32
+    ) throws -> SwiftOSConsoleReport {
+        let logs = try logs(
+            options,
+            startingSequence: startingSequence,
+            maximumEntryCount: maximumEntryCount
+        )
+        return SwiftOSConsoleReport(
+            logs: logs,
+            decoded: SwiftOSCanonicalConsoleDecoder.decode(logs.rawEntries)
         )
     }
 
@@ -791,6 +963,19 @@ private struct SwiftOSControlCLI {
                         maximumEntryCount: count
                     )
                 emit(report, json: options.json, text: report.text)
+            case .console(
+                let options,
+                let startingSequence,
+                let count,
+                let raw
+            ):
+                let report = try SwiftOSRemoteRunner(provider: provider)
+                    .console(
+                        options,
+                        startingSequence: startingSequence,
+                        maximumEntryCount: count
+                    )
+                emitConsole(report, json: options.json, raw: raw)
             }
         } catch let error as SwiftOSControlOptionError {
             fputs("swiftosctl: \(error)\n", stderr)
@@ -855,6 +1040,31 @@ private struct SwiftOSControlCLI {
         print("next: \(report.remediation)")
     }
 
+    private static func emitConsole(
+        _ report: SwiftOSConsoleReport,
+        json: Bool,
+        raw: Bool
+    ) {
+        if raw {
+            FileHandle.standardOutput.write(Data(report.consoleBytes))
+            return
+        }
+        if json {
+            emit(report, json: true, text: [])
+            return
+        }
+
+        var output = Data(
+            (report.textHeader.joined(separator: "\n") + "\n--- console ---\n")
+                .utf8
+        )
+        output.append(contentsOf: report.consoleBytes)
+        if report.consoleBytes.last != 10 {
+            output.append(10)
+        }
+        FileHandle.standardOutput.write(output)
+    }
+
     private static func printHelp() {
         print("""
         Usage: swiftosctl <command> [options]
@@ -867,11 +1077,14 @@ private struct SwiftOSControlCLI {
           ping [remote options] [--token N]  Verify the live SDBG control path
           logs [remote options] [--start N] [--count N]
                                             Read retained structured kernel logs
+          console [remote options] [--start N] [--count N] [--raw]
+                                            Reconstruct retained canonical console bytes
 
         Remote options:
           --device /dev/cu.usbmodem...       Select a CDC device explicitly
           --timeout S                        Bound handshake and each request
           --json                             Emit stable machine-readable JSON
+          --raw                              Console only: emit exact bytes with no header
         """)
     }
 }

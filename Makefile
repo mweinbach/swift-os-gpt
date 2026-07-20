@@ -351,6 +351,14 @@ swiftos-control-host-test: | $(BUILD_DIR)
 	$(BUILD_DIR)/swiftos-control-host-tests
 	$(MACOS_SWIFTC) -parse-as-library -warnings-as-errors \
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
+		Kernel/Debug/KernelLogRing.swift \
+		Kernel/Debug/KernelDebugLogRuntime.swift \
+		tools/SwiftOSControl/SwiftOSCanonicalConsole.swift \
+		Tests/Host/SwiftOSCanonicalConsoleTests.swift \
+		-o $(BUILD_DIR)/swiftos-canonical-console-host-tests
+	$(BUILD_DIR)/swiftos-canonical-console-host-tests
+	$(MACOS_SWIFTC) -parse-as-library -warnings-as-errors \
+		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Debug/BootIdentity.swift \
 		Kernel/Debug/DebugStatusSnapshot.swift \
 		Kernel/Debug/KernelLogRing.swift \
@@ -383,6 +391,7 @@ $(SWIFTOS_CONTROL): \
 		Kernel/Debug/BootIdentity.swift \
 		Kernel/Debug/DebugStatusSnapshot.swift \
 		Kernel/Debug/KernelLogRing.swift \
+		Kernel/Debug/KernelDebugLogRuntime.swift \
 		Kernel/Debug/SDBGProtocol.swift \
 		Kernel/Debug/SDBGStreamDecoder.swift \
 		Kernel/Debug/SDBGTypedPayload.swift \
@@ -390,6 +399,7 @@ $(SWIFTOS_CONTROL): \
 		tools/SwiftOSControl/SDBGHostTypedPayload.swift \
 		tools/SwiftOSControl/SDBGHostStreamClient.swift \
 		tools/SwiftOSControl/SDBGSerialSession.swift \
+		tools/SwiftOSControl/SwiftOSCanonicalConsole.swift \
 		tools/SwiftOSControl/SwiftOSDiscovery.swift \
 		tools/SwiftOSControl/SwiftOSControlCLI.swift | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/swiftos-control-module-cache
