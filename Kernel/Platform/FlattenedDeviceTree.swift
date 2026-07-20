@@ -45,6 +45,38 @@ private struct DeviceTreePropertyLocation {
     let length: UInt
 }
 
+private struct DeviceTreeInterruptSpecifier {
+    let controllerNodeOffset: UInt
+    let cells: DeviceTreePropertyCells
+}
+
+private struct DeviceTreeInterruptPropertyLayout {
+    let controllerNodeOffset: UInt
+    let property: DeviceTreePropertyLocation
+    let cellCount: UInt
+
+    var tupleByteCount: UInt { cellCount * 4 }
+    var tupleCount: Int { Int(property.length / tupleByteCount) }
+}
+
+private struct DeviceTreeInterruptParentContext {
+    let nodeOffset: UInt?
+    let isValid: Bool
+
+    static let missing = DeviceTreeInterruptParentContext(
+        nodeOffset: nil,
+        isValid: true
+    )
+    static let invalid = DeviceTreeInterruptParentContext(
+        nodeOffset: nil,
+        isValid: false
+    )
+}
+
+private struct DeviceTreeInterruptParentSearchResult {
+    let context: DeviceTreeInterruptParentContext
+}
+
 /// A deliberately small, allocation-free view of one Device Tree property
 /// containing big-endian 32-bit cells. Platform discovery uses this for short
 /// hardware specifiers such as `interrupts`; larger or byte-oriented
@@ -571,6 +603,85 @@ struct FlattenedDeviceTree {
         return propertyBytes(atNode: nodeOffset, property: property)
     }
 
+    /// Resolves one Arm GIC interrupt from a compatible node. Tuple width is
+    /// obtained from the selected interrupt controller's `#interrupt-cells`;
+    /// this routine never assumes that an arbitrary `interrupts` property is
+    /// a sequence of three-cell records. Only a directly supported GIC domain
+    /// is decoded, so interrupt nexuses and other controller bindings fail
+    /// closed rather than being mistaken for architectural GIC INTIDs.
+    func gicInterrupt(
+        compatibleWith compatibility: StaticString,
+        nodeIndex: Int = 0,
+        interruptIndex: Int
+    ) -> PlatformGICInterrupt? {
+        guard let specifier = interruptSpecifier(
+                  compatibleWith: compatibility,
+                  nodeIndex: nodeIndex,
+                  interruptIndex: interruptIndex
+              ), specifier.cells.count == 3,
+              let interruptType = specifier.cells.cell(at: 0),
+              let number = specifier.cells.cell(at: 1),
+              let rawFlags = specifier.cells.cell(at: 2)
+        else {
+            return nil
+        }
+
+        let isGICV2 = node(
+            at: specifier.controllerNodeOffset,
+            isCompatibleWith: "arm,gic-400"
+        )
+        let isGICV3 = node(
+            at: specifier.controllerNodeOffset,
+            isCompatibleWith: "arm,gic-v3"
+        )
+        guard isGICV2 != isGICV3,
+              rawFlags & (isGICV2 ? 0xffff_00f0 : 0xffff_fff0) == 0,
+              let trigger = PlatformInterruptTrigger(
+                  rawValue: rawFlags & 0x0f
+              )
+        else {
+            return nil
+        }
+
+        switch interruptType {
+        case 0:
+            // The GIC binding permits only rising-edge and active-high SPIs;
+            // its processor-mask field is PPI-only.
+            guard number <= 987,
+                  rawFlags & 0x0000_ff00 == 0,
+                  trigger == .edgeRising || trigger == .levelHigh
+            else { return nil }
+            return .sharedPeripheral(number: number, trigger: trigger)
+
+        case 1:
+            guard number <= 15,
+                  !isGICV3
+                    || trigger == .edgeRising || trigger == .levelHigh
+            else { return nil }
+            return .privatePeripheral(
+                number: number,
+                trigger: trigger,
+                processorMask: isGICV2
+                    ? UInt8(truncatingIfNeeded: rawFlags >> 8) : 0
+            )
+
+        default:
+            return nil
+        }
+    }
+
+    /// Number of complete specifiers in an enabled node's `interrupts`
+    /// property, using the resolved controller's declared cell width.
+    func interruptCount(
+        compatibleWith compatibility: StaticString,
+        nodeIndex: Int = 0
+    ) -> Int? {
+        interruptPropertyLayout(
+            compatibleWith: compatibility,
+            nodeIndex: nodeIndex
+        )?.tupleCount
+    }
+
     /// Resolves a short cell property through a unique Device Tree phandle.
     /// Both standard `phandle` and legacy `linux,phandle` spellings are
     /// accepted when they agree. Duplicate owners or conflicting spellings
@@ -838,6 +949,308 @@ struct FlattenedDeviceTree {
             remainingMatches: &remainingMatches,
             registerIndex: 0
         )?.nodeOffset
+    }
+
+    private func interruptSpecifier(
+        compatibleWith compatibility: StaticString,
+        nodeIndex: Int,
+        interruptIndex: Int
+    ) -> DeviceTreeInterruptSpecifier? {
+        guard interruptIndex >= 0,
+              let layout = interruptPropertyLayout(
+                  compatibleWith: compatibility,
+                  nodeIndex: nodeIndex
+              ), interruptIndex < layout.tupleCount,
+              UInt(interruptIndex) <= UInt.max / layout.tupleByteCount
+        else {
+            return nil
+        }
+        let selectedOffset = UInt(interruptIndex) * layout.tupleByteCount
+        guard selectedOffset
+                  <= layout.property.length - layout.tupleByteCount,
+              layout.property.offset <= UInt.max - selectedOffset,
+              let cells = decodePropertyCells(
+                  at: layout.property.offset + selectedOffset,
+                  length: layout.tupleByteCount
+              )
+        else {
+            return nil
+        }
+        return DeviceTreeInterruptSpecifier(
+            controllerNodeOffset: layout.controllerNodeOffset,
+            cells: cells
+        )
+    }
+
+    private func interruptPropertyLayout(
+        compatibleWith compatibility: StaticString,
+        nodeIndex: Int
+    ) -> DeviceTreeInterruptPropertyLayout? {
+        guard nodeIndex >= 0,
+              let targetNodeOffset = compatibleNodeOffset(
+                  compatibility,
+                  nodeIndex: nodeIndex
+              ), directPropertyOccurrenceCount(
+                  atNode: targetNodeOffset,
+                  property: "interrupts"
+              ) == 1,
+              directPropertyOccurrenceCount(
+                  atNode: targetNodeOffset,
+                  property: "interrupts-extended"
+              ) == 0,
+              let interrupts = propertyLocation(
+                  atNode: targetNodeOffset,
+                  property: "interrupts"
+              ), interrupts.length > 0,
+              let parent = interruptParentContext(forNode: targetNodeOffset),
+              parent.isValid,
+              let controllerNodeOffset = parent.nodeOffset,
+              directPropertyOccurrenceCount(
+                  atNode: controllerNodeOffset,
+                  property: "interrupt-controller"
+              ) == 1,
+              propertyLocation(
+                  atNode: controllerNodeOffset,
+                  property: "interrupt-controller"
+              )?.length == 0,
+              directPropertyOccurrenceCount(
+                  atNode: controllerNodeOffset,
+                  property: "#interrupt-cells"
+              ) == 1,
+              let width = propertyCells(
+                  atNode: controllerNodeOffset,
+                  property: "#interrupt-cells"
+              ), width.count == 1,
+              let rawCellCount = width.cell(at: 0),
+              rawCellCount > 0,
+              rawCellCount <= UInt32(DeviceTreePropertyCells.maximumCellCount)
+        else {
+            return nil
+        }
+
+        let cellCount = UInt(rawCellCount)
+        guard cellCount <= UInt.max / 4 else { return nil }
+        let tupleByteCount = cellCount * 4
+        guard tupleByteCount > 0,
+              interrupts.length % tupleByteCount == 0,
+              interrupts.length / tupleByteCount <= UInt(Int.max)
+        else {
+            return nil
+        }
+        return DeviceTreeInterruptPropertyLayout(
+            controllerNodeOffset: controllerNodeOffset,
+            property: interrupts,
+            cellCount: cellCount
+        )
+    }
+
+    private func interruptParentContext(
+        forNode targetNodeOffset: UInt
+    ) -> DeviceTreeInterruptParentContext? {
+        var cursor = structureStart
+        var result: DeviceTreeInterruptParentSearchResult?
+        guard scanInterruptParentPath(
+                  cursor: &cursor,
+                  targetNodeOffset: targetNodeOffset,
+                  inheritedParent: .missing,
+                  depth: 0,
+                  result: &result
+              )
+        else {
+            return nil
+        }
+        return result?.context
+    }
+
+    /// Retains only the interrupt-parent state along the structural path to a
+    /// target node. An explicit phandle applies to the node and descendants;
+    /// an interrupt-controller node becomes the natural parent of its own
+    /// children while keeping its explicit parent for its upstream interrupt.
+    private func scanInterruptParentPath(
+        cursor: inout UInt,
+        targetNodeOffset: UInt,
+        inheritedParent: DeviceTreeInterruptParentContext,
+        depth: Int,
+        result: inout DeviceTreeInterruptParentSearchResult?
+    ) -> Bool {
+        guard depth < 64 else { return false }
+        let nodeOffset = cursor
+        guard readStructureWord(at: cursor) == Self.beginNode else {
+            return false
+        }
+        cursor += 4
+        guard skipNodeName(cursor: &cursor) else { return false }
+
+        var explicitParentSeen = false
+        var explicitParent = DeviceTreeInterruptParentContext.missing
+        var interruptControllerSeen = false
+        var interruptControllerIsValid = true
+        var sawChild = false
+
+        while cursor < structureEnd {
+            guard let token = readStructureWord(at: cursor) else {
+                return false
+            }
+            switch token {
+            case Self.property:
+                // DTSpec places a node's properties before its subnodes. The
+                // topology cannot be inherited deterministically otherwise.
+                guard !sawChild,
+                      let rawLength = readStructureWord(at: cursor + 4),
+                      let rawNameOffset = readStructureWord(at: cursor + 8)
+                else { return false }
+                let valueOffset = cursor + 12
+                let valueLength = UInt(rawLength)
+                guard Self.range(
+                          offset: valueOffset,
+                          length: valueLength,
+                          fits: structureEnd
+                      ), let next = Self.align4(valueOffset + valueLength),
+                      next <= structureEnd
+                else { return false }
+                cursor = next
+
+                if propertyName(
+                    at: UInt(rawNameOffset),
+                    equals: "interrupt-parent"
+                ) {
+                    if explicitParentSeen {
+                        explicitParent = .invalid
+                    } else if rawLength == 4,
+                              let phandle = readStructureWord(at: valueOffset),
+                              phandle != 0,
+                              let parentNodeOffset = uniqueNodeOffset(
+                                  forPhandle: phandle
+                              ) {
+                        explicitParent = DeviceTreeInterruptParentContext(
+                            nodeOffset: parentNodeOffset,
+                            isValid: true
+                        )
+                    } else {
+                        explicitParent = .invalid
+                    }
+                    explicitParentSeen = true
+                } else if propertyName(
+                    at: UInt(rawNameOffset),
+                    equals: "interrupt-controller"
+                ) {
+                    if interruptControllerSeen || rawLength != 0 {
+                        interruptControllerIsValid = false
+                    }
+                    interruptControllerSeen = true
+                }
+
+            case Self.beginNode:
+                sawChild = true
+                let ownParent = explicitParentSeen
+                    ? explicitParent : inheritedParent
+                if nodeOffset == targetNodeOffset {
+                    result = DeviceTreeInterruptParentSearchResult(
+                        context: ownParent
+                    )
+                    return true
+                }
+                let childParent: DeviceTreeInterruptParentContext
+                if interruptControllerSeen {
+                    childParent = interruptControllerIsValid
+                        ? DeviceTreeInterruptParentContext(
+                            nodeOffset: nodeOffset,
+                            isValid: true
+                        )
+                        : .invalid
+                } else {
+                    childParent = ownParent
+                }
+                guard scanInterruptParentPath(
+                          cursor: &cursor,
+                          targetNodeOffset: targetNodeOffset,
+                          inheritedParent: childParent,
+                          depth: depth + 1,
+                          result: &result
+                      )
+                else { return false }
+                if result != nil { return true }
+
+            case Self.endNode:
+                cursor += 4
+                if nodeOffset == targetNodeOffset {
+                    result = DeviceTreeInterruptParentSearchResult(
+                        context: explicitParentSeen
+                            ? explicitParent : inheritedParent
+                    )
+                }
+                return true
+
+            case Self.noOperation:
+                cursor += 4
+
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
+    private func directPropertyOccurrenceCount(
+        atNode nodeOffset: UInt,
+        property: StaticString
+    ) -> Int? {
+        guard readStructureWord(at: nodeOffset) == Self.beginNode else {
+            return nil
+        }
+        var cursor = nodeOffset + 4
+        guard skipNodeName(cursor: &cursor) else { return nil }
+        var count = 0
+        while cursor < structureEnd {
+            guard let token = readStructureWord(at: cursor) else { return nil }
+            cursor += 4
+            switch token {
+            case Self.property:
+                guard let rawLength = readStructureWord(at: cursor),
+                      let rawNameOffset = readStructureWord(at: cursor + 4)
+                else { return nil }
+                let valueOffset = cursor + 8
+                let valueLength = UInt(rawLength)
+                guard Self.range(
+                          offset: valueOffset,
+                          length: valueLength,
+                          fits: structureEnd
+                      ), let next = Self.align4(valueOffset + valueLength),
+                      next <= structureEnd
+                else { return nil }
+                cursor = next
+                if propertyName(
+                    at: UInt(rawNameOffset),
+                    equals: property
+                ) {
+                    guard count < Int.max else { return nil }
+                    count += 1
+                }
+            case Self.noOperation:
+                continue
+            case Self.beginNode, Self.endNode:
+                return count
+            default:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    private func node(
+        at nodeOffset: UInt,
+        isCompatibleWith compatibility: StaticString
+    ) -> Bool {
+        guard let location = propertyLocation(
+                  atNode: nodeOffset,
+                  property: "compatible"
+              )
+        else { return false }
+        return containsCString(
+            compatibility,
+            at: location.offset,
+            length: location.length
+        )
     }
 
     private func dmaTranslationPath(

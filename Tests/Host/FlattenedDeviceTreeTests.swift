@@ -10,8 +10,104 @@ struct FlattenedDeviceTreeTests {
         discoversPi5PeripheralUSBController()
         rejectsUnavailablePi5USBController()
         rejectsNonoperationalStatusesAndUnavailableAncestors()
+        resolvesInterruptParentsAndControllerCellWidths()
         rejectsBadMagicAndTruncatedStructure()
-        print("FDT host tests: 10 passed")
+        print("FDT host tests: 11 passed")
+    }
+
+    private static func resolvesInterruptParentsAndControllerCellWidths() {
+        let bytes = makeInterruptTopologyDeviceTree()
+        bytes.withUnsafeBytes { storage in
+            let tree = FlattenedDeviceTree(
+                address: UInt64(UInt(bitPattern: storage.baseAddress!))
+            )!
+            expect(
+                tree.interruptCount(
+                    compatibleWith: "arm,armv8-timer"
+                ) == 4,
+                "timer tuple count ignored the controller cell width"
+            )
+            expect(
+                tree.gicInterrupt(
+                    compatibleWith: "arm,armv8-timer",
+                    interruptIndex: 1
+                ) == .privatePeripheral(
+                    number: 14,
+                    trigger: .levelLow,
+                    processorMask: 0x0f
+                ),
+                "timer did not inherit the nearest interrupt-parent"
+            )
+            expect(
+                tree.gicInterrupt(
+                    compatibleWith: "brcm,bcm2712-sdhci",
+                    interruptIndex: 0
+                ) == .sharedPeripheral(
+                    number: 0x111,
+                    trigger: .levelHigh
+                ),
+                "SDHCI SPI was not decoded through its ancestor parent"
+            )
+            expect(
+                tree.interruptCount(
+                    compatibleWith: "swiftos,two-cell-device"
+                ) == 1,
+                "two-cell controller width was not decoded"
+            )
+            expect(
+                tree.gicInterrupt(
+                    compatibleWith: "swiftos,two-cell-device",
+                    interruptIndex: 0
+                ) == nil,
+                "unsupported two-cell interrupt domain became a GIC route"
+            )
+        }
+
+        let malformedTrees = [
+            makeInterruptTopologyDeviceTree(gicCellCount: 2),
+            makeInterruptTopologyDeviceTree(busInterruptParent: 0xdead),
+            makeInterruptTopologyDeviceTree(timerFlags: 0x10),
+            makeInterruptTopologyDeviceTree(sdFlags: 0x08),
+            makeInterruptTopologyDeviceTree(includeInterruptsExtended: true),
+        ]
+        for (index, malformed) in malformedTrees.enumerated() {
+            malformed.withUnsafeBytes { storage in
+                let tree = FlattenedDeviceTree(
+                    address: UInt64(UInt(bitPattern: storage.baseAddress!))
+                )!
+                let timer = tree.gicInterrupt(
+                    compatibleWith: "arm,armv8-timer",
+                    interruptIndex: 1
+                )
+                let storageInterrupt = tree.gicInterrupt(
+                    compatibleWith: "brcm,bcm2712-sdhci",
+                    interruptIndex: 0
+                )
+                if index == 3 {
+                    expect(
+                        storageInterrupt == nil,
+                        "active-low SPI flags were accepted"
+                    )
+                } else {
+                    expect(
+                        timer == nil,
+                        "malformed timer topology was accepted"
+                    )
+                }
+            }
+        }
+
+        let invalidBootPlatform = makeDeviceTree(timerFlags: 0x10)
+        invalidBootPlatform.withUnsafeBytes { storage in
+            expect(
+                Platform.discover(
+                    deviceTreeAddress: UInt64(
+                        UInt(bitPattern: storage.baseAddress!)
+                    )
+                ) == nil,
+                "platform discovery accepted a malformed timer route"
+            )
+        }
     }
 
     private static func translatesChainedPCIRangesAndRejectsMalformedMappings() {
@@ -357,6 +453,15 @@ struct FlattenedDeviceTreeTests {
                 "platform GIC mismatch"
             )
             expect(
+                platform?.nonSecurePhysicalTimerInterrupt
+                    == .privatePeripheral(
+                        number: 14,
+                        trigger: .levelHigh,
+                        processorMask: 0
+                    ),
+                "platform did not retain the DT timer PPI"
+            )
+            expect(
                 platform?.virtioTransport(at: 0)
                     == DeviceResource(baseAddress: 0x0a00_0000, length: 0x200),
                 "first VirtIO transport mismatch"
@@ -442,6 +547,177 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() {
         fatalError(message)
     }
+}
+
+private func makeInterruptTopologyDeviceTree(
+    gicCellCount: UInt32 = 3,
+    busInterruptParent: UInt32 = 1,
+    timerFlags: UInt32 = 0x0f08,
+    sdFlags: UInt32 = 4,
+    includeInterruptsExtended: Bool = false
+) -> [UInt8] {
+    let names = [
+        "#address-cells",
+        "#size-cells",
+        "#interrupt-cells",
+        "compatible",
+        "interrupt-controller",
+        "interrupt-parent",
+        "interrupts",
+        "interrupts-extended",
+        "phandle",
+    ]
+    var strings: [UInt8] = []
+    var offsets: [String: UInt32] = [:]
+    for name in names {
+        offsets[name] = UInt32(strings.count)
+        strings.append(contentsOf: name.utf8)
+        strings.append(0)
+    }
+
+    var structure: [UInt8] = []
+    appendBeginNode("", to: &structure)
+    appendProperty(
+        nameOffset: offsets["#address-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#size-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    // The root deliberately points at an unsupported two-cell domain. The
+    // devices below must use the nearer bus-level GIC parent instead.
+    appendProperty(
+        nameOffset: offsets["interrupt-parent"]!,
+        value: be32(2),
+        to: &structure
+    )
+
+    appendBeginNode("gic", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("arm,gic-400".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["interrupt-controller"]!,
+        value: [],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#interrupt-cells"]!,
+        value: be32(gicCellCount),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["phandle"]!,
+        value: be32(1),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("other-intc", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("swiftos,two-cell-intc".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["interrupt-controller"]!,
+        value: [],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#interrupt-cells"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["phandle"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("soc", to: &structure)
+    appendProperty(
+        nameOffset: offsets["interrupt-parent"]!,
+        value: be32(busInterruptParent),
+        to: &structure
+    )
+
+    appendBeginNode("timer", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("arm,armv8-timer".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["interrupts"]!,
+        value: be32(1) + be32(13) + be32(timerFlags)
+            + be32(1) + be32(14) + be32(timerFlags)
+            + be32(1) + be32(11) + be32(timerFlags)
+            + be32(1) + be32(10) + be32(timerFlags),
+        to: &structure
+    )
+    if includeInterruptsExtended {
+        appendProperty(
+            nameOffset: offsets["interrupts-extended"]!,
+            value: be32(1) + be32(1) + be32(14) + be32(timerFlags),
+            to: &structure
+        )
+    }
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("mmc@fff000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("brcm,bcm2712-sdhci".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["interrupts"]!,
+        value: be32(0) + be32(0x111) + be32(sdFlags),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("two-cell-device", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("swiftos,two-cell-device".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["interrupts"]!,
+        value: be32(7) + be32(4),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBE32(2, to: &structure)
+    appendBE32(9, to: &structure)
+
+    let headerSize = 40
+    let reservation = Array(repeating: UInt8(0), count: 16)
+    let structureOffset = headerSize + reservation.count
+    let stringsOffset = structureOffset + structure.count
+    let totalSize = stringsOffset + strings.count
+    var header: [UInt8] = []
+    appendBE32(0xd00d_feed, to: &header)
+    appendBE32(UInt32(totalSize), to: &header)
+    appendBE32(UInt32(structureOffset), to: &header)
+    appendBE32(UInt32(stringsOffset), to: &header)
+    appendBE32(UInt32(headerSize), to: &header)
+    appendBE32(17, to: &header)
+    appendBE32(16, to: &header)
+    appendBE32(0, to: &header)
+    appendBE32(UInt32(strings.count), to: &header)
+    appendBE32(UInt32(structure.count), to: &header)
+    return header + reservation + structure + strings
 }
 
 private func makeRaspberryPiPCITranslationDeviceTree(
@@ -696,7 +972,7 @@ private func makeAvailabilityDeviceTree() -> [UInt8] {
     return header + reservation + structure + strings
 }
 
-private func makeDeviceTree() -> [UInt8] {
+private func makeDeviceTree(timerFlags: UInt32 = 4) -> [UInt8] {
     let names = [
         "#address-cells",
         "#size-cells",
@@ -710,6 +986,11 @@ private func makeDeviceTree() -> [UInt8] {
         "stride",
         "format",
         "status",
+        "#interrupt-cells",
+        "interrupt-parent",
+        "interrupt-controller",
+        "phandle",
+        "interrupts",
     ]
     var strings: [UInt8] = []
     var offsets: [String: UInt32] = [:]
@@ -726,6 +1007,11 @@ private func makeDeviceTree() -> [UInt8] {
     appendProperty(
         nameOffset: offsets["compatible"]!,
         value: Array("qemu,virt".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["interrupt-parent"]!,
+        value: be32(1),
         to: &structure
     )
 
@@ -830,6 +1116,37 @@ private func makeDeviceTree() -> [UInt8] {
         nameOffset: offsets["reg"]!,
         value: be32(0) + be32(0x0800_0000) + be32(0) + be32(0x1_0000)
             + be32(0) + be32(0x080a_0000) + be32(0) + be32(0x20_0000),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["interrupt-controller"]!,
+        value: [],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#interrupt-cells"]!,
+        value: be32(3),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["phandle"]!,
+        value: be32(1),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("timer", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("arm,armv8-timer".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["interrupts"]!,
+        value: be32(1) + be32(13) + be32(timerFlags)
+            + be32(1) + be32(14) + be32(timerFlags)
+            + be32(1) + be32(11) + be32(timerFlags)
+            + be32(1) + be32(10) + be32(timerFlags),
         to: &structure
     )
     appendBE32(2, to: &structure)
@@ -951,6 +1268,11 @@ private func makeRaspberryPiGraphicsDeviceTree(
         "iommus",
         "ranges",
         "dr_mode",
+        "#interrupt-cells",
+        "interrupt-parent",
+        "interrupt-controller",
+        "phandle",
+        "interrupts",
     ]
     var strings: [UInt8] = []
     var offsets: [String: UInt32] = [:]
@@ -978,6 +1300,11 @@ private func makeRaspberryPiGraphicsDeviceTree(
             + Array("brcm,bcm2712".utf8) + [0],
         to: &structure
     )
+    appendProperty(
+        nameOffset: offsets["interrupt-parent"]!,
+        value: be32(1),
+        to: &structure
+    )
 
     appendBeginNode("serial@107d001000", to: &structure)
     appendProperty(
@@ -1002,6 +1329,37 @@ private func makeRaspberryPiGraphicsDeviceTree(
         nameOffset: offsets["reg"]!,
         value: be64(0x10_7fff_9000) + be64(0x1000)
             + be64(0x10_7fff_a000) + be64(0x2000),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["interrupt-controller"]!,
+        value: [],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["#interrupt-cells"]!,
+        value: be32(3),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["phandle"]!,
+        value: be32(1),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("timer", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("arm,armv8-timer".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["interrupts"]!,
+        value: be32(1) + be32(13) + be32(0x0f08)
+            + be32(1) + be32(14) + be32(0x0f08)
+            + be32(1) + be32(11) + be32(0x0f08)
+            + be32(1) + be32(10) + be32(0x0f08),
         to: &structure
     )
     appendBE32(2, to: &structure)

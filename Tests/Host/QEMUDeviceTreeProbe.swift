@@ -32,6 +32,16 @@ public func validateQEMUDeviceTree(_ rawAddress: UnsafeRawPointer?) -> Int32 {
     guard platform.processorCount == 1 else { return 8 }
     guard platform.processorAffinity(at: 0) == 0 else { return 9 }
     guard platform.firmwareCallConduit == .hypervisorCall else { return 10 }
+    guard platform.nonSecurePhysicalTimerInterrupt == .privatePeripheral(
+              number: 14,
+              trigger: .levelHigh,
+              processorMask: 0
+          ), platform.nonSecurePhysicalTimerInterrupt?
+              .architecturalInterruptID == 30,
+          platform.nonSecurePhysicalTimerInterrupt?.deviceTreeFlags == 4
+    else {
+        return 14
+    }
     guard platform.virtioTransportWindow == DeviceResource(
         baseAddress: 0x0a00_0000,
         length: 0x4000

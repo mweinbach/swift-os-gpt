@@ -67,6 +67,16 @@ public func validateRaspberryPi5DeviceTree(
     guard platform.firmwareCallConduit == .secureMonitorCall else {
         return 10
     }
+    guard platform.nonSecurePhysicalTimerInterrupt == .privatePeripheral(
+              number: 14,
+              trigger: .levelLow,
+              processorMask: 0x0f
+          ), platform.nonSecurePhysicalTimerInterrupt?
+              .architecturalInterruptID == 30,
+          platform.nonSecurePhysicalTimerInterrupt?.deviceTreeFlags == 0x0f08
+    else {
+        return 18
+    }
     guard platform.processorCount == 4,
           platform.processorAffinity(at: 0) == 0,
           platform.processorAffinity(at: 1) == 0x100,
@@ -117,10 +127,7 @@ public func validateRaspberryPi5DeviceTree(
             baseAddress: 0x10_00ff_f400,
             length: 0x200
         ),
-        interrupt: PlatformStorageInterruptRoute(
-            spiNumber: 0x111,
-            trigger: .levelHigh
-        ),
+        interrupt: .sharedPeripheral(number: 0x111, trigger: .levelHigh),
         inputClockHertz: 200_000_000,
         busWidth: 4,
         power: PlatformSDCardPowerResources(

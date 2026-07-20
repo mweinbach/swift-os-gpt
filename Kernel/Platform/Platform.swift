@@ -23,6 +23,54 @@ enum PlatformInterruptTrigger: UInt32, Equatable {
     case levelLow = 8
 }
 
+/// One interrupt in an Arm GIC domain, decoded from the controller's Device
+/// Tree binding rather than from a board-specific interrupt ID. `number` is
+/// relative to its interrupt class: SPIs begin at architectural INTID 32 and
+/// PPIs begin at INTID 16. The PPI processor mask is the binding's bits 15:8;
+/// firmware may publish zero when routing is fixed by hardware.
+enum PlatformGICInterrupt: Equatable {
+    case sharedPeripheral(
+        number: UInt32,
+        trigger: PlatformInterruptTrigger
+    )
+    case privatePeripheral(
+        number: UInt32,
+        trigger: PlatformInterruptTrigger,
+        processorMask: UInt8
+    )
+
+    var architecturalInterruptID: UInt32? {
+        switch self {
+        case .sharedPeripheral(let number, _):
+            guard number <= 987 else { return nil }
+            return number + 32
+        case .privatePeripheral(let number, _, _):
+            guard number <= 15 else { return nil }
+            return number + 16
+        }
+    }
+
+    var trigger: PlatformInterruptTrigger {
+        switch self {
+        case .sharedPeripheral(_, let trigger),
+             .privatePeripheral(_, let trigger, _):
+            return trigger
+        }
+    }
+
+    /// Reconstructs the third cell of the Arm GIC interrupt binding. This is
+    /// retained for diagnostics so PPI affinity information is never lost
+    /// after the raw firmware cells have been validated.
+    var deviceTreeFlags: UInt32 {
+        switch self {
+        case .sharedPeripheral(_, let trigger):
+            return trigger.rawValue
+        case .privatePeripheral(_, let trigger, let processorMask):
+            return trigger.rawValue | (UInt32(processorMask) << 8)
+        }
+    }
+}
+
 /// A controller that can expose SwiftOS as a USB device to a host. This is a
 /// discovery contract only: register programming, endpoint ownership, and USB
 /// protocol policy remain in separate driver layers.
@@ -99,7 +147,6 @@ struct PlatformGraphicsResources: Equatable {
 }
 
 struct Platform {
-    static let physicalTimerInterruptID: UInt32 = 30
     private static let raspberryPi5DebugUART: UInt64 = 0x10_7d00_1000
 
     let kind: BoardKind
@@ -118,6 +165,11 @@ struct Platform {
     /// Internal discovery view used by driver-specific Platform extensions.
     /// Guest code still receives typed descriptions rather than raw DT bytes.
     let deviceTree: FlattenedDeviceTree
+
+    /// The EL1 non-secure physical architected timer route. Manual host-test
+    /// fixtures may omit it, but `discover` never returns a boot platform
+    /// without a validated GIC PPI from timer tuple index one.
+    var nonSecurePhysicalTimerInterrupt: PlatformGICInterrupt? = nil
 
     static func discover(deviceTreeAddress: UInt64) -> Platform? {
         guard let tree = FlattenedDeviceTree(address: deviceTreeAddress) else {
@@ -173,6 +225,18 @@ struct Platform {
             return nil
         }
 
+        guard let timerInterruptCount = tree.interruptCount(
+                  compatibleWith: "arm,armv8-timer"
+              ), timerInterruptCount >= 2, timerInterruptCount <= 5,
+              let timerInterrupt = tree.gicInterrupt(
+                  compatibleWith: "arm,armv8-timer",
+                  interruptIndex: 1
+              ), case .privatePeripheral = timerInterrupt,
+              timerInterrupt.architecturalInterruptID != nil
+        else {
+            return nil
+        }
+
         let firmwareCallConduit: FirmwareCallConduit?
         if tree.contains(
             compatibleWith: "arm,psci-0.2",
@@ -217,7 +281,8 @@ struct Platform {
             firmwareCallConduit: firmwareCallConduit,
             deviceTreeAddress: deviceTreeAddress,
             deviceTreeSize: tree.blobSize,
-            deviceTree: tree
+            deviceTree: tree,
+            nonSecurePhysicalTimerInterrupt: timerInterrupt
         )
     }
 

@@ -2,19 +2,6 @@ enum PlatformStorageControllerKind: UInt8, Equatable {
     case bcm2712SDHCI
 }
 
-/// The SD slot is polled during bring-up, but its interrupt route is retained
-/// so a later asynchronous transport can use the same discovery result.
-struct PlatformStorageInterruptRoute: Equatable {
-    /// Zero-based SPI number from the Arm GIC Device Tree binding.
-    let spiNumber: UInt32
-    let trigger: PlatformInterruptTrigger
-
-    var architecturalGICInterruptID: UInt32? {
-        guard spiNumber <= UInt32.max - 32 else { return nil }
-        return spiNumber + 32
-    }
-}
-
 enum PlatformGPIOLevel: UInt8, Equatable {
     case low
     case high
@@ -42,7 +29,9 @@ struct PlatformStorageDeviceDescription: Equatable {
     let controller: PlatformStorageControllerKind
     let hostRegisters: DeviceResource
     let configurationRegisters: DeviceResource
-    let interrupt: PlatformStorageInterruptRoute
+    /// Retained even while the transport is polled so an asynchronous SDHCI
+    /// path can bind the same firmware-validated GIC SPI later.
+    let interrupt: PlatformGICInterrupt
     let inputClockHertz: UInt32
     let busWidth: UInt32
     let power: PlatformSDCardPowerResources
@@ -129,15 +118,16 @@ struct PlatformStorageDeviceDiscovery {
               ), registerNames.cStringCount == 2,
               registerNames.cString(at: 0, equals: "host"),
               registerNames.cString(at: 1, equals: "cfg"),
-              let interruptCells = tree.propertyCells(
+              tree.interruptCount(
+                  compatibleWith: "brcm,bcm2712-sdhci",
+                  nodeIndex: nodeIndex
+              ) == 1,
+              let interrupt = tree.gicInterrupt(
                   compatibleWith: "brcm,bcm2712-sdhci",
                   nodeIndex: nodeIndex,
-                  property: "interrupts"
-              ), interruptCells.count == 3,
-              interruptCells.cell(at: 0) == 0,
-              let spiNumber = interruptCells.cell(at: 1),
-              let triggerValue = interruptCells.cell(at: 2),
-              let trigger = PlatformInterruptTrigger(rawValue: triggerValue),
+                  interruptIndex: 0
+              ), case .sharedPeripheral = interrupt,
+              interrupt.architecturalInterruptID != nil,
               let clockCells = tree.propertyCells(
                   compatibleWith: "brcm,bcm2712-sdhci",
                   nodeIndex: nodeIndex,
@@ -172,10 +162,7 @@ struct PlatformStorageDeviceDiscovery {
             controller: .bcm2712SDHCI,
             hostRegisters: host,
             configurationRegisters: configuration,
-            interrupt: PlatformStorageInterruptRoute(
-                spiNumber: spiNumber,
-                trigger: trigger
-            ),
+            interrupt: interrupt,
             inputClockHertz: inputClockHertz,
             busWidth: 4,
             power: power

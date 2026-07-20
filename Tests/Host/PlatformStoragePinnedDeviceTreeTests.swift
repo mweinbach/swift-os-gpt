@@ -26,8 +26,8 @@ struct PlatformStoragePinnedDeviceTreeTests {
                 baseAddress: 0x10_00ff_f400,
                 length: 0x200
             ),
-            interrupt: PlatformStorageInterruptRoute(
-                spiNumber: 0x111,
+            interrupt: .sharedPeripheral(
+                number: 0x111,
                 trigger: .levelHigh
             ),
             inputClockHertz: 200_000_000,
@@ -51,7 +51,7 @@ struct PlatformStoragePinnedDeviceTreeTests {
                   in: tree,
                   board: .raspberryPi5
               ) == expected,
-              expected.interrupt.architecturalGICInterruptID == 0x131,
+              expected.interrupt.architecturalInterruptID == 0x131,
               Platform.discover(deviceTreeAddress: address)?
                   .systemStorageDevice == expected,
               PlatformStorageDeviceDiscovery.systemDevice(
@@ -166,10 +166,7 @@ struct PlatformStoragePinnedDeviceTreeTests {
             controller: .bcm2712SDHCI,
             hostRegisters: host,
             configurationRegisters: configuration,
-            interrupt: PlatformStorageInterruptRoute(
-                spiNumber: 1,
-                trigger: .levelHigh
-            ),
+            interrupt: .sharedPeripheral(number: 1, trigger: .levelHigh),
             inputClockHertz: 200_000_000,
             busWidth: 4,
             power: PlatformSDCardPowerResources(
