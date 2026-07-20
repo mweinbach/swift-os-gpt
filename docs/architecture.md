@@ -49,10 +49,14 @@ executed on physical hardware.
 
 Secondary CPUs are not allowed to run the primary reset path. After memory,
 vectors, and final tables are ready, CPU0 issues PSCI `CPU_ON`. Each selected
-secondary enters `_secondary_start`, acquires a unique stack, installs the final
-translation regime and vectors, calls Swift, publishes online state with release
-semantics, and parks. CPU0 acquire-loads those publications before reporting the
-four-core QEMU proof.
+secondary enters `_secondary_start`, installs its dense PSCI context value in
+`TPIDR_EL1`, acquires a unique stack, installs the final translation regime and
+vectors, and calls Swift. An EL2 secondary handoff mirrors the boot CPU's
+generic-timer access and implemented GIC system-register permission before
+dropping to EL1. Swift validates the dense ID against the PSCI context,
+initializes processor-local GIC and timer state, publishes online state,
+completes its fixed bounded work, and then parks. CPU0 acquire-loads the online
+and completion publications before reporting the QEMU proof.
 
 ## Memory ownership and translation
 
@@ -111,15 +115,29 @@ all integer registers, Q0-Q31, FPCR/FPSR, thread/user stack state, and exception
 syndrome registers. Swift performs bounded classification and dispatch; the
 assembly veneer restores the selected frame and returns with `eret`.
 
-Platform discovery chooses GICv3 or GICv2 by DT compatibility. Repeating timer
-IRQ delivery is proven on QEMU's GICv3 path: CPU0 enables the architectural
-physical timer PPI, acknowledges it through the GIC, rearms it, and writes three
-ordered delivery markers. The GICv2/Pi implementation is compiled into the Pi
-artifact but remains hardware-unverified.
+Platform discovery chooses GICv3 or GICv2 by DT compatibility. It resolves the
+nearest inherited or explicit `interrupt-parent`, reads that controller's
+`#interrupt-cells`, and fails closed on malformed, ambiguous, unsupported, or
+mixed `interrupts`/`interrupts-extended` descriptions. The second tuple of the
+`arm,armv8-timer` binding supplies the non-secure physical PPI and its flags;
+the architectural INTID is derived from that typed route rather than fixed in
+the timer driver. The removable Pi SDHCI resource uses the same resolver for its
+SPI, so storage and timer discovery share one interrupt-topology contract.
 
-The preemptive proof deliberately schedules only user-mode arrivals. A timer
-arriving while CPU0 is in EL1 is rearmed without kernel preemption. Secondary
-CPUs do not yet own per-CPU timer scheduling or accept runnable work.
+Controller initialization has two scopes. CPU0 initializes the shared
+distributor once. Every participating processor then initializes its own GICv3
+redistributor and system-register interface, or its GICv2 banked PPI state and
+GICC interface. Each logical processor has independent physical-timer state,
+timer and synchronous hooks, interrupt counters, and fatal diagnostics. QEMU
+proves repeating physical-timer acknowledgement, EOI, and rearming on GICv3 and
+GICv2, including secondary-local delivery; the BCM2712 execution path remains
+physical-hardware-unverified.
+
+The CPU0 preemptive proof deliberately schedules only user-mode arrivals. A
+timer arriving while CPU0 is in EL1 is rearmed without kernel preemption. Each
+secondary's timer hook only publishes a tick; mainline Swift scheduler policy
+consumes one tick for one bounded kernel-work quantum. This does not implement
+arbitrary interrupt-time scheduling or kernel preemption.
 
 ## SMP and scheduling
 
@@ -130,13 +148,23 @@ storage contract. A separate boot configuration validates requested CPU count
 against topology, target, state, and report capacities. It identifies the boot
 CPU from all MPIDR affinity fields, selects at most four processors, and records
 each `CPU_ON` result. The direct-EL1 QEMU DT selects HVC, while the
-virtualization/EL2 QEMU DT and Pi board contract select SMC. Both four-core QEMU
-smoke paths require CPU1, CPU2, and CPU3 to independently publish online before
-`SWIFTOS:SMP_OK` is accepted. A separate two-core Cortex-A76 smoke proves that a
-smaller topology follows the same startup and EL0-preemption path without
-assuming the four-core configuration.
+virtualization/EL2 QEMU DT and Pi board contract select SMC. QEMU exercises
+four-core GICv3 and GICv2 configurations from both EL1 and EL2. A separate
+two-core Cortex-A76 smoke proves the smaller topology, and an eight-CPU smoke
+proves that the kernel deliberately manages only the first four described CPUs.
 
-The current scheduler is an intentionally narrow first isolation milestone:
+The secondary-work scheduler is a fixed boot-time execution proof. CPU0 release-
+publishes two affinity-pinned slots per selected secondary before `CPU_ON`.
+After local interrupt setup and online publication, each worker starts its own
+EL1 physical timer and executes exactly one bounded checksum quantum for each
+timer-hook tick. It disables the timer and clears the hook before release-
+publishing completion. CPU0 requires both task identities and expected
+checksums, more than one quantum per task, a stack pointer inside that logical
+CPU's unique guarded stack, and a per-CPU timer IRQ count at least as large as
+the total work quanta before it emits `SWIFTOS:SMP_WORK_OK` and `SWIFTOS:SMP_OK`.
+
+The current EL0 scheduler is a separate, intentionally narrow isolation
+milestone:
 
 - one linked user address space and process identifier;
 - two fixed-capacity threads, both pinned to CPU0;
@@ -150,8 +178,10 @@ The current scheduler is an intentionally narrow first isolation milestone:
 Before `eret` to EL0, the kernel scrubs both NOLOAD user-stack regions and the
 entry veneer scrubs registers and FP/SIMD state that must not leak privileged
 context. The proof is complete only after both thread identities report and both
-have resumed following context switches. This is not yet a multicore scheduler,
-a general process manager, or a stable syscall ABI.
+have resumed following context switches. User threads remain CPU0-pinned. The
+fixed secondary work does not provide dynamic admission, kernel preemption,
+migration, load balancing, or cross-CPU user scheduling, so this is not yet a
+general multicore scheduler, process manager, or stable syscall ABI.
 
 ## Graphics and monitor model
 
@@ -277,8 +307,10 @@ SDHCI directly. It alternates complete metadata/data banks and publishes a
 CRC-protected superblock only after the inactive snapshot synchronizes. QEMU
 reaches it through a VirtIO-backed signed data volume; the Pi runtime derives a
 disjoint SwiftFS range beside the private log arena and exposes the same mounted-
-provider seam through stable classified allocations. The Pi transport and mount
-remain physical-hardware-unverified.
+provider seam through stable classified allocations. The Pi SD description also
+retains its DT-resolved GIC SPI for a future asynchronous transport, while the
+current driver remains polled. The Pi transport and mount remain physical-
+hardware-unverified.
 
 The first file-service SVC uses fixed-width request/result records, validates
 whole EL0 ranges before copying, and confines each process to bounded generation-

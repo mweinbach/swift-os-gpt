@@ -9,18 +9,26 @@ unless a guest implementation and a repeatable test sit behind it.
 - A static AArch64 ELF and raw boot image produced by Swift 6.2 Embedded Swift,
   with no Darwin or Apple-framework dependency.
 - Reset entry from EL1 or EL2, EL1h setup, FP/SIMD enablement, `.bss` clearing,
-  bootstrap translation, cache enablement, and linker-owned boot/per-CPU stacks.
+  bootstrap translation, cache enablement, linker-owned boot/per-CPU stacks, and
+  a dense logical processor ID in `TPIDR_EL1` on CPU0 and every selected
+  secondary.
 - Full EL1 vector veneers and typed 832-byte exception frames preserving general
   registers, FP/SIMD state, ELR/SPSR/ESR/FAR, `SP_EL0`, and `TPIDR_EL0` before
   bounded dispatch in Swift.
 - Device-tree discovery of memory, reservations, CPUs, PL011, `fw_cfg`, PSCI,
-  GIC, and VirtIO-MMIO resources, including multiple `reg` tuples, disabled-
-  node filtering, DMA-coherency presence, and the range translation required by
-  the current board fixtures.
-- Device-tree-selected GICv3 initialization on QEMU, physical timer PPI delivery,
-  acknowledgement/end-of-interrupt, rearming, and repeated IRQ evidence. A
-  GICv2 implementation is linked for the Pi board contract, but has not been
-  exercised on physical Pi hardware.
+  GIC, and VirtIO-MMIO resources, including multiple `reg` and `ranges` tuples,
+  disabled-node filtering, DMA-coherency presence, inherited or explicit
+  `interrupt-parent`, and controller-declared `#interrupt-cells`. Malformed,
+  ambiguous, or unsupported interrupt domains fail closed.
+- The `arm,armv8-timer` node's second tuple selects the non-secure EL1 physical
+  timer route; the removable Pi SDHCI record retains its independently resolved
+  GIC SPI. No board path supplies a hard-coded timer or SD architectural INTID.
+- Device-tree-selected GICv3 and GICv2 initialization on QEMU, with distributor-
+  global setup separated from processor-local redistributor or banked GICC/PPI
+  setup. Each participating CPU owns its timer, hook, counters, and fatal
+  diagnostics; physical timer delivery, acknowledgement/end-of-interrupt,
+  rearming, and repeated per-CPU IRQ evidence are exercised on both controller
+  versions. The BCM2712 GICv2 path remains unexercised on physical Pi hardware.
 - Range-based physical-memory ownership derived from all discovered RAM banks,
   minus firmware reservation-map entries, `/reserved-memory`, the DTB, kernel,
   and final-table pool. A live fixed-capacity classified allocator owns the
@@ -35,12 +43,21 @@ unless a guest implementation and a repeatable test sit behind it.
   EL0 stacks. The kernel switches from the bootstrap table to this final root.
 - DT-selected PSCI `CPU_ON`, using HVC in the direct-EL1 QEMU configuration and
   SMC in the virtualization/EL2 configuration, brings three secondaries into a
-  dedicated assembly entry and then Swift on distinct stacks. CPU0 verifies
-  release/acquire online publication for all four selected processors.
+  dedicated assembly entry and then Swift on distinct stacks. Each secondary
+  validates that its PSCI context matches `TPIDR_EL1`, initializes only its local
+  interrupt interface, and release-publishes online state.
 - Packed processor descriptions separate affinity, scheduling class,
   capabilities, proximity, and startup eligibility from a validated boot-
   resource configuration. In addition to the four Cortex-A72 proofs, a
-  two-Cortex-A76 QEMU path reaches the same isolated EL0 preemption milestone.
+  two-Cortex-A76 QEMU path reaches the same bounded secondary-work and isolated
+  EL0 milestones; an eight-CPU QEMU tree proves that policy still manages only
+  the first four processors.
+- Two fixed work slots are statically affinity-pinned to every selected
+  secondary. A processor-local physical-timer hook publishes one tick per
+  acknowledged IRQ, and the worker executes exactly one bounded Swift quantum
+  per observed tick. CPU0 accepts completion only after checking both task IDs
+  and deterministic checksums, more than one quantum per task, the unique owned
+  secondary stack, and a timer IRQ count at least as large as the total quanta.
 - A separately compiled and linked Embedded Swift user image. It executes at
   EL0 with a high virtual alias and two isolated guarded stacks, reports through
   a deliberately narrow SVC ABI, and contains no kernel object dependency.
@@ -97,9 +114,10 @@ unless a guest implementation and a repeatable test sit behind it.
   synchronous canonical-event dispatcher keeps transport decoding separate
   from this UI policy.
 
-The QEMU SMP proof means that four processors reached Swift kernel code. It does
-not mean user work is balanced across them: the three secondary CPUs publish
-online state and park, while both preempted EL0 threads remain pinned to CPU0.
+The QEMU SMP proof now includes real, timer-gated Swift kernel computation on
+each managed secondary, not merely online flags. It remains a bounded boot proof:
+there is no dynamic kernel-thread admission, cross-CPU preemption, migration, or
+load balancing, and both preempted EL0 threads remain pinned to CPU0.
 
 ## Implemented QEMU GPU execution path
 
@@ -183,9 +201,10 @@ VirGL pixel or interactive-desktop evidence.
 ## Operating modes
 
 `make run` uses four CPUs by default and proceeds through memory activation,
-timer IRQ proof, PSCI startup, and the EL0 preemption proof. It attempts the
-production VirGL route first and, when no compatible device is present, marks
-and publishes the explicit ramfb diagnostic before entering user scheduling.
+CPU0 timer IRQ proof, PSCI startup, per-secondary timer-gated work evidence, and
+the CPU0-pinned EL0 preemption proof. It attempts the production VirGL route
+first and, when no compatible device is present, marks and publishes the
+explicit ramfb diagnostic before entering user scheduling.
 The polling input runtime is deliberately inactive in this SMP mode until a
 kernel service thread or IRQ-dispatch path exists. There is not yet an EL0
 window system or live SMP graphical-input service. On the compiled accelerated
@@ -237,9 +256,10 @@ claimed, and the installed local QEMU cannot exercise the GL-backed branch.
    handle invariants, SwiftFS format/provider/crash recovery, EL0 file-service
    dispatch, input ABI/queue/HID state machines,
    VirtIO-input queue/configuration/translation, preemptive EL0 scheduling,
-   PSCI topology, and SMP publication/runtime logic;
-3. separate user-image compilation/link inspection and a parser probe against a
-   DTB emitted by the installed QEMU;
+   PSCI topology, interrupt-parent and controller-cell resolution, per-CPU
+   interrupt initialization/state isolation, and bounded SMP work publication;
+3. separate user-image compilation/link inspection and parser probes against
+   GICv3 and four-CPU GICv2 DTBs emitted by the installed QEMU;
 4. static ELF inspection proving AArch64 architecture, the expected entry/link
    contract, and no unresolved symbols;
 5. three ordered EL1 cold boots plus an EL2-to-EL1 boot in single-CPU mode,
@@ -247,14 +267,17 @@ claimed, and the installed local QEMU cannot exercise the GL-backed branch.
 6. interactive single-CPU monitor, exact ramfb rendering, bounded retained
    animation, modern VirtIO-MMIO GPU scanout/update, QMP-to-guest VirtIO
    keyboard/pointer, and persistent VirtIO-block/SwiftFS remount smoke tests;
-7. four-CPU SMP/EL0 boots from both EL1 and EL2, requiring ordered evidence for
-   owned memory, final tables, three online secondaries, both user threads, SVC
-   reporting, context switches, and timer-driven preemption;
+7. four-CPU SMP/EL0 boots on GICv3 and GICv2 from both EL1 and EL2, requiring
+   ordered evidence for owned memory, final tables, three online secondaries,
+   two checked work results per secondary, deterministic checksums, unique
+   stacks, nonzero per-CPU `TIMER_IRQS`, both user threads, SVC reporting,
+   context switches, and CPU0 timer-driven EL0 preemption;
 8. static Raspberry Pi 5 Image inspection, including its standard header,
    physical entry/reset addresses, 4 KiB page flags, BCM2712 high-MMIO bootstrap
    descriptor, architecture, and unresolved-symbol contract;
 9. an alternate two-Cortex-A76 CPU configuration reaching the same secondary-
-   startup and EL0-preemption acceptance markers.
+   work and EL0-preemption markers, plus an eight-CPU topology that proves the
+   current policy cap runs and reports only four managed processors.
 
 `make virtio-gpu-3d-acceptance` is a separate strict gate for a host with a
 GL-backed `virtio-gpu-gl-device`. It requires mounted SwiftFS plus ordered
@@ -326,8 +349,9 @@ GPU text support. None of this path has executed on physical Pi hardware yet.
 
 ## Not implemented yet
 
-- scheduling user or general kernel work across CPUs other than CPU0, per-CPU
-  interrupt/timer scheduling, migration, load balancing, and scheduler locking;
+- scheduling EL0 or dynamically admitted general kernel threads across CPUs
+  other than CPU0, cross-CPU preemption, migration, load balancing, and the
+  broader scheduler locking/ownership rules those operations require;
 - an executable loader, process creation/destruction, demand paging, copy-on-
   write, signals, or a stable user system library and syscall ABI;
 - filesystem growth beyond the bounded whole-snapshot SwiftFS design, EL0
@@ -357,8 +381,10 @@ bootstrap infrastructure, not an EL0 compositor service or user desktop.
 checkout, `make rpi5-package` creates the boot-partition file set and hashes.
 Packaging also runs the parser against that checkout's real Pi 5 DTB and requires
 UART10 at `0x107d001000`, the GICv2 distributor/CPU-interface resources, PSCI
-`smc`, four affinities, and the ATF reservation. These gates prove an artifact
-and unpatched source-DTB contract. The package carries the official pinned
+`smc`, four affinities, the ATF reservation, the non-secure physical timer's
+PPI-14/INTID-30 route and four-interface mask, and the removable SDHCI
+SPI-`0x111`/INTID-`0x131` route. These gates prove an artifact and unpatched
+source-DTB contract. The package carries the official pinned
 `dwc2.dtbo`, applies it in peripheral mode, and records its hash. Platform
 discovery host-tests the translated DWC2 MMIO resource and keeps QEMU free of
 that Pi-only contract. The kernel retains the DWC2 and mailbox mappings, powers
@@ -384,7 +410,7 @@ independently needs native V3D VII command submission and address translation
 plus HVS, vblank, HDMI, HPD/DDC/EDID, clock, PHY, and GPU font paths behind the
 same contracts; simplefb remains only a bring-up diagnostic. Pi USB-host input,
 richer filesystem policy, entropy, and broader networking remain parallel work.
-The proof
-scheduler still needs per-CPU state and interrupt interfaces, runnable work on
-secondaries, a broader versioned syscall ABI, and executable loading before the
-renderer can become a user-facing compositor.
+The bounded secondary-work proof must grow into dynamically admitted and
+preemptible kernel work, EL0 distribution, migration, and load balancing. A
+broader versioned syscall ABI and executable loading are also required before
+the renderer can become a user-facing compositor.

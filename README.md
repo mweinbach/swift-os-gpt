@@ -49,13 +49,18 @@ veneers and privileged instructions Swift cannot emit.
 
 The verified QEMU path now includes:
 
-1. full EL1 exception frames, device-tree-selected GICv3 delivery, and repeating
-   architectural timer interrupts;
+1. full EL1 exception frames; inherited or explicit Device Tree interrupt-parent
+   resolution using each controller's `#interrupt-cells`; and DT-selected GICv3
+   or GICv2 delivery of the non-secure EL1 physical-timer tuple, with global
+   distributor setup separated from each processor's local PPI/interface setup;
 2. range-based RAM ownership with firmware/kernel/DTB/table reservations, a
    live fixed-capacity classified allocator for distinct memory domains,
    final permissioned page tables, and unmapped stack guards;
-3. bounded processor descriptions and startup configurations, with four
-   Cortex-A72 QEMU CPUs or two Cortex-A76 CPUs entering the same Swift path;
+3. bounded processor descriptions and startup configurations, with dense
+   `TPIDR_EL1` logical IDs and four Cortex-A72 QEMU CPUs or two Cortex-A76 CPUs
+   entering the same Swift path. Each selected secondary completes two affinity-
+   pinned bounded Swift kernel-work slots, one quantum per local physical-timer
+   IRQ, before publishing task/checksum, unique-stack, and timer-count evidence;
 4. a separately linked Embedded Swift EL0 image, two isolated user stacks, a
    narrow SVC report ABI, and two CPU0-pinned threads preempted by timer IRQs;
 5. a backend-independent diagnostic software surface presented through QEMU
@@ -114,7 +119,8 @@ support remains discovery, mapping, and roadmap work.
 
 This is not yet a general-purpose OS. The next layers include accelerated QEMU
 pixel evidence, richer GPU primitives and font loading, a native Pi
-V3D/HVS/HDMI path, multicore task scheduling, an executable loader, broader
+V3D/HVS/HDMI path, general multicore scheduling with EL0 distribution,
+preemption, migration, and load balancing, an executable loader, broader
 filesystem mutation and credential policy, Pi USB-host input, a user-facing
 surface/window protocol, networking, and a stable system library and syscall
 ABI.
@@ -155,9 +161,14 @@ make test
 ```
 
 `make run` boots four CPUs by default and follows the verified SMP/EL0 path after
-publishing the QEMU ramfb display. Use `QEMU_CPUS=1 make run` for the interactive
-EL1 kernel monitor; type monitor commands in the terminal that launched QEMU,
-and PL011 input updates both serial output and the guest terminal window.
+publishing the QEMU ramfb display. Before CPU0 enters the two-thread EL0 proof,
+each secondary initializes its local interrupt state and completes two bounded
+Swift work slots paced by that CPU's physical-timer IRQs. `make smp-el0-smoke`
+exercises both GICv3 and GICv2 from EL1 and EL2; `make cpu-config-smoke` adds a
+two-core Cortex-A76 configuration and proves that an eight-CPU DT is deliberately
+capped at four managed CPUs. Use `QEMU_CPUS=1 make run` for the interactive EL1
+kernel monitor; type monitor commands in the terminal that launched QEMU, and
+PL011 input updates both serial output and the guest terminal window.
 `make virtio-gpu-smoke` removes ramfb and proves the same surface plus a later
 monitor update through a modern VirtIO-MMIO GPU scanout. This is a real guest
 2D display driver against QEMU's device model, but the pixels in this smoke are
@@ -208,8 +219,10 @@ RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware make rpi5-package
 `rpi5-inspect` validates the Image header, link addresses, BCM2712 high-MMIO
 bootstrap descriptor, architecture, and unresolved-symbol contract. Packaging
 first probes the pinned firmware DTB for the exact UART10, GICv2, PSCI, CPU,
-ATF-reservation, removable SDHCI, and RP1 GEM resource contracts, then adds it
-and the official `dwc2.dtbo` from that same revision with byte hashes. It also
+ATF-reservation, removable SDHCI, and RP1 GEM resource contracts. The same probe
+requires the timer's non-secure physical PPI and the removable SD controller's
+SPI to resolve through their inherited or explicit interrupt parent before it
+adds the DTB and official `dwc2.dtbo` from that revision with byte hashes. It also
 produces a sparse MBR media image with
 a populated FAT32 boot partition and a signed type-0xda data partition. Set
 `RPI5_MEDIA_BLOCK_COUNT` to the exact target-card block count when the data
@@ -294,8 +307,14 @@ quads—including four shader-antialiased rounded layers—and seven GPU-sampled
 `SWIFTOS` glyphs. The CPU uploads immutable geometry and R8 coverage data, not
 color or scanout pixels. The local QEMU build cannot hardware-exercise that
 accelerated route.
-The scheduler currently runs both user threads only on CPU0; secondary CPUs
-publish online state and park. QEMU now mounts a concrete crash-consistent
+The scheduler still runs both user threads only on CPU0. Each selected secondary
+now publishes local GIC readiness, runs exactly two affinity-pinned bounded Swift
+kernel-work slots one quantum per processor-local timer IRQ, and then parks.
+CPU0 accepts `SWIFTOS:SMP_WORK_OK` only after checking deterministic task
+checksums, each worker's owned unique stack, and a per-CPU timer IRQ count large
+enough to cover its quanta. This is a concrete multicore execution proof, not
+general kernel-thread admission, preemption, migration, or load balancing. QEMU
+now mounts a concrete crash-consistent
 SwiftFS provider at `/Users` over VirtIO block. Its checked EL0 file service
 implements `open`, `read`, `write`, `stat`, `readdir`, and `close`; host tests
 cover the complete operation surface, while the multi-boot smoke proves live
@@ -309,7 +328,8 @@ motion, and left-button transitions after guest DMA decoding. This polling path
 does not run in the default SMP/EL0 mode yet and is not Raspberry Pi input.
 The board-neutral block, MBR, signed data-volume, bounded persistent-log, and
 SwiftFS formats are host-tested. The Pi target now retains its removable,
-DT-discovered BCM2712 SDHCI controller in allocator-owned stable memory,
+DT-discovered BCM2712 SDHCI controller in allocator-owned stable memory and
+retains its resolved GIC SPI route rather than assuming a board interrupt ID,
 derives disjoint kernel-log and user-filesystem ranges from the signed `0xda`
 layout, and can publish the same SwiftFS provider seam used by QEMU. The log
 service and filesystem share one serialized SD owner; raw blocks are never
@@ -317,7 +337,11 @@ exposed to EL0. Each initialized retained ring starts with a structured `BOOT`
 epoch, and the read-only media inspector distinguishes an unused arena from a
 complete console capture. This Pi PIO/SwiftFS path remains
 physical-hardware-unverified.
-Physical Raspberry Pi 5 execution remains unverified. The Pi path currently
+Physical Raspberry Pi 5 execution remains unverified. Static parsing of the
+pinned Pi DTB now confirms the non-secure physical timer as GIC PPI 14
+(architectural INTID 30) with a four-interface GICv2 mask, plus the removable
+SDHCI route as SPI `0x111` (architectural INTID `0x131`); none of those routes
+has delivered an interrupt on a Pi. The Pi path currently
 consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
 modesetting or V3D VII rendering. It can also export that completed diagnostic
 surface, or a headless kernel-owned surface, over its USB-C device controller to

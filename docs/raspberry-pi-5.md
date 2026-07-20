@@ -251,6 +251,12 @@ signature, bounds, or transport failure drops the relevant write authority and
 lets Ethernet troubleshooting continue. The published Pi provider has the same
 board-neutral identity and seam as the QEMU VirtIO-backed provider.
 
+Discovery now resolves and retains that controller's level-high GIC SPI
+`0x111` (architectural INTID `0x131`) through its actual interrupt parent. The
+current SDHCI transport remains synchronous and polled; retaining the validated
+route is groundwork for an asynchronous driver, not a claim that SD IRQ delivery
+has executed.
+
 These are source, host-policy, and link guarantees only. No block has been
 transferred, no log has been recovered, and no SwiftFS provider has mounted on a
 physical Pi. QEMU now has its own native VirtIO-block/SwiftFS path and multi-boot
@@ -304,24 +310,27 @@ Board bring-up must accept the patched tree as authority and check the root
 compatible strings for `raspberrypi,5-model-b` and `brcm,bcm2712` before using
 any Pi 5 emergency fallback.
 
-The required parser work is broader than finding nodes by name:
+The parser does more than find nodes by name. It currently:
 
-1. Read inherited `#address-cells`, `#size-cells`, and `interrupt-parent` values.
-2. Resolve `/aliases` and `/chosen/stdout-path`.
-3. Translate each `reg` tuple through every parent `ranges` mapping, including
-   the nested BCM2712 and PCI/RP1 buses.
-4. Ignore disabled nodes and bind by `compatible`, not by unit-address spelling.
-5. Preserve 64-bit physical addresses throughout discovery and mapping.
+1. reads inherited `#address-cells`, `#size-cells`, and explicit or inherited
+   `interrupt-parent` values;
+2. translates each selected `reg` tuple through every parent `ranges` level,
+   searches every tuple in a multi-window bus, and rejects ambiguous matches;
+3. ignores unavailable nodes and ancestors and binds by `compatible` rather
+   than unit-address spelling;
+4. resolves a unique interrupt-controller phandle, uses that controller's
+   `#interrupt-cells` to count tuples, and decodes supported GIC SPI/PPI routes;
+   and
+5. preserves 64-bit physical addresses throughout discovery and mapping.
 
-The current parser handles enabled-node filtering, compatibility and device-type
-matching, multi-tuple `reg`, memory/reservation enumeration, CPU affinities, and
-recursive translation using the first `ranges` tuple on each traversed bus. The
-package gate probes the actual pinned Pi DTB and requires translated UART10 at
-`0x107d001000`, GICD at `0x107fff9000`, GICC at `0x107fffa000`, PSCI `smc`, four
-affinities, and the ATF reservation. It does not yet resolve `/aliases` plus
-`/chosen/stdout-path`, support every tuple in a multi-window bus, or decode the
-complete interrupt-parent/specifier graph. That parser proof is not hardware
-execution.
+The package gate probes the actual pinned Pi DTB and requires translated UART10
+at `0x107d001000`, GICD at `0x107fff9000`, GICC at `0x107fffa000`, PSCI `smc`,
+four affinities, and the ATF reservation. It also resolves the timer's second
+tuple as non-secure physical PPI 14/architectural INTID 30 with a GICv2 processor
+mask of `0x0f`, and the removable SDHCI interrupt as SPI `0x111`/architectural
+INTID `0x131`. Unsupported interrupt nexuses and `interrupts-extended` fail
+closed; `/aliases` plus `/chosen/stdout-path` resolution remains future work.
+That parser proof is not hardware execution.
 
 ## Eight-gigabyte memory ownership
 
@@ -426,19 +435,27 @@ bounds, but no physical Pi has passed this sequence yet.
 
 BCM2712's DT describes an `arm,gic-400` GICv2, while the QEMU reference board
 uses GICv3. Platform discovery now selects the controller by `compatible` and
-constructs the matching Swift driver from discovered `reg` resources. Repeating
-architectural physical-timer PPI delivery, acknowledgement, EOI, and rearming
-are proven on QEMU GICv3.
+constructs the matching Swift driver from discovered `reg` resources. The
+parser now resolves the timer node's inherited or explicit interrupt parent,
+uses the selected controller's `#interrupt-cells`, and selects tuple 1 from the
+`arm,armv8-timer` binding. In the pinned Pi DTB this is a level-low GIC PPI 14,
+architectural INTID 30, with processor mask `0x0f`; the kernel requires that
+mask to cover every one of its four managed processors.
 
-The Pi GICv2 path is linked but hardware-unverified. The current timer contract
-uses architectural PPI 30; complete Pi validation still requires decoding the
-timer interrupt tuple through its resolved interrupt parent, checking `CNTFRQ`,
-and proving repeating delivery through the real distributor and CPU interface.
-While that validation is pending, Pi display boots prove up to three timer IRQs
-for one counter-bounded second while servicing polled USB and deferred board
-work. Success retains the QEMU marker sequence; timeout emits the non-panic
-`SWIFTOS:TIMER_DEFERRED`, stops the timer, and enters the live monitor. QEMU's
-smoke proof remains strict and fail-stop.
+GIC initialization is split into one CPU0 distributor operation and one local
+operation per processor. The Pi target therefore programs each core's banked
+GICv2 PPI state and GICC interface independently and keeps timer state, hooks,
+counters, and fatal diagnostics per dense `TPIDR_EL1` ID. The same shared code
+is boot-tested on QEMU GICv2 and GICv3 from both EL1 and EL2, including repeating
+secondary-local physical-timer delivery, acknowledgement, EOI, and rearming.
+That is QEMU evidence, not BCM2712 evidence.
+
+The Pi GICv2 path remains hardware-unverified. A successful physical SMP pass
+must prove the secondary timer-driven work described below. If Pi SMP bring-up
+fails, `SWIFTOS:SMP_DEFERRED` preserves later display/USB diagnosis instead of
+manufacturing success. The separate Pi CPU0 timer observation path may emit
+`SWIFTOS:TIMER_DEFERRED`, stop its timer, and enter the monitor after its bounded
+window; QEMU's corresponding smoke proof remains strict and fail-stop.
 Reusing QEMU addresses or treating the linked GICv2 path as executed evidence
 would be an invalid support claim.
 
@@ -455,21 +472,28 @@ contract is:
    distinct aligned stack are ready.
 4. Invoke the standard PSCI `CPU_ON` call through `smc` for each target affinity,
    passing a SwiftOS-owned physical secondary-entry address and context value.
-5. At secondary entry, establish the same translation/coherency regime and a
-   unique stack, enter Swift, then publish an online flag with release semantics.
-6. Time out and report each failed PSCI return; never silently reduce the CPU
+5. At secondary entry, establish the same translation/coherency regime, install
+   the dense PSCI context in `TPIDR_EL1`, acquire a unique stack, enter Swift,
+   validate that ID, and initialize the calling core's local GICv2/timer state.
+6. Publish online state, consume two prepublished affinity-pinned Swift work
+   slots one bounded quantum per local physical-timer IRQ, then disable the timer
+   and release-publish results before parking.
+7. Time out and report each failed PSCI return; never silently reduce the CPU
    count or assume spin-table release addresses.
 
 The CPU topology now carries packed processor class, capability, proximity, and
 startup-eligibility metadata separately from a validated boot-resource limit.
 This path is proven in QEMU through the DT-selected HVC conduit for direct EL1
-entry and SMC conduit for the virtualization/EL2 scenario: CPU1-CPU3 enter Swift,
-publish independently, and then park. The Pi SMC path and Pi affinity values are
-present in the artifact but have not run on a Pi. A second QEMU smoke uses two
-Cortex-A76 CPUs to prove a smaller configuration, but it does not reproduce
-BCM2712 firmware or topology. There is no per-secondary GIC/timer scheduling
-yet, and both preempted EL0 threads remain pinned to CPU0; four online CPUs is
-not a multicore scheduler.
+entry and SMC conduit for the virtualization/EL2 scenario, using both GICv3 and
+GICv2. CPU0 accepts each secondary only after its two task IDs and deterministic
+checksums, unique owned stack, and `SWIFTOS:SMP_CPU{n}_TIMER_IRQS` count validate;
+then `SWIFTOS:SMP_WORK_OK` precedes `SWIFTOS:SMP_OK`. A second QEMU smoke uses two
+Cortex-A76 CPUs, and an eight-CPU smoke proves the current four-processor policy
+cap. Neither reproduces BCM2712 firmware or topology. The Pi SMC path, GICv2
+route, and Pi affinity values are present in the artifact but have not run on a
+Pi. Both preempted EL0 threads remain pinned to CPU0; the fixed secondary work
+does not provide general kernel-thread admission, preemption, migration, or load
+balancing.
 
 ## Display and GPU boundary
 
@@ -560,13 +584,33 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 - Cold-boot firmware log names and hashes the expected kernel and DTB.
 - `_start` validates the DTB passed in `x0` before using any discovered address.
 - The log records `x0`, the full DTB span, every discovered memory/reservation
-  interval, actual secondary MPIDRs and stack addresses, and repeated IRQ counts.
+  interval, actual secondary MPIDRs, dense `TPIDR_EL1` IDs, stack addresses,
+  `CNTFRQ_EL0`, and repeated IRQ counts.
 - UART10 prints stable stage markers before and after enabling the 4 KiB MMU.
 - The parsed memory report accounts for every byte as usable, reserved, or owned,
   including all RAM above 4 GiB, with no overlap or arithmetic truncation.
-- GICv2 distributor/CPU interface discovery and a repeating architectural-timer
-  interrupt pass acknowledgement/EOI tests without an exception loop.
-- PSCI brings all four cores online with unique stacks and per-CPU identifiers.
+- The firmware-patched tree resolves the non-secure physical timer as level-low
+  PPI 14/INTID 30 with processor mask `0x0f`, and the removable SDHCI route as
+  level-high SPI `0x111`/INTID `0x131`; the retained log records those decoded
+  values before either driver uses them.
+- GICv2 distributor/CPU-interface discovery, one global distributor setup, and
+  four processor-local PPI/GICC initializations pass repeating architectural-
+  timer acknowledgement/EOI tests without an exception loop.
+- PSCI brings all four cores online with unique stacks and dense per-CPU IDs.
+  For each `n` in 1, 2, and 3, retain ordered
+  `SWIFTOS:SMP_CPU{n}_ONLINE`, `SWIFTOS:SMP_CPU{n}_TASK1_OK`,
+  `SWIFTOS:SMP_CPU{n}_TASK1_CHECKSUM=0x...`,
+  `SWIFTOS:SMP_CPU{n}_TASK2_OK`,
+  `SWIFTOS:SMP_CPU{n}_TASK2_CHECKSUM=0x...`,
+  `SWIFTOS:SMP_CPU{n}_STACK=0x...`, and
+  `SWIFTOS:SMP_CPU{n}_TIMER_IRQS=0x...` markers. `SWIFTOS:SMP_WORK_OK` must then
+  precede `SWIFTOS:SMP_OK`; those markers are emitted only after the kernel
+  validates both results, stack ownership/uniqueness, and enough local timer
+  IRQs for all work quanta.
+- CPU0 subsequently reaches `SWIFTOS:SCHEDULER_READY`, `SWIFTOS:EL0_OK`,
+  `SWIFTOS:THREADS_OK`, `SWIFTOS:PREEMPT_OK`, and
+  `SWIFTOS:EL0_PREEMPTION_PROVEN` in order. This remains a CPU0-pinned user
+  proof; no EL0 task migration may be inferred from the secondary-work markers.
 - Allocator stress crosses the 4 GiB boundary without corrupting the DTB, image,
   page tables, DMA buffers, or reserved regions.
 - The runtime-patched framebuffer remains reserved and mapped, and the serial
