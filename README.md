@@ -61,8 +61,13 @@ The verified QEMU path now includes:
    entering the same Swift path. Each selected secondary completes two affinity-
    pinned bounded Swift kernel-work slots, one quantum per local physical-timer
    IRQ, before publishing task/checksum, unique-stack, and timer-count evidence;
-4. a separately linked Embedded Swift EL0 image, two isolated user stacks, a
-   narrow SVC report ABI, and two CPU0-pinned threads preempted by timer IRQs;
+4. a separately linked Embedded Swift EL0 image in one shared immutable address-
+   space layout, five guarded user stacks and five complete saved context frames,
+   and a narrow SVC report ABI. One IRQ-safe locked global run queue supports
+   up to four managed CPUs and starts `processorCount + 1` fixed threads (at
+   most five);
+   processor-local timer IRQs preempt them, and lease-attributed SVC reports
+   prove that complete userspace contexts really migrate between CPUs;
 5. a backend-independent diagnostic software surface presented through QEMU
    ramfb or a native Swift modern VirtIO-MMIO GPU 2D driver, a centered
    integer-scaled logical desktop for arbitrary scanout sizes, and a retained
@@ -119,11 +124,11 @@ support remains discovery, mapping, and roadmap work.
 
 This is not yet a general-purpose OS. The next layers include accelerated QEMU
 pixel evidence, richer GPU primitives and font loading, a native Pi
-V3D/HVS/HDMI path, general multicore scheduling with EL0 distribution,
-preemption, migration, and load balancing, an executable loader, broader
-filesystem mutation and credential policy, Pi USB-host input, a user-facing
-surface/window protocol, networking, and a stable system library and syscall
-ABI.
+V3D/HVS/HDMI path, dynamic process/thread admission, independent process address
+spaces and process migration, general kernel preemption and load balancing, an
+executable loader, broader filesystem mutation and credential policy, Pi USB-
+host input, a user-facing surface/window protocol, networking, and a stable
+system library and syscall ABI.
 
 See [Architecture](docs/architecture.md), [Renderer foundation](docs/renderer.md),
 [Files and input](docs/files-and-input.md), and
@@ -161,12 +166,14 @@ make test
 ```
 
 `make run` boots four CPUs by default and follows the verified SMP/EL0 path after
-publishing the QEMU ramfb display. Before CPU0 enters the two-thread EL0 proof,
-each secondary initializes its local interrupt state and completes two bounded
-Swift work slots paced by that CPU's physical-timer IRQs. `make smp-el0-smoke`
+publishing the QEMU ramfb display. Before CPU0 publishes the shared EL0 scheduler,
+each secondary initializes its local interrupt state and completes two bounded,
+affinity-pinned Swift work slots paced by that CPU's physical-timer IRQs. All
+managed CPUs then enter the fixed migratable userspace pool. `make smp-el0-smoke`
 exercises both GICv3 and GICv2 from EL1 and EL2; `make cpu-config-smoke` adds a
-two-core Cortex-A76 configuration and proves that an eight-CPU DT is deliberately
-capped at four managed CPUs. Use `QEMU_CPUS=1 make run` for the interactive EL1
+two-core Cortex-A76 configuration and, on both controller versions, proves that
+an eight-CPU DT is deliberately capped at four managed CPUs. Use
+`QEMU_CPUS=1 make run` for the interactive EL1
 kernel monitor; type monitor commands in the terminal that launched QEMU, and
 PL011 input updates both serial output and the guest terminal window.
 `make virtio-gpu-smoke` removes ramfb and proves the same surface plus a later
@@ -239,6 +246,11 @@ display stream. It can mirror a firmware framebuffer or use a kernel-owned
 `make usb-display-viewer` and `.build/swiftos-usb-display`; see the
 [USB display viewer](tools/USBDisplay/README.md).
 
+The Pi scheduler handoff accepts only the exact processor count returned by
+`KernelSMP` after every selected secondary has both published online and
+completed its bounded work proof. A failed Pi bring-up leaves that result absent;
+the later launch path never substitutes the raw Device Tree CPU count.
+
 On Pi 5, the USB-C OTG connector must be reserved for the data connection and
 the board powered separately through a supported path. The USB-A connectors
 belong to the RP1 host controller and cannot be used as gadget ports. This
@@ -286,8 +298,12 @@ SHA-256 and CRC32, and the Pi Image header before it acknowledges COMMIT. It
 then chainloads only when the complete 32 MiB destination was reserved at boot,
 the current CPU is Pi CPU0, parked managed secondaries enter PSCI CPU_OFF,
 firmware reports every other described CPU OFF, and bounded USB plus interrupt
-shutdown succeeds. Future busy secondary workloads must service the same
-restart checkpoint from a bounded scheduler or interrupt path. See the
+shutdown succeeds. The shared EL0 scheduler's processor-local timer path also
+services this restart request. A busy secondary saves its complete live EL0
+frame and relinquishes its queue lease under the scheduler lock, drops the lock,
+and only then attempts PSCI CPU_OFF. A successful power-off therefore leaves no
+stale running owner. If firmware returns instead, the CPU safely leases a ready
+context and rearms its local timer before returning to EL0. See the
 [USB kernel updater](tools/USBUpdate/README.md). This is a volatile development
 update: a power cycle loads the microSD image again, and integrity hashes do not
 authenticate the connected host. COMMITTED confirms sealed staging, not the
@@ -307,13 +323,20 @@ quads—including four shader-antialiased rounded layers—and seven GPU-sampled
 `SWIFTOS` glyphs. The CPU uploads immutable geometry and R8 coverage data, not
 color or scanout pixels. The local QEMU build cannot hardware-exercise that
 accelerated route.
-The scheduler still runs both user threads only on CPU0. Each selected secondary
-now publishes local GIC readiness, runs exactly two affinity-pinned bounded Swift
-kernel-work slots one quantum per processor-local timer IRQ, and then parks.
-CPU0 accepts `SWIFTOS:SMP_WORK_OK` only after checking deterministic task
-checksums, each worker's owned unique stack, and a per-CPU timer IRQ count large
-enough to cover its quanta. This is a concrete multicore execution proof, not
-general kernel-thread admission, preemption, migration, or load balancing. QEMU
+The scheduler now runs `processorCount + 1` fixed EL0 threads across the verified
+two- and four-CPU QEMU configurations through one IRQ-safe locked global run
+queue, with fixed capacity for up to four managed CPUs. Every managed CPU has
+its own exception hooks and physical timer, while an exclusive queue lease keeps
+one saved context from running on two CPUs at once. `SWIFTOS:EL0_MIGRATION_PROVEN`
+is emitted only after all active threads report, timer preemption is established,
+and at least one thread reaches the report SVC under leases attributed to more
+than one CPU. The preceding secondary-work proof remains distinct: each selected
+secondary first runs exactly two affinity-pinned bounded Swift kernel-work slots,
+one quantum per processor-local timer IRQ, and CPU0 validates their checksums,
+owned stacks, and timer counts before publishing the shared EL0 scheduler. This
+is real cross-core userspace scheduling and context migration, but it is not
+dynamic thread admission, independent process address spaces or process
+migration, general kernel preemption, or load balancing. QEMU
 now mounts a concrete crash-consistent
 SwiftFS provider at `/Users` over VirtIO block. Its checked EL0 file service
 implements `open`, `read`, `write`, `stat`, `readdir`, and `close`; host tests

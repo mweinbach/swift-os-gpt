@@ -55,8 +55,17 @@ vectors, and calls Swift. An EL2 secondary handoff mirrors the boot CPU's
 generic-timer access and implemented GIC system-register permission before
 dropping to EL1. Swift validates the dense ID against the PSCI context,
 initializes processor-local GIC and timer state, publishes online state,
-completes its fixed bounded work, and then parks. CPU0 acquire-loads the online
-and completion publications before reporting the QEMU proof.
+and completes its fixed bounded work. CPU0 acquire-loads the online and
+completion publications before reporting that boot-time proof. On the verified
+QEMU SMP path, each secondary then waits for CPU0 to release-publish the shared
+EL0 scheduler, installs its processor-local exception hooks, leases one user
+context, and enters EL0 rather than parking.
+
+`KernelSMP.start` returns a processor count only after every selected secondary
+is proven online and its bounded work evidence is complete. The Pi handoff
+retains and consumes exactly that result. If physical bring-up returns no proof,
+the later launch path does not reconstruct a count from the raw Device Tree and
+cannot publish nonexistent processors into the EL0 scheduler.
 
 ## Memory ownership and translation
 
@@ -98,15 +107,17 @@ The kernel builds a 39-bit, 4 KiB-granule final address space and switches
 - kernel and DTB read-only data: privileged read-only, non-executable;
 - kernel mutable/linker storage: privileged read/write, non-executable;
 - EL0 text/read-only data: user-readable with execution only on text;
-- two EL0 stacks: user read/write and non-executable;
+- five EL0 stacks: user read/write and non-executable;
 - discovered UART, GIC, QEMU firmware, and VirtIO-MMIO resources: Device
   memory; and
 - sanitized free RAM: privileged direct-map memory.
 
 Guard descriptors remain unmapped beneath the boot stack, each of the three
-secondary stacks, and each of the two user stacks. The host integration tests
-walk the generated tables to verify mappings, permissions, reservations, and
-guards rather than accepting only a successful build.
+secondary stacks, and each of the five user stacks. Five complete saved EL0
+exception frames and a separate launch scratch frame are also linker-owned. The
+host integration tests walk the generated tables to verify mappings,
+permissions, reservations, and guards rather than accepting only a successful
+build.
 
 ## Exceptions, interrupts, and timer
 
@@ -133,11 +144,22 @@ proves repeating physical-timer acknowledgement, EOI, and rearming on GICv3 and
 GICv2, including secondary-local delivery; the BCM2712 execution path remains
 physical-hardware-unverified.
 
-The CPU0 preemptive proof deliberately schedules only user-mode arrivals. A
-timer arriving while CPU0 is in EL1 is rearmed without kernel preemption. Each
-secondary's timer hook only publishes a tick; mainline Swift scheduler policy
-consumes one tick for one bounded kernel-work quantum. This does not implement
-arbitrary interrupt-time scheduling or kernel preemption.
+The preemptive EL0 path deliberately schedules only user-mode arrivals. A timer
+arriving while any processor is in EL1 is rearmed without kernel preemption.
+During the earlier boot-work phase, each secondary's timer hook only publishes a
+tick and mainline Swift scheduler policy consumes one tick for one bounded
+kernel-work quantum. After the EL0 handoff, every managed processor installs its
+own timer and synchronous-exception hooks; a lower-EL timer IRQ saves and rotates
+the current user context through the shared scheduler. The dispatcher rearms the
+timer and publishes its count, ends the exact controller token, and only then
+invokes timer policy; a no-return CPU_OFF therefore cannot strand an active PPI.
+A secondary services a pending kernel-restart request in this post-EOI timer
+hook. It first saves
+the complete live frame and relinquishes its queue lease under the scheduler
+lock, releases that lock, and then enters the PSCI CPU_OFF checkpoint. If
+firmware returns, the CPU leases a ready context and rearms its local timer
+before exception return; a CPU that powers off leaves no stale running owner.
+This does not implement arbitrary kernel preemption.
 
 ## SMP and scheduling
 
@@ -150,8 +172,9 @@ CPU from all MPIDR affinity fields, selects at most four processors, and records
 each `CPU_ON` result. The direct-EL1 QEMU DT selects HVC, while the
 virtualization/EL2 QEMU DT and Pi board contract select SMC. QEMU exercises
 four-core GICv3 and GICv2 configurations from both EL1 and EL2. A separate
-two-core Cortex-A76 smoke proves the smaller topology, and an eight-CPU smoke
-proves that the kernel deliberately manages only the first four described CPUs.
+two-core Cortex-A76 smoke proves the smaller topology, and eight-described-CPU
+GICv3 and GICv2 smokes prove that the kernel deliberately manages only the first
+four described CPUs.
 
 The secondary-work scheduler is a fixed boot-time execution proof. CPU0 release-
 publishes two affinity-pinned slots per selected secondary before `CPU_ON`.
@@ -163,25 +186,39 @@ checksums, more than one quantum per task, a stack pointer inside that logical
 CPU's unique guarded stack, and a per-CPU timer IRQ count at least as large as
 the total work quanta before it emits `SWIFTOS:SMP_WORK_OK` and `SWIFTOS:SMP_OK`.
 
-The current EL0 scheduler is a separate, intentionally narrow isolation
-milestone:
+The current EL0 scheduler is a separate, intentionally narrow multicore
+isolation milestone:
 
-- one linked user address space and process identifier;
-- two fixed-capacity threads, both pinned to CPU0;
-- one complete saved exception frame per thread;
-- two independent guarded EL0 stacks and thread-pointer values;
-- round-robin switching on physical timer IRQs; and
-- SVC report number 1, used only to prove each identity ran and resumed after a
-  preemption, plus a separately dispatched bounded file-service request used by
-  the first process.
+- one linked process identifier and one shared, immutable address-space layout;
+- `processorCount + 1` fixed threads for one to four managed processors, using
+  two to five of the five linker-owned stack/context slots;
+- one IRQ-state-preserving lock around a global `RunQueue`, with one current-
+  thread slot per processor and exclusive ownership of every running context;
+- all-managed-CPU affinity and round-robin switching on each processor's local
+  physical-timer IRQ; and
+- SVC report number 1, used only to prove each identity ran after preemption and
+  to attribute execution to the queue lease for the reporting CPU, plus a
+  separately dispatched bounded file-service request used by the first process.
 
-Before `eret` to EL0, the kernel scrubs both NOLOAD user-stack regions and the
-entry veneer scrubs registers and FP/SIMD state that must not leak privileged
-context. The proof is complete only after both thread identities report and both
-have resumed following context switches. User threads remain CPU0-pinned. The
-fixed secondary work does not provide dynamic admission, kernel preemption,
-migration, load balancing, or cross-CPU user scheduling, so this is not yet a
-general multicore scheduler, process manager, or stable syscall ABI.
+Before `eret` to EL0, the kernel scrubs all five NOLOAD user-stack regions and
+the entry veneer scrubs registers and FP/SIMD state that must not leak privileged
+context. A user-supplied report identity is accepted only when it matches the
+thread exclusively leased to that processor. Migration is therefore proven by
+the same thread reaching the report SVC under leases on more than one CPU, not
+merely by selecting a stored frame. The smoke emits
+`SWIFTOS:EL0_MIGRATION_PROVEN` only after all configured threads have reported,
+timer-driven preemption is established, and at least one such migration is
+observed.
+
+The earlier affinity-pinned secondary work remains only a fixed boot proof; it
+does not become dynamically admitted or preemptible kernel work. The EL0 pool
+does not provide dynamic thread/process admission, independent address spaces,
+process migration, general kernel preemption, or load balancing, so this is not
+yet a general process manager or stable syscall ABI.
+
+The scheduler data structures accept one to four managed processors. The
+runtime EL0 handoff currently requires a proven SMP count greater than one;
+repeatable QEMU boots exercise two- and four-processor pools.
 
 ## Graphics and monitor model
 
