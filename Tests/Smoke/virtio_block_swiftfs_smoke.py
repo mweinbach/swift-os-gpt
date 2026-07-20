@@ -33,7 +33,7 @@ SECOND_BOOT = [
     b"SWIFTOS:READY",
 ]
 
-EL0_BOOT = [
+EL0_BOOT_PREFIX = [
     b"SWIFTOS:BOOT",
     b"SWIFTOS:VIRTIO_BLOCK_READY",
     b"SWIFTOS:DATA_VOLUME_MOUNTED",
@@ -43,14 +43,21 @@ EL0_BOOT = [
     b"SWIFTOS:SMP_CPU1_ONLINE",
     b"SWIFTOS:READY",
     b"SWIFTOS:SCHEDULER_READY",
+]
+
+EL0_FILE_SEQUENCE = [
     b"SWIFTOS:EL0_SWIFTFS_OPEN_OK",
     b"SWIFTOS:EL0_SWIFTFS_READ_OK",
     b"SWIFTOS:EL0_SWIFTFS_WRITE_OK",
     b"SWIFTOS:EL0_SWIFTFS_CLOSE_OK",
     b"SWIFTOS:EL0_FILE_IO_PROVEN",
+]
+
+EL0_SCHEDULER_SEQUENCE = [
     b"SWIFTOS:EL0_OK",
     b"SWIFTOS:THREADS_OK",
     b"SWIFTOS:EL0_PREEMPTION_PROVEN",
+    b"SWIFTOS:EL0_MIGRATION_PROVEN",
 ]
 
 PERSISTED_WRITE_BOOT = [
@@ -187,9 +194,26 @@ def main() -> int:
                 disk,
                 arguments.timeout,
                 processor_count=2,
-                completion_marker=b"SWIFTOS:EL0_PREEMPTION_PROVEN",
+                completion_marker=b"SWIFTOS:EL0_MIGRATION_PROVEN",
             )
-            validate(el0, EL0_BOOT, "EL0 boot")
+            # Filesystem calls are serialized on one thread while the other
+            # CPU may independently report and start its timer. Preserve each
+            # causal sequence without imposing the old CPU0-only global order.
+            validate(el0, EL0_BOOT_PREFIX, "EL0 boot prefix")
+            validate(el0, EL0_FILE_SEQUENCE, "EL0 filesystem sequence")
+            validate(el0, EL0_SCHEDULER_SEQUENCE, "EL0 scheduler sequence")
+            for processor_id in range(2):
+                for suffix in (b"ONLINE", b"REPORT", b"TIMER_IRQ"):
+                    marker = (
+                        b"SWIFTOS:EL0_CPU"
+                        + str(processor_id).encode("ascii")
+                        + b"_"
+                        + suffix
+                    )
+                    if marker not in el0:
+                        raise AssertionError(
+                            f"EL0 boot missing processor marker {marker!r}"
+                        )
 
             persisted_write = boot(
                 qemu,
@@ -209,7 +233,7 @@ def main() -> int:
     print(
         "VirtIO block/SwiftFS smoke: blank format, durable seed, and "
         "second-boot remount, EL0 read/write, post-write remount, and "
-        "preemption passed"
+        "cross-CPU migration passed"
     )
     return 0
 

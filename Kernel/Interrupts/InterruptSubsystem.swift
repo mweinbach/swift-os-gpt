@@ -333,7 +333,8 @@ enum InterruptSubsystem {
     }
 
     /// Installs one noncapturing callback. It runs once per acknowledged timer
-    /// IRQ after CVAL has been rearmed. The raw pointer addresses one mutable
+    /// IRQ after CVAL has been rearmed, the count published, and the controller
+    /// token ended. The raw pointer addresses one live mutable
     /// `AArch64ExceptionFrame` and may be rebound to replace the whole context.
     @discardableResult
     static func setTimerInterruptHook(_ hook: TimerInterruptHook?) -> Bool {
@@ -449,18 +450,22 @@ enum InterruptSubsystem {
         var acknowledgementCount = 0
         while acknowledgementCount < maximumAcknowledgementsPerEntry,
               let token = controller.acknowledge() {
+            var timerHook: TimerInterruptHook?
             if token.interruptID == controller.timerInterruptID {
                 // Rearm and update the current processor's state first, then
                 // copy its callback out. No inout access remains live while
-                // arbitrary hook code executes in the exception context.
-                let hook = rearmTimerAndRecordInterrupt(processorIndex)
-                hook?(UnsafeMutableRawPointer(frame))
+                // arbitrary hook code executes in exception context.
+                timerHook = rearmTimerAndRecordInterrupt(processorIndex)
             } else {
                 recordUnexpectedInterrupt(processorIndex)
                 controller.disable(interruptID: token.interruptID)
             }
             controller.end(token)
             acknowledgementCount += 1
+            // End and deactivate the PPI before invoking policy. A timer hook
+            // may enter a no-return CPU_OFF path, while a returning hook may
+            // still replace the live exception frame before exception return.
+            timerHook?(UnsafeMutableRawPointer(frame))
         }
         if acknowledgementCount == maximumAcknowledgementsPerEntry {
             recordSaturatedEntry(processorIndex)

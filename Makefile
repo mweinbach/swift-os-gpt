@@ -141,6 +141,8 @@ rpi5-inspect: rpi5-build
 	LLVM_NM=$(LLVM_NM) LLVM_OBJDUMP=$(LLVM_OBJDUMP) \
 		$(PYTHON) tools/validate_rpi5_image.py \
 		$(RPI5_KERNEL_ELF) $(RPI5_KERNEL_IMAGE)
+	LLVM_NM=$(LLVM_NM) $(PYTHON) \
+		Tests/Host/el0_linker_storage_contract.py $(RPI5_KERNEL_ELF)
 
 rpi5-package: rpi5-inspect
 	@test -n "$(RPI5_FIRMWARE)" || \
@@ -1482,6 +1484,8 @@ platform-storage-pinned-fdt-test: | $(BUILD_DIR)
 inspect: build
 	LLVM_NM=$(LLVM_NM) LLVM_OBJDUMP=$(LLVM_OBJDUMP) \
 		$(PYTHON) tools/validate_elf.py $(KERNEL_ELF)
+	LLVM_NM=$(LLVM_NM) $(PYTHON) \
+		Tests/Host/el0_linker_storage_contract.py $(KERNEL_ELF)
 
 smoke: build
 	QEMU=$(QEMU) $(PYTHON) Tests/Smoke/boot_smoke.py $(KERNEL_BIN) --boots 3

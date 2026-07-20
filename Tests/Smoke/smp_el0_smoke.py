@@ -40,6 +40,7 @@ EXPECTED_AFTER_SMP = [
     "SWIFTOS:THREADS_OK",
     "SWIFTOS:PREEMPT_OK",
     "SWIFTOS:EL0_PREEMPTION_PROVEN",
+    "SWIFTOS:EL0_MIGRATION_PROVEN",
 ]
 
 
@@ -89,7 +90,7 @@ def run_kernel(
             if not chunk:
                 break
             transcript.extend(chunk)
-            if (b"SWIFTOS:EL0_PREEMPTION_PROVEN" in transcript
+            if (b"SWIFTOS:EL0_MIGRATION_PROVEN" in transcript
                     or b"SWIFTOS:PANIC" in transcript):
                 break
     finally:
@@ -134,6 +135,15 @@ def validate(transcript: str, processor_count: int) -> None:
         position = transcript.find(marker, position + 1)
         if position < 0:
             raise AssertionError(f"missing ordered marker {marker}:\n{transcript}")
+
+    # EL0 processors enter the shared scheduler concurrently. Require every
+    # processor's local launch, userspace-report, and timer evidence without
+    # assigning an order to otherwise independent CPUs.
+    for processor_id in range(processor_count):
+        for suffix in ("ONLINE", "REPORT", "TIMER_IRQ"):
+            marker = f"SWIFTOS:EL0_CPU{processor_id}_{suffix}"
+            if marker not in transcript:
+                raise AssertionError(f"missing processor marker {marker}")
 
     stack_addresses: set[int] = set()
     checksums: set[int] = set()
@@ -188,17 +198,87 @@ def marker_hex(transcript: str, marker: str) -> int:
     return int(match.group(1), 16)
 
 
+def self_test() -> None:
+    processor_count = 4
+    transcript: list[str] = list(EXPECTED_BEFORE_SMP)
+    transcript.extend(
+        f"SWIFTOS:SMP_CPU{processor_id}_ONLINE"
+        for processor_id in range(1, processor_count)
+    )
+    for processor_id in range(1, processor_count):
+        transcript.extend(
+            (
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK1_OK",
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK1_CHECKSUM="
+                    f"0x{processor_id * 2 + 1:x}",
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK1_QUANTA=0x2",
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK2_OK",
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK2_CHECKSUM="
+                    f"0x{processor_id * 2 + 2:x}",
+                f"SWIFTOS:SMP_CPU{processor_id}_TASK2_QUANTA=0x3",
+                f"SWIFTOS:SMP_CPU{processor_id}_STACK="
+                    f"0x{0x1000 * processor_id:x}",
+                f"SWIFTOS:SMP_CPU{processor_id}_TIMER_IRQS=0x5",
+            )
+        )
+
+    # Deliberately scramble each independently emitted per-CPU marker group.
+    # The legacy lifecycle markers retain their runtime-defined order.
+    transcript.extend(EXPECTED_AFTER_SMP[:4])
+    transcript.extend(
+        f"SWIFTOS:EL0_CPU{processor_id}_ONLINE"
+        for processor_id in (3, 0, 2, 1)
+    )
+    transcript.extend(
+        f"SWIFTOS:EL0_CPU{processor_id}_REPORT"
+        for processor_id in (1, 3, 0, 2)
+    )
+    transcript.extend(EXPECTED_AFTER_SMP[4:6])
+    transcript.extend(
+        f"SWIFTOS:EL0_CPU{processor_id}_TIMER_IRQ"
+        for processor_id in (2, 0, 1, 3)
+    )
+    transcript.extend(EXPECTED_AFTER_SMP[6:])
+    valid_transcript = "\n".join(transcript) + "\n"
+    validate(valid_transcript, processor_count)
+
+    missing_cpu_evidence = valid_transcript.replace(
+        "SWIFTOS:EL0_CPU2_REPORT\n",
+        "",
+    )
+    try:
+        validate(missing_cpu_evidence, processor_count)
+    except AssertionError as error:
+        if "missing processor marker SWIFTOS:EL0_CPU2_REPORT" not in str(error):
+            raise
+    else:
+        raise AssertionError("missing per-CPU evidence unexpectedly passed")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("kernel", type=Path)
+    parser.add_argument("kernel", nargs="?", type=Path)
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--virtualization", action="store_true")
     parser.add_argument("--cpu", default="cortex-a72")
     parser.add_argument("--cpus", type=int, default=4)
     parser.add_argument("--gic-version", type=int, choices=(2, 3), default=3)
+    parser.add_argument("--self-test", action="store_true")
     arguments = parser.parse_args()
     if arguments.cpus < 2 or arguments.cpus > 64:
         parser.error("--cpus must be between 2 and 64")
+    if arguments.self_test:
+        if arguments.kernel is not None:
+            parser.error("kernel cannot be supplied with --self-test")
+        try:
+            self_test()
+        except AssertionError as error:
+            print(f"SMP/EL0 parser self-test failed: {error}", file=sys.stderr)
+            return 1
+        print("SMP/EL0 parser self-test passed")
+        return 0
+    if arguments.kernel is None:
+        parser.error("kernel is required unless --self-test is used")
     managed_processor_count = min(arguments.cpus, 4)
     transcript = run_kernel(
         os.environ.get("QEMU", "qemu-system-aarch64"),
@@ -219,7 +299,7 @@ def main() -> int:
         "SMP/EL0 smoke: "
         f"{managed_processor_count}/{arguments.cpus} {arguments.cpu} CPUs, "
         f"GICv{arguments.gic_version}, isolated Swift threads, and "
-        f"preemption passed ({entry})"
+        f"report-proven cross-CPU migration passed ({entry})"
     )
     return 0
 

@@ -152,6 +152,28 @@ struct RunQueue {
         return select(next, replacing: current, on: processor)
     }
 
+    /// Detaches one processor without selecting a replacement. The caller must
+    /// save the live register image before this transition. The released thread
+    /// becomes ready so another online processor may continue it if firmware
+    /// powers this processor off or a failed shutdown leaves fewer CPUs online.
+    @discardableResult
+    mutating func relinquishCurrent(on processor: Int) -> Bool {
+        guard validProcessor(processor),
+              currentIndices[processor] >= 0
+        else {
+            return false
+        }
+        let current = Int(currentIndices[processor])
+        guard current < threadCount,
+              threads[current].state == .running
+        else {
+            return false
+        }
+        threads[current].state = .ready
+        currentIndices[processor] = -1
+        return true
+    }
+
     @discardableResult
     mutating func blockCurrent(on processor: Int) -> SchedulingDecision? {
         transitionCurrent(to: .blocked, on: processor)

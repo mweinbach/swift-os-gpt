@@ -130,11 +130,23 @@ struct SMPRuntimeTests {
             var cpuOneEpoch: UInt64 = 0
             var cpuTwoEpoch: UInt64 = 0
             expect(
+                SMPKernelRestartRendezvous.requestIsPending(
+                    after: cpuOneEpoch
+                ),
+                "CPU1 did not observe the restart epoch"
+            )
+            expect(
                 SMPKernelRestartRendezvous.checkpoint(
                     logicalProcessorID: 1,
                     observedEpoch: &cpuOneEpoch
                 ) == .shutdownReturned(.notSupported),
                 "CPU1 did not classify returned CPU_OFF"
+            )
+            expect(
+                !SMPKernelRestartRendezvous.requestIsPending(
+                    after: cpuOneEpoch
+                ),
+                "CPU1 retained an already serviced epoch"
             )
             expect(
                 SMPKernelRestartRendezvous.checkpoint(

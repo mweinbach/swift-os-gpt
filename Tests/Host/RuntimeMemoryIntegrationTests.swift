@@ -366,6 +366,24 @@ struct RuntimeMemoryIntegrationTests {
                     pageCount: 4,
                     role: .userData
                 )!,
+                FinalMappingRegion(
+                    virtualBaseAddress: 0x00c0_1000,
+                    physicalBaseAddress: 0x4022_0000,
+                    pageCount: 4,
+                    role: .userData
+                )!,
+                FinalMappingRegion(
+                    virtualBaseAddress: 0x00e0_1000,
+                    physicalBaseAddress: 0x4023_0000,
+                    pageCount: 4,
+                    role: .userData
+                )!,
+                FinalMappingRegion(
+                    virtualBaseAddress: 0x0100_1000,
+                    physicalBaseAddress: 0x4024_0000,
+                    pageCount: 4,
+                    role: .userData
+                )!,
             ]
             let mmio = [
                 FinalMappingRegion(
@@ -396,6 +414,18 @@ struct RuntimeMemoryIntegrationTests {
                 )!,
                 FinalGuardRegion(
                     virtualBaseAddress: 0x00a0_5000,
+                    pageCount: 1
+                )!,
+                FinalGuardRegion(
+                    virtualBaseAddress: 0x00c0_0000,
+                    pageCount: 1
+                )!,
+                FinalGuardRegion(
+                    virtualBaseAddress: 0x00e0_0000,
+                    pageCount: 1
+                )!,
+                FinalGuardRegion(
+                    virtualBaseAddress: 0x0100_0000,
                     pageCount: 1
                 )!,
                 // Proves a caller can split privileged data around a guard.
@@ -462,11 +492,11 @@ struct RuntimeMemoryIntegrationTests {
                                         "MMIO was not exact-page mapped"
                                     )
                                     expect(
-                                        tables.summary.userMappedPageCount == 11,
-                                        "EL0 mapped page count"
+                                        tables.summary.userMappedPageCount == 23,
+                                        "all five EL0 stacks were mapped"
                                     )
                                     expect(
-                                        tables.summary.guardPageCount == 5,
+                                        tables.summary.guardPageCount == 8,
                                         "guard page count"
                                     )
 
@@ -502,6 +532,15 @@ struct RuntimeMemoryIntegrationTests {
                                             virtualAddress: 0x0080_0000
                                         ) == .guardPage,
                                         "user stack guard became mapped"
+                                    )
+                                    expect(
+                                        pool.lookup(
+                                            rootTablePhysicalAddress: tables
+                                                .addressSpace
+                                                .rootTablePhysicalAddress,
+                                            virtualAddress: 0x0100_0000
+                                        ) == .guardPage,
+                                        "fifth user stack guard became mapped"
                                     )
                                     expect(
                                         pool.lookup(

@@ -15,9 +15,12 @@ enum KernelSMP {
     private static let workEvidenceMaximumPollCount: UInt64 = 1_000_000_000
 
     /// Starts as many unique DT processors as are available, capped at four
-    /// including CPU0. Returns true only when every selected secondary entered
-    /// our veneer, published online with release semantics, and is now parked.
-    static func start(platform: Platform, console: EarlyConsole) -> Bool {
+    /// including CPU0. Returns the exact proven-online processor count only
+    /// when every selected secondary entered our veneer, published online with
+    /// release semantics, and completed its bounded boot-work proof. It then
+    /// waits restart-aware for CPU0 to publish either the EL0 scheduler or a
+    /// later shutdown request.
+    static func start(platform: Platform, console: EarlyConsole) -> Int? {
         guard let managedProcessorCount = platform.processorCount(
                   limitedTo:
                     ProcessorStartupPlan.maximumOnlineProcessorCount
@@ -45,7 +48,7 @@ enum KernelSMP {
               var topology = ProcessorTopology(storage: topologyStorage)
         else {
             console.write("SWIFTOS:SMP_BAD_STORAGE\n")
-            return false
+            return nil
         }
 
         var deviceTreeIndex = 0
@@ -56,7 +59,7 @@ enum KernelSMP {
                 break
             case .conflictingDescription, .invalidAffinity, .capacityExhausted:
                 console.write("SWIFTOS:SMP_BAD_TOPOLOGY\n")
-                return false
+                return nil
             }
             deviceTreeIndex += 1
         }
@@ -80,7 +83,7 @@ enum KernelSMP {
               )
         else {
             console.write("SWIFTOS:SMP_BOOT_CPU_MISSING\n")
-            return false
+            return nil
         }
 
         let conduit: PSCIConduit
@@ -91,7 +94,7 @@ enum KernelSMP {
             conduit = .secureMonitorCall
         case nil:
             console.write("SWIFTOS:SMP_NO_PSCI_METHOD\n")
-            return false
+            return nil
         }
         guard var runtime = SMPRuntime(
             conduit: conduit,
@@ -100,14 +103,14 @@ enum KernelSMP {
             reportStorage: reportStorage
         ) else {
             console.write("SWIFTOS:SMP_BAD_STORAGE\n")
-            return false
+            return nil
         }
         guard SecondaryProcessorWorkRuntime.configure(
                   processorCount: plan.processorCount
               )
         else {
             console.write("SWIFTOS:SMP_WORK_BAD_STORAGE\n")
-            return false
+            return nil
         }
 
         let result = runtime.startSecondaryProcessors(
@@ -118,14 +121,14 @@ enum KernelSMP {
         switch result {
         case .invalidConfiguration:
             console.write("SWIFTOS:SMP_BAD_CONFIG\n")
-            return false
+            return nil
         case let .completed(summary):
             var reportIndex = 0
             var everySecondaryOnline = true
             while reportIndex < plan.secondaryProcessorCount {
                 guard let report = runtime.report(at: reportIndex) else {
                     console.write("SWIFTOS:SMP_BAD_REPORT\n")
-                    return false
+                    return nil
                 }
                 switch report.outcome {
                 case .online:
@@ -160,7 +163,7 @@ enum KernelSMP {
                   summary.timedOutCount == 0,
                   summary.rejectedCount == 0
             else {
-                return false
+                return nil
             }
             let counterFrequency = AArch64.counterFrequency
             guard counterFrequency > 0,
@@ -168,7 +171,7 @@ enum KernelSMP {
                     <= UInt64.max / workEvidenceTimeoutSeconds
             else {
                 console.write("SWIFTOS:SMP_WORK_BAD_CLOCK\n")
-                return false
+                return nil
             }
             let workEvidenceTimeoutTicks = counterFrequency
                 * workEvidenceTimeoutSeconds
@@ -176,7 +179,7 @@ enum KernelSMP {
             while reportIndex < plan.secondaryProcessorCount {
                 guard let report = runtime.report(at: reportIndex) else {
                     console.write("SWIFTOS:SMP_BAD_REPORT\n")
-                    return false
+                    return nil
                 }
                 let logicalProcessorID = Int(
                     report.target.logicalProcessorID
@@ -190,19 +193,19 @@ enum KernelSMP {
                     writeWorkEvidence(evidence, console: console)
                 case .timedOut:
                     console.write("SWIFTOS:SMP_WORK_TIMEOUT\n")
-                    return false
+                    return nil
                 case .failed:
                     console.write("SWIFTOS:SMP_WORK_FAILED\n")
-                    return false
+                    return nil
                 case .invalidContext:
                     console.write("SWIFTOS:SMP_WORK_BAD_CONTEXT\n")
-                    return false
+                    return nil
                 }
                 reportIndex += 1
             }
             console.write(workReadyMarker)
             console.write(onlineMarker)
-            return true
+            return plan.processorCount
         }
     }
 

@@ -47,6 +47,16 @@ struct RunQueueTests {
                    "CPU 2 did not select shared-affinity thread")
             expect(queue.begin(on: 3) == nil,
                    "one thread ran on two processors")
+            expect(queue.relinquishCurrent(on: 2),
+                   "CPU 2 did not relinquish its thread")
+            expect(queue.currentThread(on: 2) == nil,
+                   "relinquished CPU retained an owner")
+            expect(queue.thread(identifier: 12)?.state == .ready,
+                   "relinquished thread did not become ready")
+            expect(queue.begin(on: 3)?.nextThreadIdentifier == 12,
+                   "another CPU could not acquire relinquished work")
+            expect(!queue.relinquishCurrent(on: 2),
+                   "ownerless CPU relinquished twice")
         }
     }
 

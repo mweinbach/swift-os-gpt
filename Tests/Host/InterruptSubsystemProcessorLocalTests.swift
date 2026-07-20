@@ -75,6 +75,7 @@ private enum TestHardware {
     nonisolated(unsafe) static var replacementHookCount = 0
     nonisolated(unsafe) static var replacementInstallationSucceeded = false
     nonisolated(unsafe) static var countObservedInsideHook: UInt64?
+    nonisolated(unsafe) static var endObservedInsideHook: TestEndOfInterrupt?
 
     static func reset() {
         currentCPU = 0
@@ -94,6 +95,7 @@ private enum TestHardware {
         replacementHookCount = 0
         replacementInstallationSucceeded = false
         countObservedInsideHook = nil
+        endObservedInsideHook = nil
     }
 
     static func enqueueTimerInterrupt(
@@ -337,6 +339,7 @@ func swiftOSTestCPU2InitialTimerHook(_ rawFrame: UnsafeMutableRawPointer) {
     TestHardware.hookCounts[2] += 1
     TestHardware.countObservedInsideHook =
         InterruptSubsystem.timerInterruptCount(logicalProcessorID: 2)
+    TestHardware.endObservedInsideHook = TestHardware.ends.last
     TestHardware.replacementInstallationSucceeded =
         InterruptSubsystem.setTimerInterruptHook(
             swiftOSTestCPU2ReplacementTimerHook
@@ -494,6 +497,13 @@ struct InterruptSubsystemProcessorLocalTests {
         expect(
             TestHardware.countObservedInsideHook == 1,
             "timer count was not published before invoking the hook"
+        )
+        expect(
+            TestHardware.endObservedInsideHook == TestEndOfInterrupt(
+                cpu: 2,
+                rawValue: (UInt64(2) << 10) | UInt64(timerInterruptID)
+            ),
+            "timer hook ran before its processor-local token was ended"
         )
         expect(
             timerCounts() == [1, 1, 1, 1],

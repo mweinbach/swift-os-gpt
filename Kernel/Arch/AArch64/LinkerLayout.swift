@@ -8,6 +8,9 @@ struct LinkerRegion: Equatable {
 }
 
 enum KernelLinkerLayout {
+    static let maximumUserStackCount = 5
+    static let maximumThreadContextCount = maximumUserStackCount
+
     static var kernelImage: LinkerRegion {
         LinkerRegion(start: archKernelStart(), end: archKernelEnd())
     }
@@ -48,6 +51,37 @@ enum KernelLinkerLayout {
         LinkerRegion(start: archUserStack1Start(), end: archUserStack1End())
     }
 
+    /// Returns one physical linker-owned stack backing. The first two linker
+    /// symbols establish the stride; subsequent stacks remain an indexed part
+    /// of the same contiguous section rather than becoming public one-off
+    /// symbols.
+    static func userStack(at index: Int) -> LinkerRegion? {
+        guard index >= 0, index < maximumUserStackCount else { return nil }
+        let first = userStack0
+        let second = userStack1
+        let stackLength = first.length
+        guard stackLength > 0,
+              second.start == first.end,
+              second.length == stackLength,
+              UInt64(maximumUserStackCount) <= UInt64.max / stackLength
+        else {
+            return nil
+        }
+        let completeLength = UInt64(maximumUserStackCount) * stackLength
+        guard completeLength <= UInt64.max - first.start,
+              first.start + completeLength == threadContexts.start
+        else {
+            return nil
+        }
+        let stackIndex = UInt64(index)
+        guard stackIndex <= (UInt64.max - first.start) / stackLength else {
+            return nil
+        }
+        let start = first.start + stackIndex * stackLength
+        guard stackLength <= UInt64.max - start else { return nil }
+        return LinkerRegion(start: start, end: start + stackLength)
+    }
+
     static var finalLevel1Table: LinkerRegion {
         LinkerRegion(start: archFinalL1Start(), end: archFinalL1End())
     }
@@ -62,6 +96,65 @@ enum KernelLinkerLayout {
 
     static var threadContexts: LinkerRegion {
         LinkerRegion(start: archThreadContextsStart(), end: archThreadContextsEnd())
+    }
+
+    /// Returns a stored thread frame without embedding the architecture frame
+    /// size in the linker facade. The caller supplies its current ABI size;
+    /// the complete five-frame plus launch-scratch span is validated before an
+    /// address is exposed.
+    static func threadContextAddress(
+        at index: Int,
+        frameByteCount: Int
+    ) -> UInt64? {
+        guard index >= 0,
+              index < maximumThreadContextCount,
+              let frameSize = validatedThreadContextFrameSize(frameByteCount)
+        else {
+            return nil
+        }
+        return threadContextAddress(
+            slot: UInt64(index),
+            frameSize: frameSize
+        )
+    }
+
+    static func launchScratchContextAddress(
+        frameByteCount: Int
+    ) -> UInt64? {
+        guard let frameSize = validatedThreadContextFrameSize(frameByteCount)
+        else {
+            return nil
+        }
+        return threadContextAddress(
+            slot: UInt64(maximumThreadContextCount),
+            frameSize: frameSize
+        )
+    }
+
+    private static func validatedThreadContextFrameSize(
+        _ frameByteCount: Int
+    ) -> UInt64? {
+        guard frameByteCount > 0 else { return nil }
+        let frameSize = UInt64(frameByteCount)
+        let slotCount = UInt64(maximumThreadContextCount + 1)
+        guard frameSize & 0xf == 0,
+              frameSize <= UInt64.max / slotCount,
+              frameSize * slotCount <= threadContexts.length
+        else {
+            return nil
+        }
+        return frameSize
+    }
+
+    private static func threadContextAddress(
+        slot: UInt64,
+        frameSize: UInt64
+    ) -> UInt64? {
+        let contexts = threadContexts
+        guard slot <= UInt64.max / frameSize else { return nil }
+        let offset = slot * frameSize
+        guard offset <= UInt64.max - contexts.start else { return nil }
+        return contexts.start + offset
     }
 
     static var schedulerThreads: UInt64 { archSchedulerThreadsStart() }

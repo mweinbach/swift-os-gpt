@@ -16,6 +16,7 @@ private nonisolated(unsafe) var qemuEL0FileSystemSawOpen = false
 private nonisolated(unsafe) var qemuEL0FileSystemSawRead = false
 private nonisolated(unsafe) var qemuEL0FileSystemSawWrite = false
 private nonisolated(unsafe) var qemuEL0FileSystemSawClose = false
+private nonisolated(unsafe) var qemuEL0FileSystemLockWord: UInt32 = 0
 
 /// Binds the already mounted `/Users` provider to process one. Everything in
 /// this adapter is caller-owned, fixed-capacity memory; the provider and its
@@ -25,6 +26,8 @@ enum QEMUEL0FileSystemRuntime {
     private static let mountIdentifier = VFSMountIdentifier(rawValue: 1)!
     private static let taskIdentifier: UInt64 = 1
     private static let handleSlotCount = 8
+    private static let maximumUserMemoryRegionCount =
+        2 + KernelEL0AddressSpaceMappings.threadCapacity
 
     private static let regionOffset = 0
     private static let namespaceOffset = 4_096
@@ -190,6 +193,8 @@ private extension QEMUEL0FileSystemRuntime {
     }
 
     static func dispatch(_ rawFrame: UnsafeMutableRawPointer) -> UInt64 {
+        let interruptState = lock()
+        defer { unlock(restoring: interruptState) }
         guard let service = qemuEL0FileSystemService,
               let userMemory = qemuEL0FileSystemUserMemory
         else { return 0 }
@@ -295,7 +300,11 @@ private extension QEMUEL0FileSystemRuntime {
     ) -> Bool {
         let total = allocation.range.byteCount
         return total >= pageCount * MemoryPageGeometry.pageSize
-            && UInt64(regionOffset + 4 * MemoryLayout<EL0UserMemoryRegion>.stride)
+            && UInt64(
+                regionOffset
+                    + maximumUserMemoryRegionCount
+                        * MemoryLayout<EL0UserMemoryRegion>.stride
+            )
                 <= UInt64(namespaceOffset)
             && MemoryLayout<VFSMountNamespace>.stride
                 <= mountSlotOffset - namespaceOffset
@@ -341,18 +350,18 @@ private extension QEMUEL0FileSystemRuntime {
                   )
             else { return nil }
         }
-        guard append(
-                  mappings.firstUserStack,
-                  permissions: .readWrite,
-                  to: output,
-                  count: &count
-              ), append(
-                  mappings.secondUserStack,
-                  permissions: .readWrite,
-                  to: output,
-                  count: &count
-              )
-        else { return nil }
+        var threadIndex = 0
+        while threadIndex < KernelEL0AddressSpaceMappings.threadCapacity {
+            guard let thread = mappings.thread(at: threadIndex),
+                  append(
+                      thread.stack,
+                      permissions: .readWrite,
+                      to: output,
+                      count: &count
+                  )
+            else { return nil }
+            threadIndex += 1
+        }
         return EL0UserMemoryMap(
             regions: UnsafeBufferPointer(start: output, count: count),
             virtualAddressLimit: FinalTranslationTableGeometry.virtualAddressLimit
@@ -365,7 +374,7 @@ private extension QEMUEL0FileSystemRuntime {
         to output: UnsafeMutablePointer<EL0UserMemoryRegion>,
         count: inout Int
     ) -> Bool {
-        guard count < 4,
+        guard count < maximumUserMemoryRegionCount,
               mapping.physicalBaseAddress <= UInt64(UInt.max),
               let physical = UnsafeMutableRawPointer(
                   bitPattern: UInt(mapping.physicalBaseAddress)
@@ -379,6 +388,21 @@ private extension QEMUEL0FileSystemRuntime {
         (output + count).initialize(to: region)
         count += 1
         return true
+    }
+
+    private static func lock() -> UInt64 {
+        withUnsafeMutablePointer(to: &qemuEL0FileSystemLockWord) { word in
+            AArch64.acquireInterruptSafeLock(word)
+        }
+    }
+
+    private static func unlock(restoring interruptState: UInt64) {
+        withUnsafeMutablePointer(to: &qemuEL0FileSystemLockWord) { word in
+            AArch64.releaseInterruptSafeLock(
+                word,
+                restoring: interruptState
+            )
+        }
     }
 }
 

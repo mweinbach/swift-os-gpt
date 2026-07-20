@@ -161,9 +161,14 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             display: drivers.display
         )
         var raspberryPiSMPStartupHandled = false
+        var raspberryPiProvenProcessorCount: Int?
         if platform.processorCount > 1 {
             raspberryPiSMPStartupHandled = true
-            if !KernelSMP.start(platform: platform, console: console) {
+            raspberryPiProvenProcessorCount = KernelSMP.start(
+                platform: platform,
+                console: console
+            )
+            if raspberryPiProvenProcessorCount == nil {
                 // Pi debug/display services remain usable when physical SMP
                 // bring-up needs another hardware iteration.
                 console.write("SWIFTOS:SMP_DEFERRED\n")
@@ -204,7 +209,8 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             console: console,
             platform: platform,
             memory: memory,
-            smpStartupHandled: raspberryPiSMPStartupHandled
+            smpStartupHandled: raspberryPiSMPStartupHandled,
+            provenSMPProcessorCount: raspberryPiProvenProcessorCount
         )
     }
 }
@@ -1248,13 +1254,20 @@ private func runScheduledOrPark(
     console: EarlyConsole,
     platform: Platform,
     memory: KernelMemoryActivation,
-    smpStartupHandled: Bool = false
+    smpStartupHandled: Bool = false,
+    provenSMPProcessorCount: Int? = nil
 ) -> Never {
+    var onlineProcessorCount = provenSMPProcessorCount
     if platform.processorCount > 1 && !smpStartupHandled {
-        guard KernelSMP.start(platform: platform, console: console) else {
+        guard let startedProcessorCount = KernelSMP.start(
+                  platform: platform,
+                  console: console
+              )
+        else {
             console.write("SWIFTOS:PANIC:SMP\n")
             park()
         }
+        onlineProcessorCount = startedProcessorCount
     }
     // A headless physical board still needs its bounded service work to make
     // progress when both display and USB discovery fail. This path deliberately
@@ -1268,7 +1281,12 @@ private func runScheduledOrPark(
             AArch64.spinHint()
         }
     }
-    guard platform.processorCount > 1 else {
+    guard let managedProcessorCount = onlineProcessorCount,
+          managedProcessorCount > 1,
+          managedProcessorCount
+            <= ProcessorStartupPlan.maximumOnlineProcessorCount,
+          managedProcessorCount <= platform.processorCount
+    else {
         console.write("SWIFTOS:READY\n")
         park()
     }
@@ -1282,6 +1300,7 @@ private func runScheduledOrPark(
     KernelEL0Runtime.launch(
         console: console,
         mappings: memory.userMappings,
+        processorCount: managedProcessorCount,
         timerPeriodTicks: period
     )
 }

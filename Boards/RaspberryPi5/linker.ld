@@ -8,6 +8,10 @@ UPDATE_DESTINATION_SIZE = 32M;
 BOOT_STACK_SIZE = 128K;
 SECONDARY_STACK_SIZE = 64K;
 USER_STACK_SIZE = 64K;
+USER_STACK_COUNT = 5;
+THREAD_CONTEXT_FRAME_SIZE = 832;
+THREAD_CONTEXT_COUNT = USER_STACK_COUNT;
+THREAD_CONTEXT_SCRATCH_COUNT = 1;
 STACK_GUARD_SIZE = 4K;
 DMA_SCRATCH_SIZE = 4K;
 RP1_GEM_WORKSPACE_SIZE = 16K;
@@ -115,18 +119,24 @@ SECTIONS
 
     .user_stacks (NOLOAD) : ALIGN(4K)
     {
+        __user_stacks_start = .;
         __user_stack0_physical = .;
         . += USER_STACK_SIZE;
         __user_stack0_physical_end = .;
         __user_stack1_physical = .;
         . += USER_STACK_SIZE;
         __user_stack1_physical_end = .;
+        . += (USER_STACK_COUNT - 2) * USER_STACK_SIZE;
+        __user_stacks_end = .;
     }
 
     .thread_contexts (NOLOAD) : ALIGN(4K)
     {
         __thread_contexts_start = .;
-        . += 4K;
+        . += (THREAD_CONTEXT_COUNT + THREAD_CONTEXT_SCRATCH_COUNT)
+            * THREAD_CONTEXT_FRAME_SIZE;
+        __thread_context_frames_end = .;
+        . = ALIGN(4K);
         __thread_contexts_end = .;
     }
 
@@ -310,5 +320,20 @@ ASSERT(__user_entry_physical >= __user_text_start,
        "user entry precedes isolated user text")
 ASSERT(__user_entry_physical < __user_text_end,
        "user entry follows isolated user text")
-ASSERT(__thread_contexts_end - __thread_contexts_start >= 2 * 832,
-       "thread context storage cannot hold two complete frames")
+ASSERT(__user_stacks_start == __user_stack0_physical,
+       "user stack storage must begin with stack zero")
+ASSERT(__user_stack0_physical_end == __user_stack1_physical,
+       "linker-owned user stacks must be contiguous")
+ASSERT(__user_stacks_end - __user_stacks_start
+           == USER_STACK_COUNT * USER_STACK_SIZE,
+       "linker must own five complete user stacks")
+ASSERT((__user_stacks_end & 4095) == 0,
+       "user stack storage must end on a page boundary")
+ASSERT(__thread_context_frames_end - __thread_contexts_start
+           == (THREAD_CONTEXT_COUNT + THREAD_CONTEXT_SCRATCH_COUNT)
+               * THREAD_CONTEXT_FRAME_SIZE,
+       "thread context storage must hold five frames and launch scratch")
+ASSERT(__thread_contexts_end - __thread_contexts_start
+           >= (THREAD_CONTEXT_COUNT + THREAD_CONTEXT_SCRATCH_COUNT)
+               * THREAD_CONTEXT_FRAME_SIZE,
+       "aligned thread context storage is undersized")

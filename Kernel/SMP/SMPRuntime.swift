@@ -25,14 +25,9 @@ enum SMPKernelRestartCheckpointResult: Equatable {
 }
 
 /// Transport-neutral, allocation-free rendezvous state shared by the boot CPU
-/// and kernel-managed secondaries. The current secondary execution path is a
-/// WFE park loop, so release-store + SEV is a bounded wakeup mechanism without
-/// depending on a USB driver or a board-specific interrupt controller.
-///
-/// A future scheduler that runs work on secondary CPUs must call `checkpoint`
-/// from a bounded per-CPU scheduling/interrupt path, or replace SEV with a
-/// broadcast IPI. CPU0 still proves firmware affinity OFF before chainloading,
-/// so omission can only reject an update; it cannot permit an unsafe handoff.
+/// and kernel-managed secondaries. Waiting secondaries observe release-store +
+/// SEV directly; an EL0-owning secondary checks the epoch from its bounded timer
+/// path and relinquishes its scheduler lease before calling `checkpoint`.
 enum SMPKernelRestartRendezvous {
     static func request() -> SMPKernelRestartRequestResult {
         let registry = archSMPLoadAcquire(&publishedProcessorStateRegistry)
@@ -67,6 +62,17 @@ enum SMPKernelRestartRendezvous {
             epoch: nextEpoch,
             managedSecondaryCount: processorCount - 1
         )
+    }
+
+    /// Lets a scheduled secondary save and relinquish its live context before
+    /// entering the no-return checkpoint. CPU0 is the only epoch writer, so a
+    /// matching acquire load and the subsequent checkpoint describe the same
+    /// request unless a newer request supersedes it, which remains pending.
+    static func requestIsPending(after observedEpoch: UInt64) -> Bool {
+        let requestedEpoch = archSMPLoadAcquire(
+            &publishedKernelRestartEpoch
+        )
+        return requestedEpoch != 0 && requestedEpoch != observedEpoch
     }
 
     /// Services at most one request epoch. The logical ID is the same dense

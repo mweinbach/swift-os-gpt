@@ -27,14 +27,12 @@ func swiftOSSecondaryMain(_ contextID: UInt64) -> Never {
         observedRestartEpoch: &observedRestartEpoch
     )
 
-    // Every bounded scheduling quantum above and every idle wake below checks
-    // the restart epoch. CPU0 may therefore quiesce a worker even if PSCI
-    // CPU_OFF previously returned a failure and a later request must retry.
-    while true {
-        _ = SMPKernelRestartRendezvous.checkpoint(
-            logicalProcessorID: contextID,
-            observedEpoch: &observedRestartEpoch
-        )
-        AArch64.waitForEvent()
-    }
+    // Remain restart-aware while CPU0 assembles the shared EL0 queue. Once it
+    // release-publishes that queue, this no-return handoff installs local hooks
+    // and leases one migratable userspace context. Later timer IRQs continue
+    // servicing the restart rendezvous from bounded exception context.
+    KernelEL0Runtime.waitForSecondaryLaunch(
+        contextID: contextID,
+        observedRestartEpoch: &observedRestartEpoch
+    )
 }

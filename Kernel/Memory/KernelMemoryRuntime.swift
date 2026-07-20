@@ -33,10 +33,13 @@ enum KernelMemoryRuntime {
     private static let kernelReadOnlyCapacity = 4
     private static let kernelDataCapacity = 9
         + BootDriverResourceSet.maximumMemoryResourceCount
-    private static let userStackCapacity = 2
+    private static let userStackCapacity =
+        KernelEL0AddressSpaceMappings.threadCapacity
     private static let mmioCapacity = 5
         + BootDriverResourceSet.maximumMMIOResourceCount
-    private static let guardCapacity = 6
+    // One boot-stack guard, three secondary-stack guards, and one guard per
+    // linker-owned EL0 stack.
+    private static let guardCapacity = 4 + userStackCapacity
     private static let explicitReservationCapacity = 1
         + BootDriverResourceSet.maximumMemoryResourceCount
 
@@ -44,11 +47,11 @@ enum KernelMemoryRuntime {
         static let kernelReadOnly = 0
         static let kernelData = 128
         static let userStacks = 704
-        static let mmio = 768
+        static let mmio = 896
         // 21 MMIO mappings (five base plus sixteen driver resources) need
         // more room than the previous twelve-resource boot contract.
-        static let guards = 1536
-        static let explicitReservations = 1792
+        static let guards = 1664
+        static let explicitReservations = 1920
     }
 
     private nonisolated(unsafe) static var ownedMemoryMap:
@@ -344,23 +347,61 @@ enum KernelMemoryRuntime {
     /// Runs while the bootstrap identity map still exposes the physical
     /// NOLOAD spans and before the final EL0 aliases are constructed.
     private static func scrubUserStackBacking() -> Bool {
-        let first = KernelLinkerLayout.userStack0
-        let second = KernelLinkerLayout.userStack1
-        guard let firstSpan = PhysicalByteSpan(
-                  startAddress: first.start,
-                  endAddress: first.end
-              ),
-              let secondSpan = PhysicalByteSpan(
-                  startAddress: second.start,
-                  endAddress: second.end
-              )
+        guard userStackCapacity == KernelLinkerLayout.maximumUserStackCount
         else {
             return false
         }
-        return EL0StackMemoryScrubber.scrub(
-            first: firstSpan,
-            second: secondSpan
-        )
+
+        // Validate the entire span before clearing any part of it so a
+        // malformed linker layout cannot leave a partially scrubbed setup.
+        var previousEnd: UInt64?
+        var index = 0
+        while index < userStackCapacity {
+            guard let stack = KernelLinkerLayout.userStack(at: index),
+                  validUserStackBacking(stack),
+                  previousEnd == nil || previousEnd == stack.start
+            else {
+                return false
+            }
+            previousEnd = stack.end
+            index += 1
+        }
+
+        index = 0
+        while index < userStackCapacity {
+            guard let stack = KernelLinkerLayout.userStack(at: index) else {
+                return false
+            }
+            zeroUserStackBacking(stack)
+            index += 1
+        }
+        return true
+    }
+
+    private static func validUserStackBacking(_ stack: LinkerRegion) -> Bool {
+        stack.length > 0
+            && MemoryPageGeometry.isPageAligned(stack.start)
+            && MemoryPageGeometry.isPageAligned(stack.end)
+            && stack.start <= UInt64(UInt.max)
+            && stack.length <= UInt64(Int.max)
+            && stack.length % UInt64(MemoryLayout<UInt64>.stride) == 0
+            && UnsafeMutableRawPointer(bitPattern: UInt(stack.start)) != nil
+    }
+
+    @_optimize(none)
+    private static func zeroUserStackBacking(_ stack: LinkerRegion) {
+        let destination = UnsafeMutableRawPointer(
+            bitPattern: UInt(stack.start)
+        )!
+        var offset: UInt64 = 0
+        while offset < stack.length {
+            destination.storeBytes(
+                of: UInt64(0),
+                toByteOffset: Int(offset),
+                as: UInt64.self
+            )
+            offset += UInt64(MemoryLayout<UInt64>.stride)
+        }
     }
 
     private static func pageAlignedInterval(
@@ -431,10 +472,18 @@ enum KernelMemoryRuntime {
            overlaps(interval, readOnly) {
             return true
         }
-        return overlaps(interval, userMappings.firstUserStack)
-            || overlaps(interval, userMappings.secondUserStack)
-            || overlaps(interval, userMappings.firstUserStackGuard)
-            || overlaps(interval, userMappings.secondUserStackGuard)
+        var index = 0
+        while index < KernelEL0AddressSpaceMappings.threadCapacity {
+            guard let thread = userMappings.thread(at: index) else {
+                return true
+            }
+            if overlaps(interval, thread.stack)
+                || overlaps(interval, thread.guardRegion) {
+                return true
+            }
+            index += 1
+        }
+        return false
     }
 
     private static func overlaps(
@@ -656,21 +705,27 @@ enum KernelMemoryRuntime {
             driverMemoryIndex += 1
         }
 
-        // User stack count is separate from the privileged data count.
-        userStacks[0] = userMappings.firstUserStack
-        userStacks[1] = userMappings.secondUserStack
-        guard append(
-                  userMappings.firstUserStackGuard,
-                  to: guards,
-                  count: &guardCount
-              ),
-              append(
-                  userMappings.secondUserStackGuard,
-                  to: guards,
-                  count: &guardCount
-              )
-        else {
-            return nil
+        // User stack count is separate from the privileged data count. Every
+        // linker-owned stack is mapped regardless of the managed CPU count so
+        // the scheduler can admit and migrate a fifth runnable context later.
+        var userStackCount = 0
+        var userStackIndex = 0
+        while userStackIndex < userStackCapacity {
+            guard let thread = userMappings.thread(at: userStackIndex),
+                  append(
+                      thread.stack,
+                      to: userStacks,
+                      count: &userStackCount
+                  ),
+                  append(
+                      thread.guardRegion,
+                      to: guards,
+                      count: &guardCount
+                  )
+            else {
+                return nil
+            }
+            userStackIndex += 1
         }
 
         var mmioCount = 0
@@ -743,7 +798,7 @@ enum KernelMemoryRuntime {
             kernelDataRegions: immutable(kernelData, count: dataCount),
             userText: userMappings.userText,
             userReadOnlyData: userMappings.userReadOnlyData,
-            userStacks: immutable(userStacks, count: userStackCapacity),
+            userStacks: immutable(userStacks, count: userStackCount),
             mmioRegions: immutable(mmio, count: mmioCount),
             guardRegions: immutable(guards, count: guardCount)
         )
