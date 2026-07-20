@@ -55,8 +55,12 @@ so a stale failure from an older boot cannot obscure the current result. The
 promoted markers include `PANIC`, `FAILED`, `TIMEOUT`, `MISSING`, `UNSUPPORTED`,
 `DEFERRED`, `MISMATCH`, `INVALID`, `UNAVAILABLE`, `LOST`, and suspicious
 `_STATE` markers. An `RP1_NET_BOARD_FAILED` or `_TIMEOUT` result also carries
-its immediately preceding `BOARD_STAGE`, `BOARD_REGISTER`, `BOARD_EXPECTED`,
-and `BOARD_OBSERVED` values into the summary as one adjacent diagnostic group.
+its immediately preceding SYS/PLL snapshot, clock-attempt telemetry,
+`BOARD_STAGE`, `BOARD_REGISTER`, `BOARD_EXPECTED`, and `BOARD_OBSERVED` values
+into the summary as one adjacent diagnostic group. `USB_DEBUG_FAULT` likewise
+promotes its reason, gadget/controller states, interrupt snapshot, bus speed,
+and receive status. A capture ending partway through that bounded USB snapshot
+still reports the available fields rather than hiding them.
 
 The full reconstructed canonical console remains an aggregate in persistent
 record order so older boot evidence is not discarded. `--summary-only` hides

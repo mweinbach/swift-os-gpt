@@ -749,6 +749,48 @@ def test_newest_epoch_diagnostics_include_actionable_context() -> None:
     )
 
 
+def test_hardware_fault_snapshots_are_promoted_as_adjacent_groups() -> None:
+    report = sample_card_report()
+    lines = [
+        "SWIFTOS:RP1_NET_CLOCK_SYS_CTRL=0x2",
+        "SWIFTOS:RP1_NET_CLOCK_METHOD=0x0",
+        "SWIFTOS:RP1_NET_CLOCK_RESULT=0x2",
+        "SWIFTOS:RP1_NET_CLOCK_ALIAS_INITIAL=0x0",
+        "SWIFTOS:RP1_NET_CLOCK_FINAL=0x2",
+        "SWIFTOS:RP1_NET_BOARD_STAGE=0x2",
+        "SWIFTOS:RP1_NET_BOARD_EXPECTED=0x2",
+        "SWIFTOS:RP1_NET_BOARD_OBSERVED=0x0",
+        "SWIFTOS:RP1_NET_BOARD_FAILED",
+        "SWIFTOS:USB_DEBUG_FAULT_REASON=0x6",
+        "SWIFTOS:USB_DEBUG_FAULT_GADGET_STATE=0x0",
+        "SWIFTOS:USB_DEBUG_FAULT_CONTROLLER_STATE=0x2",
+        "SWIFTOS:USB_DEBUG_FAULT_GLOBAL=0x10",
+        "SWIFTOS:USB_DEBUG_FAULT_ENDPOINT=0x0",
+        "SWIFTOS:USB_DEBUG_FAULT_BUS_SPEED=0x0",
+        "SWIFTOS:USB_DEBUG_FAULT_RX_STATUS=0xc0080",
+        "SWIFTOS:USB_DEBUG_FAULT",
+    ]
+    report["canonical_console_stream"] = {
+        "byte_count": sum(len(line) + 2 for line in lines),
+        "is_complete": True,
+        "text": "".join(f"{line}\r\n" for line in lines),
+    }
+    require(
+        logs.diagnostic_console_lines(report) == lines,
+        "RP1 clock or USB fault context was not promoted in capture order",
+    )
+
+    truncated = json.loads(json.dumps(report))
+    truncated_lines = lines[:-1]
+    truncated["canonical_console_stream"]["text"] = "".join(
+        f"{line}\r\n" for line in truncated_lines
+    )
+    require(
+        logs.diagnostic_console_lines(truncated)[-7:] == lines[-8:-1],
+        "partial USB fault snapshot was hidden without its terminal marker",
+    )
+
+
 def test_live_report_corruption_and_device_switch_are_refused() -> None:
     with tempfile.TemporaryDirectory() as directory_name:
         executable = executable_fixture(Path(directory_name))
@@ -1238,6 +1280,7 @@ def main() -> int:
         test_live_once_validates_device_and_refuses_capture_overwrite,
         test_failure_markers_are_promoted_in_capture_order,
         test_newest_epoch_diagnostics_include_actionable_context,
+        test_hardware_fault_snapshots_are_promoted_as_adjacent_groups,
         test_live_report_corruption_and_device_switch_are_refused,
         test_invalid_live_pages_do_not_contaminate_transcripts,
         test_live_idle_and_sequence_exhaustion_are_bounded,

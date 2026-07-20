@@ -662,7 +662,7 @@ def card_summary_lines(report: Mapping[str, object]) -> list[str]:
 
 
 def diagnostic_console_lines(report: Mapping[str, object]) -> list[str]:
-    """Return newest-epoch failures with adjacent RP1 board context."""
+    """Return newest-epoch failures with adjacent hardware fault context."""
 
     result: list[str] = []
     seen: set[str] = set()
@@ -671,20 +671,64 @@ def diagnostic_console_lines(report: Mapping[str, object]) -> list[str]:
         str(latest["text"])
         if isinstance(latest, dict) else canonical_console_text(report)
     )
-    board_context_names = (
+    rp1_context_names = (
+        "RP1_NET_CLOCK_SYS_CTRL",
+        "RP1_NET_CLOCK_SYS_DIV_INT",
+        "RP1_NET_CLOCK_SYS_SEL",
+        "RP1_NET_CLOCK_PLL_SYS_CS",
+        "RP1_NET_CLOCK_PLL_SYS_PWR",
+        "RP1_NET_CLOCK_PLL_SYS_PRIM",
+        "RP1_NET_CLOCK_PLL_SYS_SEC",
+        "RP1_NET_CLOCK_STAGE",
+        "RP1_NET_CLOCK_METHOD",
+        "RP1_NET_CLOCK_RESULT",
+        "RP1_NET_CLOCK_INITIAL",
+        "RP1_NET_CLOCK_ALIAS_INITIAL",
+        "RP1_NET_CLOCK_ALIAS_DRAIN",
+        "RP1_NET_CLOCK_FINAL",
+        "RP1_NET_CLOCK_POLLS",
+        "RP1_NET_CLOCK_ELAPSED_TICKS",
         "RP1_NET_BOARD_STAGE",
         "RP1_NET_BOARD_REGISTER",
         "RP1_NET_BOARD_EXPECTED",
         "RP1_NET_BOARD_OBSERVED",
     )
-    board_context: dict[str, str] = {}
+    usb_fault_context_names = (
+        "USB_DEBUG_FAULT_REASON",
+        "USB_DEBUG_FAULT_GADGET_STATE",
+        "USB_DEBUG_FAULT_CONTROLLER_STATE",
+        "USB_DEBUG_FAULT_GLOBAL",
+        "USB_DEBUG_FAULT_ENDPOINT",
+        "USB_DEBUG_FAULT_BUS_SPEED",
+        "USB_DEBUG_FAULT_RX_STATUS",
+    )
+    rp1_context: dict[str, str] = {}
+    usb_fault_context: dict[str, str] = {}
+
+    def append_unique(line: str) -> None:
+        if line not in seen:
+            seen.add(line)
+            result.append(line)
+
+    def append_context(
+        names: tuple[str, ...],
+        context: Mapping[str, str],
+    ) -> None:
+        for name in names:
+            line = context.get(name)
+            if line is not None:
+                append_unique(line)
+
     for raw_line in console_text.splitlines():
         line = raw_line.strip()
         if not line.startswith("SWIFTOS:"):
             continue
         marker = line.removeprefix("SWIFTOS:").split("=", 1)[0]
-        if marker in board_context_names:
-            board_context[marker] = line
+        if marker in rp1_context_names:
+            rp1_context[marker] = line
+            continue
+        if marker in usb_fault_context_names:
+            usb_fault_context[marker] = line
             continue
         suspicious = (
             any(
@@ -703,17 +747,19 @@ def diagnostic_console_lines(report: Mapping[str, object]) -> list[str]:
                 )
             )
             or marker.endswith("_STATE")
+            or marker == "USB_DEBUG_FAULT"
         )
         if suspicious and line not in seen:
             if marker in ("RP1_NET_BOARD_FAILED", "RP1_NET_BOARD_TIMEOUT"):
-                result.extend(
-                    board_context[name]
-                    for name in board_context_names
-                    if name in board_context
-                )
-                board_context.clear()
-            seen.add(line)
-            result.append(line)
+                append_context(rp1_context_names, rp1_context)
+                rp1_context.clear()
+            elif marker == "USB_DEBUG_FAULT":
+                append_context(usb_fault_context_names, usb_fault_context)
+                usb_fault_context.clear()
+            append_unique(line)
+    # A capture may end between a typed fault field and its terminal marker.
+    # Preserve the bounded partial snapshot instead of silently hiding it.
+    append_context(usb_fault_context_names, usb_fault_context)
     return result
 
 
