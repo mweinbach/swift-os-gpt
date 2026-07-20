@@ -33,8 +33,10 @@ and enable `noclobber` so redirection cannot replace an earlier capture:
 
 ```sh
 (
+  umask 077
   set -C
-  sudo python3 tools/swiftos_pi_logs.py card --json \
+  sudo env PYTHONDONTWRITEBYTECODE=1 \
+    python3 tools/swiftos_pi_logs.py card --json \
     > .build/hardware-captures/pi5-returned-card.json
 )
 ```
@@ -63,8 +65,8 @@ python3 tools/swiftos_pi_logs.py show \
 ```
 
 `show --summary-only` prints just health and promoted diagnostic markers;
-`show --json` re-emits the validated full report. Saved captures must be
-regular, non-symlink files with the supported format and bounded size.
+`show --json` re-emits the bounded, recognized-format report. Saved captures
+must be regular, non-symlink files with the supported format and bounded size.
 
 A regular packaged image can be examined without `diskutil` or privilege:
 

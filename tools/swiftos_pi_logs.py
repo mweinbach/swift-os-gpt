@@ -951,7 +951,7 @@ def argument_parser() -> argparse.ArgumentParser:
     show.add_argument(
         "--json",
         action="store_true",
-        help="print the validated complete JSON capture",
+        help="print the bounded recognized-format JSON capture",
     )
     show.add_argument(
         "--summary-only",

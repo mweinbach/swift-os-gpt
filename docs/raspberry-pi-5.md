@@ -211,7 +211,9 @@ down when the update must persist.
 
 After a failed physical boot, power down, return the card to the Mac, resolve
 the whole disk and exact block count again, unmount it, then extract logs with
-the read-only inspector:
+the read-only inspector. The unified [Pi log workflow](pi-log-tool.md) adds
+fresh removable-media discovery, safe evidence-file creation, readable
+diagnostic summaries, and the matching live USB console path:
 
 ```sh
 diskutil unmountDisk /dev/diskN
