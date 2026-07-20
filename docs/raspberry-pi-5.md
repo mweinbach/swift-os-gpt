@@ -268,10 +268,13 @@ current SDHCI transport remains synchronous and polled; retaining the validated
 route is groundwork for an asynchronous driver, not a claim that SD IRQ delivery
 has executed.
 
-These are source, host-policy, and link guarantees only. No block has been
-transferred, no log has been recovered, and no SwiftFS provider has mounted on a
-physical Pi. QEMU now has its own native VirtIO-block/SwiftFS path and multi-boot
-durability smoke; that evidence does not validate Pi SDHCI.
+The first physical trace reached `SD_INIT_READY_BLOCKS`, read the MBR and signed
+data superblock, formatted the blank SwiftFS range, published `SWIFTFS_READY`,
+recovered the log arena, and durably flushed the retained boot. That proves the
+bounded polled transport and initial provider path for one exact card. It does
+not prove the retained SD interrupt route, power-loss behavior during a write,
+or a subsequent physical SwiftFS remount. QEMU's native VirtIO-block/SwiftFS
+multi-boot smoke remains separate evidence.
 
 ## AArch64 Image contract
 
@@ -285,9 +288,10 @@ This is the intended direct firmware path: Raspberry Pi firmware documents
 uncompressed 64-bit `.img` files, and the standard header requests placement at
 `0x80000`; the firmware then calls the first header instruction and supplies the
 merged DTB through the Arm64 `x0` convention. In other words, no ELF loader,
-Linux, U-Boot, or host shim is part of the artifact. Acceptance on the actual
-EEPROM/board combination remains an unverified validation item, not a completed
-boot claim.
+Linux, U-Boot, or host shim is part of the artifact. The `9e93dac` returned-card
+trace proves this direct handoff booted on one board/EEPROM combination. Its
+EEPROM build was not retained, so broader firmware compatibility remains
+unverified.
 
 The firmware-to-kernel register contract is:
 
@@ -305,8 +309,9 @@ place the DTB in any RAM bank, plus one identity descriptor for the BCM2712 high
 MMIO window containing UART10 and GICv2. `make rpi5-inspect` checks that MMIO
 descriptor together with the Image entry/reset addresses, AArch64 identity,
 4 KiB flags, and absence of unresolved symbols. The broad normal-memory map is
-replaced by owned final tables after DT parsing; it still maps holes and reserved
-areas during bootstrap and therefore remains a physical-hardware validation item.
+replaced by owned final tables after DT parsing. The physical trace proves that
+transition completed, but it does not retain enough interval detail to account
+for every temporarily mapped bootstrap hole or reservation.
 
 The Pi ELF contains the same range-based memory runtime, final permissioned
 tables and guards, PSCI startup code, and separately linked EL0 Swift image used
