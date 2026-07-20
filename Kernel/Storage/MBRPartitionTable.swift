@@ -1,6 +1,7 @@
 struct MBRPartitionType: RawRepresentable, Equatable {
     let rawValue: UInt8
 
+    static let fat12 = Self(rawValue: 0x01)
     static let fat32 = Self(rawValue: 0x0b)
     static let fat32LBA = Self(rawValue: 0x0c)
     static let protectiveGPT = Self(rawValue: 0xee)
@@ -9,6 +10,7 @@ struct MBRPartitionType: RawRepresentable, Equatable {
     static let swiftOSData = Self(rawValue: 0xda)
 
     var isFAT32: Bool { self == .fat32 || self == .fat32LBA }
+    var isFirmwareFAT: Bool { self == .fat12 || isFAT32 }
 }
 
 struct MBRPartition: Equatable {
@@ -177,6 +179,25 @@ struct SwiftOSMediaPartitions: Equatable {
     let data: MBRPartition
 }
 
+/// Raspberry Pi firmware consumes one invariant selector plus two complete
+/// boot payloads. Keeping the selector outside either payload lets SwiftOS
+/// replace the inactive slot without modifying the firmware's next-boot
+/// decision at the same time. The data partition remains transport-neutral
+/// and retains its signed SwiftOS volume contract.
+struct SwiftOSABMediaPartitions: Equatable {
+    let selector: MBRPartition
+    let slotA: MBRPartition
+    let slotB: MBRPartition
+    let data: MBRPartition
+
+    func partition(for slot: BootSlot) -> MBRPartition {
+        switch slot {
+        case .a: return slotA
+        case .b: return slotB
+        }
+    }
+}
+
 enum SwiftOSMediaLayoutFailure: Equatable {
     case missingBootPartition
     case duplicateBootPartition
@@ -219,5 +240,70 @@ enum SwiftOSMediaLayout {
             return .failure(.bootMustPrecedeData)
         }
         return .layout(SwiftOSMediaPartitions(boot: boot, data: data))
+    }
+}
+
+enum SwiftOSABMediaLayoutFailure: Equatable {
+    case missingPartition(index: Int)
+    case selectorMustBeBootableFAT
+    case slotMustBeNonbootableFAT32(slot: BootSlot)
+    case slotGeometryMismatch
+    case dataMustBeNonbootableSwiftOSVolume
+    case partitionsMustBeOrdered
+}
+
+enum SwiftOSABMediaLayoutResult: Equatable {
+    case layout(SwiftOSABMediaPartitions)
+    case failure(SwiftOSABMediaLayoutFailure)
+}
+
+/// Selects the strict four-entry A/B media topology used by platforms whose
+/// firmware needs an invariant selector partition. Positional requirements are
+/// intentional: Raspberry Pi `autoboot.txt` names MBR partitions 2 and 3, so
+/// accepting a merely type-compatible permutation could boot one slot while
+/// the kernel updates another.
+enum SwiftOSABMediaLayout {
+    static func select(
+        from table: MBRPartitionTable
+    ) -> SwiftOSABMediaLayoutResult {
+        guard let selector = table.partition(at: 0) else {
+            return .failure(.missingPartition(index: 0))
+        }
+        guard let slotA = table.partition(at: 1) else {
+            return .failure(.missingPartition(index: 1))
+        }
+        guard let slotB = table.partition(at: 2) else {
+            return .failure(.missingPartition(index: 2))
+        }
+        guard let data = table.partition(at: 3) else {
+            return .failure(.missingPartition(index: 3))
+        }
+        guard selector.type.isFirmwareFAT, selector.isBootable else {
+            return .failure(.selectorMustBeBootableFAT)
+        }
+        guard slotA.type.isFAT32, !slotA.isBootable else {
+            return .failure(.slotMustBeNonbootableFAT32(slot: .a))
+        }
+        guard slotB.type.isFAT32, !slotB.isBootable else {
+            return .failure(.slotMustBeNonbootableFAT32(slot: .b))
+        }
+        guard slotA.range.blockCount == slotB.range.blockCount else {
+            return .failure(.slotGeometryMismatch)
+        }
+        guard data.type == .swiftOSData, !data.isBootable else {
+            return .failure(.dataMustBeNonbootableSwiftOSVolume)
+        }
+        guard selector.range.endBlock <= slotA.range.startBlock,
+              slotA.range.endBlock <= slotB.range.startBlock,
+              slotB.range.endBlock <= data.range.startBlock
+        else {
+            return .failure(.partitionsMustBeOrdered)
+        }
+        return .layout(SwiftOSABMediaPartitions(
+            selector: selector,
+            slotA: slotA,
+            slotB: slotB,
+            data: data
+        ))
     }
 }

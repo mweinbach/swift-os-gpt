@@ -4,8 +4,9 @@ struct StorageFoundationTests {
         validatesGeometryAndPartitionBounds()
         sharesOneStableTransportAcrossDisjointBorrowedRegions()
         discoversTheSwiftOSMBRLayout()
+        discoversTheSwiftOSABMBRLayout()
         rejectsCorruptAndAmbiguousMBRs()
-        print("storage foundation host tests: 4 groups passed")
+        print("storage foundation host tests: 5 groups passed")
     }
 
     private static func sharesOneStableTransportAcrossDisjointBorrowedRegions() {
@@ -212,6 +213,78 @@ struct StorageFoundationTests {
                 MBRPartitionDiscovery.read(from: &value, scratch: scratch)
                     == .failure(.protectiveGPTUnsupported),
                 "protective GPT MBR was treated as a primary table"
+            )
+        }
+    }
+
+    private static func discoversTheSwiftOSABMBRLayout() {
+        let device = MemoryBlockDevice(blockCount: 1_000)
+        writePartition(
+            to: device,
+            index: 0,
+            status: 0x80,
+            type: MBRPartitionType.fat12.rawValue,
+            start: 1,
+            count: 9
+        )
+        writePartition(
+            to: device,
+            index: 1,
+            status: 0,
+            type: MBRPartitionType.fat32LBA.rawValue,
+            start: 10,
+            count: 200
+        )
+        writePartition(
+            to: device,
+            index: 2,
+            status: 0,
+            type: MBRPartitionType.fat32LBA.rawValue,
+            start: 210,
+            count: 200
+        )
+        writePartition(
+            to: device,
+            index: 3,
+            status: 0,
+            type: MBRPartitionType.swiftOSData.rawValue,
+            start: 410,
+            count: 500
+        )
+        device.bytes[510] = 0x55
+        device.bytes[511] = 0xaa
+        var value = device
+        withScratch { scratch in
+            guard case .table(let table) = MBRPartitionDiscovery.read(
+                from: &value,
+                scratch: scratch
+            ) else { fail("valid A/B MBR was rejected") }
+            guard case .layout(let media) = SwiftOSABMediaLayout.select(
+                from: table
+            ) else { fail("valid A/B media topology was rejected") }
+            expect(media.selector.index == 0, "A/B selector index")
+            expect(media.selector.type == .fat12, "A/B selector type")
+            expect(media.partition(for: .a).index == 1, "slot A index")
+            expect(media.partition(for: .b).index == 2, "slot B index")
+            expect(media.data.index == 3, "A/B data index")
+
+            writePartition(
+                to: device,
+                index: 2,
+                status: 0,
+                type: MBRPartitionType.fat32LBA.rawValue,
+                start: 210,
+                count: 199
+            )
+            value = device
+            guard case .table(let unequalTable) = MBRPartitionDiscovery.read(
+                from: &value,
+                scratch: scratch
+            ) else { fail("unequal-slot MBR parsing") }
+            expect(
+                SwiftOSABMediaLayout.select(from: unequalTable)
+                    == .failure(.slotGeometryMismatch),
+                "unequal A/B slots were accepted"
             )
         }
     }
