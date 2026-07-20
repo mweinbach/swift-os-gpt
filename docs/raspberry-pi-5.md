@@ -1,10 +1,12 @@
 # Raspberry Pi 5 board target
 
-> **Hardware status: unverified and not supported.** SwiftOS now builds and
-> statically inspects a Raspberry Pi 5 firmware image, but that image has not
-> booted on a Raspberry Pi 5. Physical execution and a Pi GUI remain unverified;
-> native V3D VII rendering, HVS/HDMI scanout, EDID, refresh, and PPI handling are
-> not active. No hardware-support claim is permitted until the validation gate
+> **Hardware status: early bring-up verified, target not supported.** One exact
+> SwiftOS artifact has booted on a Raspberry Pi 5 8 GB through FDT parsing,
+> memory ownership and final paging, GICv2/timers, four-core PSCI work, SD,
+> SwiftFS, and persistent-log recovery. USB enumeration, Ethernet link, HDMI,
+> native V3D VII/HVS rendering, input, and Pi EL0 scheduling remain unverified.
+> See the [2026-07-20 returned-card evidence](hardware-evidence/2026-07-20-pi5-8gb-9e93dac.md).
+> No general hardware-support claim is permitted until the validation gate
 > below passes.
 
 The initial physical research target is Raspberry Pi 5 Model B with 8 GB RAM.
@@ -15,9 +17,11 @@ frameworks, SwiftUI, Metal, and Darwin are not part of the boot artifact.
 The board target has its own standard Image header, link address, high-MMIO
 bootstrap descriptors, firmware configuration, and packaging contract. Shared
 Swift code discovers QEMU GICv3 or Pi GICv2, owns DT-described RAM, builds final
-permissioned mappings, and selects HVC or SMC PSCI by the DT. Those mechanisms
-are proven by QEMU tests only; compiling them into `kernel8.img` is not evidence
-that BCM2712 UART, GICv2, timer, PSCI, or 8 GB memory behavior works on hardware.
+permissioned mappings, and selects HVC or SMC PSCI by the DT. QEMU provides the
+repeatable cross-machine proof; the returned-card trace independently confirms
+that the BCM2712 FDT, roughly 8 GB memory map, final tables, GICv2 timer path,
+and four-core PSCI work executed on the physical board. It does not prove every
+driver or the complete support gate.
 
 ## Boot partition and firmware handoff
 
@@ -170,9 +174,14 @@ test -f "$BOOT_VOLUME/BOOT-MANIFEST.txt"
 test -f "$BOOT_VOLUME/MEDIA-LAYOUT.txt"
 test -f "$BOOT_VOLUME/SHA256SUMS"
 (cd "$BOOT_PACKAGE" && shasum -a 256 -c SHA256SUMS)
-rsync -rt "$BOOT_PACKAGE/" "$BOOT_VOLUME/"
+rsync -rt --exclude SHA256SUMS "$BOOT_PACKAGE/" "$BOOT_VOLUME/"
+rsync -t "$BOOT_PACKAGE/SHA256SUMS" "$BOOT_VOLUME/SHA256SUMS"
 (cd "$BOOT_VOLUME" && shasum -a 256 -c SHA256SUMS)
 sync
+diskutil unmountDisk /dev/diskN
+sudo python3 tools/verify_rpi5_boot_partition.py /dev/rdiskN \
+  --expected-block-count EXACT_CARD_BLOCK_COUNT \
+  --expected-sha256sums "$BOOT_PACKAGE/SHA256SUMS"
 diskutil eject /dev/diskN
 ```
 
@@ -182,7 +191,9 @@ copy is not a whole-card flash: it cannot create a missing type-`0xda`
 partition. A card that was previously prepared as FAT-only therefore still has
 no SwiftFS or persistent-log arena after this update; perform a deliberate
 whole-card initialization when preserving its old contents is no longer
-required.
+required. The semantic verifier follows only paths named by the signed manifest,
+so unrelated `.Spotlight-V100`, `.fseventsd`, and AppleDouble files neither
+invalidate the boot payload nor expand the verifier's read scope.
 
 ### Live USB kernel update: volatile
 
@@ -299,9 +310,9 @@ areas during bootstrap and therefore remains a physical-hardware validation item
 
 The Pi ELF contains the same range-based memory runtime, final permissioned
 tables and guards, PSCI startup code, and separately linked EL0 Swift image used
-by the QEMU milestone. Their presence proves the freestanding link contract only;
-none of those paths, including the two CPU0-pinned preempted user threads, has
-executed on a Pi.
+by the QEMU milestone. The returned-card trace proves that the memory, final-map,
+and PSCI paths executed on the Pi. It contains no scheduler or EL0 markers, so
+the linked user image and cross-core EL0 runtime remain physically unproven.
 
 ## Device-tree contract
 
@@ -349,12 +360,13 @@ text/data/user/device regions distinct permissions and leaves boot, secondary,
 and user stack guards unmapped.
 
 Those ownership and table transitions are exercised on QEMU, including host
-tests for split ranges, overlap, permissions, and guards. They have not been run
-against a firmware-patched 8 GB Pi memory map and have not allocated above 4 GiB
-on Pi. The distinct-address DMA model and memory-domain allocator exist, but no
-Pi peripheral or IOMMU integration has supplied a non-identity or noncoherent
-mapping. Hardware acceptance still requires proving every reported byte is
-usable, reserved, or owned with no overflow, alias, or truncation.
+tests for split ranges, overlap, permissions, and guards. The physical trace
+records `USABLE_PAGES=0x1fdb6c`, `PAGING_READY`, and 50 final table pages from a
+firmware-patched 8 GB map. It does not yet retain every source and subtracted
+interval or prove an allocation above 4 GiB. The distinct-address DMA model and
+memory-domain allocator exist, but no Pi peripheral or IOMMU integration has
+supplied a non-identity or noncoherent mapping. Full acceptance still requires
+accounting for every reported byte with no overflow, alias, or truncation.
 
 ## Early serial: BCM2712 UART10 only
 
@@ -396,7 +408,9 @@ USB-C is a post-boot debug transport, not the early console and not a
 DisplayPort signal. After final mappings are installed, SwiftOS:
 
 1. uses the discovered `brcm,bcm2835-mbox` aperture and property channel 8 to
-   power legacy firmware USB device ID 3 with a bounded wait;
+   request legacy firmware USB device ID 3 with a bounded wait; a well-formed
+   `device unavailable` response transfers the decision to the DT-discovered
+   DWC2 driver, while malformed or mismatched state still fails closed;
 2. validates the DWC2 identity, device-mode endpoint/FIFO capabilities, UTMI
    PHY width, and dynamic FIFO plan before attaching to the host;
 3. initializes the core in polled PIO device mode and enumerates one composite
@@ -429,7 +443,8 @@ scale, PPI, and refresh metadata. Unknown Pi simplefb PPI and refresh remain
 unknown rather than being invented. AppKit, Foundation, Dispatch, and Darwin
 remain confined to `tools/USBDisplay`; none link into the boot artifact.
 
-Expected UART markers are `SWIFTOS:USB_POWER_READY`,
+Expected UART markers are `SWIFTOS:USB_POWER_READY` or
+`SWIFTOS:USB_POWER_UNMANAGED`, followed by
 `SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, and
 `SWIFTOS:USB_DEBUG_FRAME`. Failures before SD log recovery remain visible only
 on UART10; later pre-USB failures can also be recovered from the returned card.
@@ -442,7 +457,9 @@ wrong core/resource from AHB-idle, reset, mode, power-programming, and FIFO
 timeouts without treating any failed path as hardware support.
 The host-test suite covers descriptors, control transactions,
 reset/reconnect, DTR restart, frame chunking, CRC, damage assembly, and viewer
-bounds, but no physical Pi has passed this sequence yet.
+bounds, but no physical Pi has passed the complete enumeration sequence yet.
+The 2026-07-20 artifact stopped at its former generic `USB_POWER_STATE` marker;
+the corrected unmanaged handoff still requires a new physical trace.
 
 ## Interrupt controller and timer
 
@@ -463,14 +480,13 @@ is boot-tested on QEMU GICv2 and GICv3 from both EL1 and EL2, including repeatin
 secondary-local physical-timer delivery, acknowledgement, EOI, and rearming.
 That is QEMU evidence, not BCM2712 evidence.
 
-The Pi GICv2 path remains hardware-unverified. A successful physical SMP pass
-must prove the secondary timer-driven work described below. If Pi SMP bring-up
-fails, `SWIFTOS:SMP_DEFERRED` preserves later display/USB diagnosis instead of
-manufacturing success. The separate Pi CPU0 timer observation path may emit
-`SWIFTOS:TIMER_DEFERRED`, stop its timer, and enter the monitor after its bounded
-window; QEMU's corresponding smoke proof remains strict and fail-stop.
-Reusing QEMU addresses or treating the linked GICv2 path as executed evidence
-would be an invalid support claim.
+The first returned-card trace reached `GIC_READY`, then recorded nonzero
+processor-local timer IRQ counts on CPUs 1, 2, and 3 and CPU0's repeating timer
+milestones. This is physical execution evidence for the selected GICv2/timer
+path, but it is not yet the complete register/route trace required by the support
+gate. If Pi SMP bring-up fails, `SWIFTOS:SMP_DEFERRED` preserves later
+display/USB diagnosis instead of manufacturing success. QEMU's corresponding
+smoke proof remains strict and fail-stop.
 
 ## Multicore bring-up
 
@@ -502,11 +518,11 @@ GICv2. CPU0 accepts each secondary only after its two task IDs and deterministic
 checksums, unique owned stack, and `SWIFTOS:SMP_CPU{n}_TIMER_IRQS` count validate;
 then `SWIFTOS:SMP_WORK_OK` precedes `SWIFTOS:SMP_OK`. A second QEMU smoke uses two
 Cortex-A76 CPUs, and an eight-CPU smoke proves the current four-processor policy
-cap. Neither reproduces BCM2712 firmware or topology. The Pi SMC path, GICv2
-route, and Pi affinity values are present in the artifact but have not run on a
-Pi. Both preempted EL0 threads remain pinned to CPU0; the fixed secondary work
-does not provide general kernel-thread admission, preemption, migration, or load
-balancing.
+cap. The physical Pi trace contains those complete CPU1-through-CPU3 work,
+stack, timer, `SMP_WORK_OK`, and `SMP_OK` markers. QEMU also proves the shared
+EL0 run queue, preemption, and migration across managed CPUs; the Pi trace does
+not enter that layer. Fixed secondary work still does not provide general
+kernel-thread admission or load balancing.
 
 ## Display and GPU boundary
 
@@ -585,12 +601,15 @@ does not constitute Pi support. When no supported diagnostic framebuffer is
 present, the Pi can render the same diagnostic desktop into its kernel-owned
 USB surface; if USB activation also fails, current boot remains serial-only.
 There is no dynamic font loader/shaper/atlas, EL0 window server, or Pi GPU text
-path. Physical execution, USB enumeration, and HDMI output remain unverified.
+path. The Pi executed the headless diagnostic-render path, but the firmware
+reported no simple framebuffer; USB enumeration and HDMI output remain
+unverified.
 
 ## Hardware validation gate
 
-The target remains **unverified and unsupported** until one exact build passes
-all of the following on an 8 GB Raspberry Pi 5 Model B. Retain the complete
+The target remains **unsupported** until one exact build passes all of the
+following on an 8 GB Raspberry Pi 5 Model B. The first returned-card capture
+satisfies a meaningful subset but not the gate. Retain the complete
 serial log, exact SwiftOS commit and dirty state, firmware-repository revision,
 separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 
@@ -621,9 +640,12 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
   validates both results, stack ownership/uniqueness, and enough local timer
   IRQs for all work quanta.
 - CPU0 subsequently reaches `SWIFTOS:SCHEDULER_READY`, `SWIFTOS:EL0_OK`,
-  `SWIFTOS:THREADS_OK`, `SWIFTOS:PREEMPT_OK`, and
-  `SWIFTOS:EL0_PREEMPTION_PROVEN` in order. This remains a CPU0-pinned user
-  proof; no EL0 task migration may be inferred from the secondary-work markers.
+  `SWIFTOS:THREADS_OK`, `SWIFTOS:PREEMPT_OK`,
+  `SWIFTOS:EL0_PREEMPTION_PROVEN`, and `SWIFTOS:EL0_MIGRATION_PROVEN` in order.
+  Every managed CPU must retain `EL0_CPU{n}_ONLINE`, `_REPORT`, and `_TIMER_IRQ`
+  evidence, and at least one lease-attributed thread identity must report from
+  multiple CPUs. Migration may not be inferred from fixed secondary-work
+  markers.
 - Allocator stress crosses the 4 GiB boundary without corrupting the DTB, image,
   page tables, DMA buffers, or reserved regions.
 - The runtime-patched framebuffer remains reserved and mapped, and the serial
@@ -632,7 +654,8 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 - HDMI capture shows the diagnostic Swift-rendered desktop at the firmware-
   selected mode; the captured mode, reported refresh, display EDID, viewport
   scale, and visible letterbox bounds are retained with the boot evidence.
-- With and without HDMI attached, the log reaches `SWIFTOS:USB_POWER_READY`,
+- With and without HDMI attached, the log reaches `SWIFTOS:USB_POWER_READY` or
+  the valid Pi 5 fallback `SWIFTOS:USB_POWER_UNMANAGED`,
   `SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, and
   `SWIFTOS:USB_DEBUG_FRAME`; macOS reports VID `0x1209`, PID `0x5a17`, and a
   `/dev/cu.usbmodem*` node, while the viewer validates hello, mode, full-frame,

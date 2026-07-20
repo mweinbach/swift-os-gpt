@@ -28,7 +28,8 @@ unless a guest implementation and a repeatable test sit behind it.
   setup. Each participating CPU owns its timer, hook, counters, and fatal
   diagnostics; physical timer delivery, acknowledgement/end-of-interrupt,
   rearming, and repeated per-CPU IRQ evidence are exercised on both controller
-  versions. The BCM2712 GICv2 path remains unexercised on physical Pi hardware.
+  versions. A returned-card Pi trace now separately proves nonzero secondary and
+  CPU0 timer evidence through the BCM2712 GICv2 path.
 - Range-based physical-memory ownership derived from all discovered RAM banks,
   minus firmware reservation-map entries, `/reserved-memory`, the DTB, kernel,
   and final-table pool. A live fixed-capacity classified allocator owns the
@@ -308,7 +309,23 @@ prove guest CPU-rendered diagnostic frames, a bounded retained compositor
 update, and two presentation backends; they do not prove an EL0 window system,
 routed file-manager interaction, or GPU rasterization.
 
-## Implemented but hardware-unverified Raspberry Pi display path
+## Physically verified Raspberry Pi 5 foundation
+
+Revision `9e93dac` booted on one Raspberry Pi 5 8 GB and returned 642 ordered,
+CRC-valid persistent records from a healthy type-`0xda` SwiftOS data volume.
+The trace proves EL1/FDT entry, roughly 8 GB memory discovery, final paging,
+GICv2 and timer delivery, all four PSCI CPUs with independent secondary work,
+SD/MBR/data-volume access, SwiftFS format and mount, and persistent-log recovery
+and flush. The exact artifact, card geometry, markers, and unproven boundaries
+are retained in the
+[2026-07-20 hardware evidence](hardware-evidence/2026-07-20-pi5-8gb-9e93dac.md).
+
+That boot did not enumerate USB, establish Ethernet, receive a firmware simple
+framebuffer, enter the EL0 scheduler, or prove HDMI/native GPU/input. Physical
+foundation evidence therefore narrows the remaining driver work without making
+the Pi 5 a supported target.
+
+## Implemented Raspberry Pi display and I/O paths awaiting hardware completion
 
 The Pi board package requests a firmware-selected HDMI mode and a 32-bit boot
 framebuffer. At boot, SwiftOS can discover a firmware-patched
@@ -324,13 +341,17 @@ cache ranges before firmware scanout reads them. Unsupported firmware pixel
 formats remain reserved rather than being returned to the allocator.
 
 The Pi image also contains a board-neutral, bounded DWC2 device-mode stack. It
-powers the USB domain through the discovered firmware property mailbox,
-enumerates a CDC ACM plus vendor-debug composite device, and carries a versioned
-full-frame/damage stream to the macOS viewer over USB-C. The same completed
-simplefb surface is mirrored when HDMI exists; otherwise the kernel owns an
-800 x 600 headless diagnostic surface and remains in the monitor loop so the
-polled controller progresses. This code and the viewer are host-tested, but
-physical USB enumeration remains unverified.
+requests the legacy USB power device through the discovered firmware property
+mailbox, enumerates a CDC ACM plus vendor-debug composite device, and carries a
+versioned full-frame/damage stream to the macOS viewer over USB-C. A well-formed
+Pi 5 response saying that legacy power device is unavailable now emits
+`USB_POWER_UNMANAGED` and transfers the decision to DWC2; malformed or
+mismatched responses still fail closed. The same completed simplefb surface is
+mirrored when HDMI exists; otherwise the kernel owns an 800 x 600 headless
+diagnostic surface and remains in the monitor loop so the polled controller
+progresses. The previous physical artifact stopped at the old power-state
+classification, so the corrected handoff and USB enumeration require a new
+boot.
 
 The Pi image also binds the boot-DT's removable `brcm,bcm2712-sdhci` controller
 to the shared synchronous block contract. After the local HDMI/USB observation
@@ -340,15 +361,16 @@ log arena, and durably appends at most one retained 48-byte kernel event per
 cooperative pass. It never rewrites an ambiguous MBR or signed data-volume
 layout; once those validate, the disjoint user subrange may be opened or
 formatted as blank SwiftFS. Discovery, signature, bounds, or transport failure
-drops the relevant write authority. This path is host- and link-tested but has
-not written or recovered a record on physical Pi hardware.
+drops the relevant write authority. The returned-card trace proves the physical
+controller, signed data-volume, log write/recovery, and initial SwiftFS format
+path.
 The SD controller record, SwiftFS scratch, and provider record use stable
 classified allocations. A host-tested policy derives disjoint absolute log and
 user-filesystem ranges. A resumable bootstrap performs at most one block
 operation, synchronization, or CPU-only validation phase per cooperative pass,
 never concurrently with log work, and publishes the same SwiftFS provider seam
-as QEMU. No Pi filesystem or raw block mapping is exposed directly to EL0, and
-the Pi provider has not mounted on physical hardware.
+as QEMU. The Pi provider mounted physically, while no Pi filesystem or raw block
+mapping is exposed directly to EL0.
 
 This is a diagnostic firmware-configured scanout handoff, not a production
 graphics path, a native BCM2712 HVS/HDMI modesetting driver, or V3D VII
@@ -357,7 +379,8 @@ physical panel dimensions, so refresh and PPI remain unknown and current scaling
 is based on pixel fit. A bounded PSF2 font parser and rasterizer are host-tested,
 but the Pi path has no packaged PSF2 asset, live font selection, or native GPU
 atlas. The fixed R8 atlas used by QEMU's VirGL session does not constitute Pi
-GPU text support. None of this path has executed on physical Pi hardware yet.
+GPU text support. The Pi exercised only the headless diagnostic surface; it
+reported `PI_SIMPLE_FB_MISSING`, so no HDMI/display claim follows.
 
 ## Not implemented yet
 
@@ -378,7 +401,9 @@ GPU text support. None of this path has executed on physical Pi hardware yet.
   refresh/PPI-aware output policy;
 - an EL0 compositor service, window/surface protocol, graphical applications,
   general textures/paths, or user-process graphical input delivery;
-- physical Raspberry Pi 5 execution and a Raspberry Pi 5 GUI;
+- physical USB enumeration, Ethernet link/DHCP, HDMI output, native Pi GPU
+  rendering, graphical input, Pi EL0 scheduling/migration, and a Raspberry Pi 5
+  GUI;
 - an Apple Silicon board port or its machine-specific drivers.
 
 The current SVC contracts are the proof-oriented user-thread report and the
@@ -404,17 +429,20 @@ the USB domain, initializes the controller in polled PIO device mode, and can
 export the completed diagnostic desktop through the host-tested CDC/SDDP path.
 The Pi scheduler handoff consumes only `KernelSMP`'s exact proven-online count,
 published after every selected secondary also completes its bounded work. A
-failed bring-up never falls back to the raw Device Tree count. Its busy-secondary
-restart path releases a live EL0 lease before CPU_OFF and, if firmware returns,
-leases a ready context and rearms the local timer. These control paths have not
-executed on physical Pi hardware.
+failed bring-up never falls back to the raw Device Tree count. The physical
+trace proves that bounded secondary handoff, but it does not contain scheduler
+or EL0 markers. The busy-secondary restart path releases a live EL0 lease before
+CPU_OFF and, if firmware returns, leases a ready context and rearms the local
+timer; that EL0 control path remains QEMU-only evidence.
 The kernel also contains a host-tested driver for the runtime-patched firmware
 simple framebuffer, a headless USB surface fallback, and a removable-SD binding
 that can persist the retained kernel log and bootstrap a disjoint SwiftFS user
 range only after signed-volume validation, using stable allocator-owned records.
-No physical Raspberry Pi 5 boot, UART, USB enumeration/frame, SD transfer/log
-recovery, Ethernet link, GICv2 timer delivery, PSCI startup, firmware-patched
-8 GB allocator exercise, HDMI frame, input, or GUI path has been verified.
+Physical evidence now covers boot, firmware-patched memory/paging, GICv2 timers,
+PSCI startup and secondary work, SD transfer, the data volume, log recovery, and
+the initial SwiftFS mount. It does not cover UART electrical output, USB
+enumeration/frame transport, Ethernet link, detailed above-4-GiB allocator
+stress, HDMI, native GPU, input, Pi EL0 migration, or a GUI.
 
 ## Next coherent milestone
 
