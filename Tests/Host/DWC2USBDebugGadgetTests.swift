@@ -367,6 +367,31 @@ struct DWC2USBDebugGadgetTests {
                     gadget.state == .attached && gadget.service() == .none,
                     "stale display completion escaped configured reset cleanup"
                 )
+
+                let invalidEndpointZeroReceiveStatus = UInt32(
+                    DWC2ReceivePacketStatus.outTransferComplete.rawValue
+                ) << 17
+                bank.words[Int(DWC2RegisterLayout.receiveStatusPop / 4)]
+                    = invalidEndpointZeroReceiveStatus
+                bank.injectGlobal(DWC2CoreBits.receiveFIFOLevelInterrupt)
+                expect(
+                    gadget.service() == .faulted,
+                    "invalid idle EP0 OUT completion did not fail closed"
+                )
+                guard let fault = gadget.lastServiceFault else {
+                    fail("terminal service fault lost its bounded snapshot")
+                }
+                expect(
+                    fault.reason == .endpointZero
+                        && fault.gadgetState == .attached
+                        && fault.controllerState == .connected
+                        && fault.globalInterrupts
+                            & DWC2CoreBits.receiveFIFOLevelInterrupt != 0
+                        && fault.endpointInterrupts == 0
+                        && fault.receiveStatus
+                            == invalidEndpointZeroReceiveStatus,
+                    "EP0 receive-state fault snapshot changed"
+                )
             }
           }
         }
@@ -909,6 +934,20 @@ struct DWC2USBDebugGadgetTests {
         expect(
             bank.words[inputTransferSize] == transferBeforeSetupCompletion,
             "Chapter 9 action ran before SETUP transaction completion"
+        )
+        bank.loadReceiveData([])
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .outTransferComplete,
+            byteCount: 0
+        )
+        expect(
+            gadget.service() != .faulted,
+            "physical SETUP OUT completion faulted gadget"
+        )
+        expect(
+            bank.words[inputTransferSize] == transferBeforeSetupCompletion,
+            "SETUP OUT completion consumed the staged request too early"
         )
         completeSetup(bank: bank, gadget: &gadget)
         expect(

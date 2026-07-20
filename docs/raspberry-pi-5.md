@@ -457,9 +457,11 @@ remain confined to `tools/USBDisplay`; none link into the boot artifact.
 
 Expected UART markers are `SWIFTOS:USB_POWER_READY`,
 `SWIFTOS:USB_POWER_UNMANAGED`, or `SWIFTOS:USB_POWER_UNMANAGED_OFF`, followed by
-`SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, and
-`SWIFTOS:USB_DEBUG_FRAME`. Failures before SD log recovery remain visible only
-on UART10; later pre-USB failures can also be recovered from the returned card.
+`SWIFTOS:USB_DEBUG_ATTACHED`, the one-shot `SWIFTOS:USB_DEBUG_BUS_RESET` and
+`SWIFTOS:USB_DEBUG_ENUMERATED_SPEED` markers, then
+`SWIFTOS:USB_DEBUG_CONFIGURED` and `SWIFTOS:USB_DEBUG_FRAME`. Failures before SD
+log recovery remain visible only on UART10; later pre-USB failures can also be
+recovered from the returned card.
 Before activation, the kernel records whether the firmware mailbox, DWC2
 controller, and simple framebuffer were discovered, missing, or unsupported.
 If DWC2 initialization fails after MMIO becomes accessible, it emits one typed
@@ -467,6 +469,12 @@ stage marker plus the read-only pre-reset `GSNPSID` and `GHWCFG1` through
 `GHWCFG4` words. Retain those values with the boot identity; they distinguish a
 wrong core/resource from AHB-idle, reset, mode, power-programming, and FIFO
 timeouts without treating any failed path as hardware support.
+After attachment, a terminal service failure records a bounded pre-disconnect
+snapshot: `USB_DEBUG_FAULT_REASON`, gadget/controller state, masked global and
+endpoint interrupts, bus speed, and the active receive status. Reason values
+`0x2` through `0x9` identify bus reset, enumeration, malformed receive status,
+receive protocol, endpoint zero, endpoint two, endpoint-two protocol, and
+display transmission respectively; `0x1` is an internal invariant fallback.
 The host-test suite covers descriptors, control transactions,
 reset/reconnect, DTR restart, frame chunking, CRC, damage assembly, and viewer
 bounds, but no physical Pi has passed the complete enumeration sequence yet.
@@ -475,7 +483,13 @@ marker. The next artifact classified the firmware's validated response as
 `USB_POWER_STATE_MISMATCH`, proving that legacy HCD device 3 was reported as
 existing but off. The Pi 5 policy now retains that distinction as
 `USB_POWER_UNMANAGED_OFF` and continues to DWC2's typed identity/capability
-probe; that handoff still requires a new physical trace.
+probe. The following physical trace reached `USB_DEBUG_ATTACHED` but then
+faulted before macOS received a descriptor. The device engine now accepts the
+valid DWC2 control-transfer ordering `SETUPRX`, optional `OUTDONE`, then
+`SETUPDONE`: the optional OUT completion retains the staged eight-byte request,
+and only setup completion executes Chapter 9 policy. This ordering and the new
+service markers still require another physical boot before enumeration can be
+claimed.
 
 ## Interrupt controller and timer
 

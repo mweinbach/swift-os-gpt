@@ -22,6 +22,8 @@ struct KernelMonitor {
     private var statusIndicator: AnimatedStatusIndicator?
     private var wroteAnimationFrameMarker = false
     private var wroteAnimationPeakMarker = false
+    private var wroteUSBBusResetMarker = false
+    private var wroteUSBEnumeratedMarker = false
     private var wroteUSBConfiguredMarker = false
     private var wroteUSBFrameMarker = false
     private var usbDebug: RaspberryPiUSBDebugGadget?
@@ -168,14 +170,49 @@ struct KernelMonitor {
                     .frameMarker)
                 wroteUSBFrameMarker = true
             }
+        case .busReset:
+            if !wroteUSBBusResetMarker {
+                serialWrite("SWIFTOS:USB_DEBUG_BUS_RESET\n")
+                wroteUSBBusResetMarker = true
+            }
+        case .enumerated(let speed):
+            if !wroteUSBEnumeratedMarker {
+                serialWrite("SWIFTOS:USB_DEBUG_ENUMERATED_SPEED=")
+                serialWriteHex(UInt64(speed.rawValue))
+                serialWrite("\n")
+                wroteUSBEnumeratedMarker = true
+            }
         case .faulted:
+            if let fault = usbDebug?.lastServiceFault {
+                reportUSBDebugServiceFault(fault)
+            }
             serialWrite("SWIFTOS:USB_DEBUG_FAULT\n")
             usbDebug = nil
         case .kernelUpdateReady(let artifact):
             handleKernelUpdateReady(artifact)
-        case .none, .busReset, .enumerated, .deconfigured:
+        case .none, .deconfigured:
             break
         }
+    }
+
+    private func reportUSBDebugServiceFault(
+        _ fault: DWC2USBDebugGadgetServiceFault
+    ) {
+        serialWrite("SWIFTOS:USB_DEBUG_FAULT_REASON=")
+        serialWriteHex(UInt64(fault.reason.rawValue))
+        serialWrite("\nSWIFTOS:USB_DEBUG_FAULT_GADGET_STATE=")
+        serialWriteHex(UInt64(fault.gadgetState.rawValue))
+        serialWrite("\nSWIFTOS:USB_DEBUG_FAULT_CONTROLLER_STATE=")
+        serialWriteHex(UInt64(fault.controllerState.rawValue))
+        serialWrite("\nSWIFTOS:USB_DEBUG_FAULT_GLOBAL=")
+        serialWriteHex(UInt64(fault.globalInterrupts))
+        serialWrite("\nSWIFTOS:USB_DEBUG_FAULT_ENDPOINT=")
+        serialWriteHex(UInt64(fault.endpointInterrupts))
+        serialWrite("\nSWIFTOS:USB_DEBUG_FAULT_BUS_SPEED=")
+        serialWriteHex(UInt64(fault.busSpeed.rawValue))
+        serialWrite("\nSWIFTOS:USB_DEBUG_FAULT_RX_STATUS=")
+        serialWriteHex(UInt64(fault.receiveStatus))
+        serialWrite("\n")
     }
 
     private mutating func handleKernelUpdateReady(
@@ -387,6 +424,16 @@ struct KernelMonitor {
 
     private func serialWrite(_ text: StaticString) {
         KernelDebugLogRuntime.write(text, to: serial, source: .monitor)
+    }
+
+    private func serialWriteHex(_ value: UInt64) {
+        serialWrite("0x")
+        var shift = 60
+        while shift >= 0 {
+            let nibble = UInt8(truncatingIfNeeded: value >> UInt64(shift)) & 0xf
+            serialWrite(byte: nibble < 10 ? 48 + nibble : 87 + nibble)
+            shift -= 4
+        }
     }
 
     private func serialWriteUnsigned(_ value: UInt64) {

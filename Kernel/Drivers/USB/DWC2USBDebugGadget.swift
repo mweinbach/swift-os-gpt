@@ -18,6 +18,34 @@ enum USBDebugGadgetEvent: Equatable {
     case faulted
 }
 
+/// Stable, compact classification for a terminal fault discovered while the
+/// polled gadget services one hardware snapshot. Raw values are persisted by
+/// the Pi monitor and are therefore part of the returned-card debug contract.
+enum DWC2USBDebugGadgetServiceFaultReason: UInt8, Equatable {
+    case internalInvariant = 1
+    case busReset = 2
+    case enumeration = 3
+    case malformedReceiveStatus = 4
+    case receiveProtocol = 5
+    case endpointZero = 6
+    case endpointTwo = 7
+    case endpointTwoProtocol = 8
+    case displayTransmit = 9
+}
+
+/// Pre-disconnect state retained when service fails. This is deliberately a
+/// bounded value snapshot: no register is read after the controller has been
+/// disconnected and no diagnostic path can mutate hardware.
+struct DWC2USBDebugGadgetServiceFault: Equatable {
+    let reason: DWC2USBDebugGadgetServiceFaultReason
+    let gadgetState: USBDebugGadgetState
+    let controllerState: DWC2ControllerState
+    let globalInterrupts: UInt32
+    let endpointInterrupts: UInt32
+    let busSpeed: DWC2BusSpeed
+    let receiveStatus: UInt32
+}
+
 /// Immutable, board-neutral state needed by the USB diagnostic service. Live
 /// link, log, and allocator state is sampled by the gadget when it answers a
 /// request; this value only anchors the exact boot and machine-wide capacities.
@@ -173,6 +201,12 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     private var updateStatusCommittedArtifact:
         USBKernelUpdateSealedArtifact?
     private(set) var state: USBDebugGadgetState = .attached
+    private(set) var lastServiceFault:
+        DWC2USBDebugGadgetServiceFault?
+    private var serviceInterruptSnapshot: DWC2InterruptSnapshot?
+    private var serviceFaultReason:
+        DWC2USBDebugGadgetServiceFaultReason = .internalInvariant
+    private var serviceReceiveStatus: UInt32 = 0
 
     init?(
         registers: Registers,
@@ -406,9 +440,13 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     mutating func service() -> USBDebugGadgetEvent {
         guard state != .faulted else { return .faulted }
         let snapshot = controller.interruptSnapshot()
+        serviceInterruptSnapshot = snapshot
+        serviceFaultReason = .internalInvariant
+        serviceReceiveStatus = 0
         var event: USBDebugGadgetEvent = .none
 
         if snapshot.didReset {
+            serviceFaultReason = .busReset
             guard controller.handleBusReset() else { return fail() }
             controlEndpoint.busReset()
             displayTransmitter.resetSession(requestFullFrame: true)
@@ -434,6 +472,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         }
 
         if snapshot.didEnumerate {
+            serviceFaultReason = .enumeration
             controller.handleEnumerationDone()
             controlEndpoint = USBControlEndpoint(
                 speed: controller.busSpeed == .high ? .high : .full
@@ -449,14 +488,26 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         }
 
         if snapshot.hasReceiveFIFOEntry {
+            serviceFaultReason = .receiveProtocol
             let receive = receiveBuffer
             let receiveResult = controller.pollReceive(into: receive)
             switch receiveResult {
             case .noPacket:
                 break
-            case .malformedStatus:
+            case .malformedStatus(let rawValue, _):
+                serviceFaultReason = .malformedReceiveStatus
+                serviceReceiveStatus = rawValue
                 return fail()
             case .packet(let status, let copiedByteCount, let wasTruncated):
+                serviceReceiveStatus = encodedReceiveStatus(status)
+                switch status.endpoint {
+                case 0:
+                    serviceFaultReason = .endpointZero
+                case 2, 3:
+                    serviceFaultReason = .endpointTwoProtocol
+                default:
+                    serviceFaultReason = .receiveProtocol
+                }
                 if wasTruncated {
                     guard status.packetStatus == .outDataReceived,
                           status.endpoint == 2 || status.endpoint == 3
@@ -466,12 +517,15 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                     status: status,
                     copiedByteCount: copiedByteCount
                 ), receiveEvent != .none {
+                    if receiveEvent == .faulted { return .faulted }
                     event = receiveEvent
                 }
             }
         }
 
         if snapshot.hasInEndpointInterrupt(0) {
+            serviceFaultReason = .endpointZero
+            serviceReceiveStatus = 0
             guard let interrupt = controller.endpointInterruptStatus(
                       endpoint: 0,
                       directionIn: true
@@ -490,6 +544,8 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         }
 
         if snapshot.hasOutEndpointInterrupt(0) {
+            serviceFaultReason = .endpointZero
+            serviceReceiveStatus = 0
             guard let interrupt = controller.endpointInterruptStatus(
                       endpoint: 0,
                       directionIn: false
@@ -503,6 +559,8 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         }
 
         if snapshot.hasInEndpointInterrupt(2) {
+            serviceFaultReason = .endpointTwo
+            serviceReceiveStatus = 0
             guard let interrupt = controller.endpointInterruptStatus(
                       endpoint: 2,
                       directionIn: true
@@ -580,6 +638,8 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             resetEndpointTwoProtocolState()
         }
 
+        serviceFaultReason = .endpointTwoProtocol
+        serviceReceiveStatus = 0
         if state == .configured,
            endpointTwoInFlight == .none,
            updateStatusPending {
@@ -646,6 +706,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
            endpointTwoInFlight == .none,
            !updateStatusPending,
            sdbgSession.pendingOutboundByteCount == 0 {
+            serviceFaultReason = .displayTransmit
             let packet = displayPacketBuffer
             let transmitResult = displayTransmitter.prepareNextPacket(
                 into: packet
@@ -676,6 +737,14 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
             }
         }
         return event
+    }
+
+    private func encodedReceiveStatus(_ status: DWC2ReceiveStatus) -> UInt32 {
+        UInt32(status.endpoint)
+            | UInt32(status.byteCount) << 4
+            | UInt32(status.dataPID) << 15
+            | UInt32(status.packetStatus.rawValue) << 17
+            | UInt32(status.frameNumber) << 25
     }
 
     private mutating func handleReceivePacket(
@@ -753,6 +822,13 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         case .outTransferComplete:
             if status.endpoint == 0 {
                 switch endpointZeroReceiveStage {
+                case .setup:
+                    // DWC2 integrations may report SETUPRX, OUTDONE, then
+                    // SETUPDONE for one control request. SETUPDONE is the
+                    // stable point at which this driver parses and acts on
+                    // the staged eight-byte request, so retain the payload
+                    // across the optional OUTDONE indication.
+                    return USBDebugGadgetEvent.none
                 case .dataOut:
                     guard endpointZeroTransaction == .dataOut,
                           endpointZeroStagedByteCount
@@ -777,7 +853,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                         return fail()
                     }
                     return USBDebugGadgetEvent.none
-                case .idle, .setup:
+                case .idle:
                     return fail()
                 }
             }
@@ -1428,6 +1504,16 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     }
 
     private mutating func fail() -> USBDebugGadgetEvent {
+        let snapshot = serviceInterruptSnapshot
+        lastServiceFault = DWC2USBDebugGadgetServiceFault(
+            reason: serviceFaultReason,
+            gadgetState: state,
+            controllerState: controller.state,
+            globalInterrupts: snapshot?.global ?? 0,
+            endpointInterrupts: snapshot?.endpoint ?? 0,
+            busSpeed: snapshot?.busSpeed ?? controller.busSpeed,
+            receiveStatus: serviceReceiveStatus
+        )
         controller.disconnect()
         state = .faulted
         resetEndpointZeroTransaction()
