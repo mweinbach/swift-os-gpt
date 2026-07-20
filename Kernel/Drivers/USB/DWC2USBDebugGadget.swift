@@ -40,6 +40,30 @@ struct USBDebugKernelDescription: Equatable {
     }
 }
 
+enum DWC2USBDebugGadgetInitializationFailureReason: Equatable {
+    case invalidConfiguration
+    case displayTransmitterInvalid
+    case updateReceiverInvalid
+    case debugSessionInvalid
+    case controller(DWC2InitializationResult)
+    case connectionFailed
+}
+
+/// A controller failure includes the immutable identity/capability words read
+/// before reset. Pure software validation failures deliberately carry no MMIO
+/// snapshot because they are rejected before the controller is touched.
+struct DWC2USBDebugGadgetInitializationFailure: Equatable {
+    let reason: DWC2USBDebugGadgetInitializationFailureReason
+    let hardwareSnapshot: DWC2HardwareRegisterSnapshot?
+}
+
+enum DWC2USBDebugGadgetInitializationOutcome<
+    Registers: DWC2RegisterAccess
+> {
+    case ready(DWC2USBDebugGadget<Registers>)
+    case failed(DWC2USBDebugGadgetInitializationFailure)
+}
+
 private enum DWC2USBDebugScratchLayout {
     static let endpointZeroMaximumPacketByteCount: UInt16 = 64
     static let controlReplyOffset = 0
@@ -161,6 +185,35 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         updateStagingRegion: USBKernelUpdateRAMStagingRegion? = nil,
         maximumInitializationPollCount: Int = 100_000
     ) {
+        switch Self.bringUp(
+            registers: registers,
+            scratchBaseAddress: scratchBaseAddress,
+            scratchByteCount: scratchByteCount,
+            scanout: scanout,
+            viewportScale: viewportScale,
+            kernelDescription: kernelDescription,
+            updateTargetMachine: updateTargetMachine,
+            updateStagingRegion: updateStagingRegion,
+            maximumInitializationPollCount: maximumInitializationPollCount
+        ) {
+        case .ready(let gadget):
+            self = gadget
+        case .failed:
+            return nil
+        }
+    }
+
+    static func bringUp(
+        registers: Registers,
+        scratchBaseAddress: UInt64,
+        scratchByteCount: UInt64,
+        scanout: ScanoutBuffer,
+        viewportScale: UInt16,
+        kernelDescription: USBDebugKernelDescription,
+        updateTargetMachine: USBKernelUpdateTargetMachine = .raspberryPi5,
+        updateStagingRegion: USBKernelUpdateRAMStagingRegion? = nil,
+        maximumInitializationPollCount: Int = 100_000
+    ) -> DWC2USBDebugGadgetInitializationOutcome<Registers> {
         guard scratchBaseAddress <= UInt64(UInt.max),
               scratchByteCount >= UInt64(
                   DWC2USBDebugScratchLayout.requiredByteCount
@@ -168,7 +221,12 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
               scratchByteCount <= UInt64.max - scratchBaseAddress,
               viewportScale > 0
         else {
-            return nil
+            return .failed(
+                DWC2USBDebugGadgetInitializationFailure(
+                    reason: .invalidConfiguration,
+                    hardwareSnapshot: nil
+                )
+            )
         }
         let displaySessionIDCandidate =
             kernelDescription.bootIdentity.sessionID.high
@@ -176,11 +234,7 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         let displaySessionID = displaySessionIDCandidate == 0
             ? 1
             : displaySessionIDCandidate
-        var controller = DWC2Controller(registers: registers)
-        guard case .ready = controller.initialize(
-                  maximumPollCount: maximumInitializationPollCount
-              ), controller.connect(),
-              let transmitter = USBDebugDisplayTransmitter(
+        guard let transmitter = USBDebugDisplayTransmitter(
                   sourceBaseAddress: scanout.mapping.cpuPhysicalAddress,
                   sourceByteCount: scanout.requiredByteCount,
                   mode: scanout.mode,
@@ -192,7 +246,12 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                   maximumChunkDataByteCount: 456
               )
         else {
-            return nil
+            return .failed(
+                DWC2USBDebugGadgetInitializationFailure(
+                    reason: .displayTransmitterInvalid,
+                    hardwareSnapshot: nil
+                )
+            )
         }
         let updateReceiver: USBKernelUpdateStreamReceiver?
         if let updateStagingRegion {
@@ -207,7 +266,14 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                       targetMachine: updateTargetMachine,
                       stagingRegion: updateStagingRegion
                   )
-            else { return nil }
+            else {
+                return .failed(
+                    DWC2USBDebugGadgetInitializationFailure(
+                        reason: .updateReceiverInvalid,
+                        hardwareSnapshot: nil
+                    )
+                )
+            }
             updateReceiver = receiver
         } else {
             updateReceiver = nil
@@ -228,14 +294,66 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
                   outboundStorageByteCount:
                       DWC2USBDebugScratchLayout.sdbgTransmitByteCount
               )
-        else { return nil }
-        self.controller = controller
-        displayTransmitter = transmitter
+        else {
+            return .failed(
+                DWC2USBDebugGadgetInitializationFailure(
+                    reason: .debugSessionInvalid,
+                    hardwareSnapshot: nil
+                )
+            )
+        }
+
+        var controller = DWC2Controller(registers: registers)
+        let hardwareSnapshot = controller.hardwareRegisterSnapshot()
+        let initialization = controller.initialize(
+            maximumPollCount: maximumInitializationPollCount
+        )
+        guard case .ready = initialization else {
+            return .failed(
+                DWC2USBDebugGadgetInitializationFailure(
+                    reason: .controller(initialization),
+                    hardwareSnapshot: hardwareSnapshot
+                )
+            )
+        }
+        guard controller.connect() else {
+            return .failed(
+                DWC2USBDebugGadgetInitializationFailure(
+                    reason: .connectionFailed,
+                    hardwareSnapshot: hardwareSnapshot
+                )
+            )
+        }
+
+        return .ready(
+            DWC2USBDebugGadget(
+                activeController: controller,
+                displayTransmitter: transmitter,
+                updateReceiver: updateReceiver,
+                sdbgSession: sdbgSession,
+                kernelDescription: kernelDescription,
+                displayMode: scanout.mode,
+                scratchBaseAddress: UInt(scratchBaseAddress)
+            )
+        )
+    }
+
+    private init(
+        activeController: DWC2Controller<Registers>,
+        displayTransmitter: USBDebugDisplayTransmitter,
+        updateReceiver: USBKernelUpdateStreamReceiver?,
+        sdbgSession: SDBGTransportSession,
+        kernelDescription: USBDebugKernelDescription,
+        displayMode: DisplayMode,
+        scratchBaseAddress: UInt
+    ) {
+        controller = activeController
+        self.displayTransmitter = displayTransmitter
         self.updateReceiver = updateReceiver
         self.sdbgSession = sdbgSession
         self.kernelDescription = kernelDescription
-        displayMode = scanout.mode
-        self.scratchBaseAddress = UInt(scratchBaseAddress)
+        self.displayMode = displayMode
+        self.scratchBaseAddress = scratchBaseAddress
     }
 
     var isOperational: Bool {

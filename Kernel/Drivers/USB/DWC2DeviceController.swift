@@ -118,14 +118,10 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
         self.registers = registers
     }
 
-    mutating func inspectHardware() -> DWC2HardwareCapabilities? {
-        guard DWC2CoreIdentifier(
-                  rawValue: read(DWC2RegisterLayout.coreIdentifier)
-              ) != nil
-        else {
-            return nil
-        }
-        return DWC2HardwareCapabilities(
+    mutating func hardwareRegisterSnapshot()
+        -> DWC2HardwareRegisterSnapshot {
+        DWC2HardwareRegisterSnapshot(
+            coreIdentifier: read(DWC2RegisterLayout.coreIdentifier),
             hardwareConfiguration1: read(
                 DWC2RegisterLayout.hardwareConfiguration1
             ),
@@ -138,6 +134,20 @@ struct DWC2Controller<Registers: DWC2RegisterAccess> {
             hardwareConfiguration4: read(
                 DWC2RegisterLayout.hardwareConfiguration4
             )
+        )
+    }
+
+    mutating func inspectHardware() -> DWC2HardwareCapabilities? {
+        let snapshot = hardwareRegisterSnapshot()
+        guard DWC2CoreIdentifier(rawValue: snapshot.coreIdentifier) != nil
+        else {
+            return nil
+        }
+        return DWC2HardwareCapabilities(
+            hardwareConfiguration1: snapshot.hardwareConfiguration1,
+            hardwareConfiguration2: snapshot.hardwareConfiguration2,
+            hardwareConfiguration3: snapshot.hardwareConfiguration3,
+            hardwareConfiguration4: snapshot.hardwareConfiguration4
         )
     }
 

@@ -159,6 +159,7 @@ private struct USBDebugGadgetTestRegisters: DWC2RegisterAccess {
 struct DWC2USBDebugGadgetTests {
     static func main() {
         enumeratesConfiguresAndStreamsAFrame()
+        reportsTypedBringUpFailureAndHardwareSnapshot()
         print("DWC2 USB debug gadget: 2 groups passed")
     }
 
@@ -362,6 +363,82 @@ struct DWC2USBDebugGadgetTests {
                 )
             }
           }
+        }
+    }
+
+    private static func reportsTypedBringUpFailureAndHardwareSnapshot() {
+        let bank = USBDebugGadgetRegisterBank()
+        bank.words[Int(DWC2RegisterLayout.coreIdentifier / 4)] = 0x1234_5678
+        var pixels = Array(UInt8(0)..<UInt8(32))
+        var scratch = [UInt8](repeating: 0, count: 4_096)
+        pixels.withUnsafeMutableBytes { source in
+            scratch.withUnsafeMutableBytes { scratchBytes in
+                guard let sourceBase = source.baseAddress,
+                      let scratchBase = scratchBytes.baseAddress,
+                      let scanout = makeScanout(
+                          sourceBase: sourceBase,
+                          sourceByteCount: source.count
+                      )
+                else { fail("typed failure fixture was invalid") }
+
+                let outcome = DWC2USBDebugGadget<
+                    USBDebugGadgetTestRegisters
+                >.bringUp(
+                    registers: USBDebugGadgetTestRegisters(bank: bank),
+                    scratchBaseAddress: UInt64(UInt(bitPattern: scratchBase)),
+                    scratchByteCount: UInt64(scratchBytes.count),
+                    scanout: scanout,
+                    viewportScale: 1,
+                    kernelDescription: makeKernelDescription(),
+                    maximumInitializationPollCount: 4
+                )
+                guard case .failed(let failure) = outcome else {
+                    fail("foreign DWC2 core activated")
+                }
+                expect(
+                    failure.reason == .controller(.unsupportedCore),
+                    "controller failure reason was collapsed"
+                )
+                guard let snapshot = failure.hardwareSnapshot else {
+                    fail("controller failure lost hardware snapshot")
+                }
+                expect(
+                    snapshot.coreIdentifier == 0x1234_5678,
+                    "core identifier snapshot changed"
+                )
+                expect(
+                    snapshot.hardwareConfiguration2
+                        == bank.words[
+                            Int(
+                                DWC2RegisterLayout.hardwareConfiguration2 / 4
+                            )
+                        ],
+                    "hardware configuration snapshot changed"
+                )
+
+                let invalid = DWC2USBDebugGadget<
+                    USBDebugGadgetTestRegisters
+                >.bringUp(
+                    registers: USBDebugGadgetTestRegisters(bank: bank),
+                    scratchBaseAddress: UInt64(UInt(bitPattern: scratchBase)),
+                    scratchByteCount: 1,
+                    scanout: scanout,
+                    viewportScale: 1,
+                    kernelDescription: makeKernelDescription(),
+                    maximumInitializationPollCount: 4
+                )
+                guard case .failed(let invalidFailure) = invalid else {
+                    fail("invalid scratch activated")
+                }
+                expect(
+                    invalidFailure.reason == .invalidConfiguration,
+                    "software validation failure was misclassified"
+                )
+                expect(
+                    invalidFailure.hardwareSnapshot == nil,
+                    "software rejection touched DWC2 MMIO"
+                )
+            }
         }
     }
 

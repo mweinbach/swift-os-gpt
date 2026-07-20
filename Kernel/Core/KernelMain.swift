@@ -141,6 +141,11 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             memory: memory
         )
     case .raspberryPi5:
+        reportRaspberryPi5DebugResources(
+            console: console,
+            platform: platform,
+            display: drivers.display
+        )
         RaspberryPi5CooperativeRuntime.scheduleActivation(
             console: console,
             platform: platform
@@ -842,6 +847,9 @@ private func activateUSBDebugGadget(
     else {
         return nil
     }
+    console.write("SWIFTOS:USB_DWC2_BASE=")
+    console.writeHex(resource.baseAddress)
+    console.write("\n")
     let scratchAddress = AArch64.dmaScratchAddress
     guard powerOnRaspberryPiUSB(
               console: console,
@@ -882,18 +890,33 @@ private func activateUSBDebugGadget(
     } else {
         updateStagingRegion = nil
     }
-    guard let gadget = RaspberryPiUSBDebugGadget(
-              resource: resource,
-              scratchBaseAddress: scratchAddress,
-              scratchByteCount: 4_096,
-              scanout: scanout,
-              viewportScale: UInt16(viewport.scale),
-              kernelDescription: kernelDescription,
-              updateTargetMachine: .raspberryPi5,
-              updateStagingRegion: updateStagingRegion
+    guard let registers = DWC2MMIORegisterAccess(
+              baseAddress: resource.baseAddress,
+              length: resource.length
           )
     else {
-        console.write("SWIFTOS:USB_DEBUG_UNAVAILABLE\n")
+        console.write("SWIFTOS:USB_DWC2_MMIO_INVALID\n")
+        return nil
+    }
+    let activation = RaspberryPiUSBDebugGadget.bringUp(
+        registers: registers,
+        scratchBaseAddress: scratchAddress,
+        scratchByteCount: 4_096,
+        scanout: scanout,
+        viewportScale: UInt16(viewport.scale),
+        kernelDescription: kernelDescription,
+        updateTargetMachine: .raspberryPi5,
+        updateStagingRegion: updateStagingRegion
+    )
+    let gadget: RaspberryPiUSBDebugGadget
+    switch activation {
+    case .ready(let active):
+        gadget = active
+    case .failed(let failure):
+        reportUSBDebugGadgetInitializationFailure(
+            failure,
+            console: console
+        )
         return nil
     }
     console.write(
@@ -903,6 +926,86 @@ private func activateUSBDebugGadget(
         console.write("SWIFTOS:USB_UPDATE_READY\n")
     }
     return gadget
+}
+
+private func reportRaspberryPi5DebugResources(
+    console: EarlyConsole,
+    platform: Platform,
+    display: SimpleFramebufferDisplayDriver?
+) {
+    if platform.firmwareMailbox != nil {
+        console.write("SWIFTOS:PI_FIRMWARE_MAILBOX_DISCOVERED\n")
+    } else {
+        console.write("SWIFTOS:PI_FIRMWARE_MAILBOX_MISSING\n")
+    }
+    if platform.usbDeviceController != nil {
+        console.write("SWIFTOS:PI_USB_DWC2_DISCOVERED\n")
+    } else {
+        console.write("SWIFTOS:PI_USB_DWC2_MISSING\n")
+    }
+    if platform.simpleFramebuffer == nil {
+        console.write("SWIFTOS:PI_SIMPLE_FB_MISSING\n")
+    } else if display != nil {
+        console.write("SWIFTOS:PI_SIMPLE_FB_DISCOVERED\n")
+    } else {
+        console.write("SWIFTOS:PI_SIMPLE_FB_UNSUPPORTED\n")
+    }
+}
+
+private func reportUSBDebugGadgetInitializationFailure(
+    _ failure: DWC2USBDebugGadgetInitializationFailure,
+    console: EarlyConsole
+) {
+    switch failure.reason {
+    case .invalidConfiguration:
+        console.write("SWIFTOS:USB_DEBUG_CONFIG_INVALID\n")
+    case .displayTransmitterInvalid:
+        console.write("SWIFTOS:USB_DEBUG_DISPLAY_INVALID\n")
+    case .updateReceiverInvalid:
+        console.write("SWIFTOS:USB_UPDATE_RECEIVER_INVALID\n")
+    case .debugSessionInvalid:
+        console.write("SWIFTOS:USB_SDBG_SESSION_INVALID\n")
+    case .connectionFailed:
+        console.write("SWIFTOS:USB_DWC2_CONNECT_FAILED\n")
+    case .controller(let result):
+        switch result {
+        case .ready:
+            console.write("SWIFTOS:USB_DWC2_INIT_RESULT_INVALID\n")
+        case .invalidPollLimit:
+            console.write("SWIFTOS:USB_DWC2_POLL_LIMIT_INVALID\n")
+        case .unsupportedCore:
+            console.write("SWIFTOS:USB_DWC2_CORE_UNSUPPORTED\n")
+        case .unsupportedConfiguration:
+            console.write("SWIFTOS:USB_DWC2_CONFIG_UNSUPPORTED\n")
+        case .ahbNotIdle:
+            console.write("SWIFTOS:USB_DWC2_AHB_TIMEOUT\n")
+        case .coreResetTimedOut:
+            console.write("SWIFTOS:USB_DWC2_RESET_TIMEOUT\n")
+        case .deviceModeTimedOut:
+            console.write("SWIFTOS:USB_DWC2_MODE_TIMEOUT\n")
+        case .powerOnProgrammingTimedOut:
+            console.write("SWIFTOS:USB_DWC2_POWER_PROGRAM_TIMEOUT\n")
+        case .transmitFIFOFlushTimedOut:
+            console.write("SWIFTOS:USB_DWC2_TX_FIFO_TIMEOUT\n")
+        case .receiveFIFOFlushTimedOut:
+            console.write("SWIFTOS:USB_DWC2_RX_FIFO_TIMEOUT\n")
+        case .invalidState:
+            console.write("SWIFTOS:USB_DWC2_STATE_INVALID\n")
+        }
+    }
+
+    guard let snapshot = failure.hardwareSnapshot else { return }
+    console.write("SWIFTOS:USB_DWC2_GSNPSID=")
+    console.writeHex(UInt64(snapshot.coreIdentifier))
+    console.write("\nSWIFTOS:USB_DWC2_GHWCFG1=")
+    console.writeHex(UInt64(snapshot.hardwareConfiguration1))
+    console.write("\nSWIFTOS:USB_DWC2_GHWCFG2=")
+    console.writeHex(UInt64(snapshot.hardwareConfiguration2))
+    console.write("\nSWIFTOS:USB_DWC2_GHWCFG3=")
+    console.writeHex(UInt64(snapshot.hardwareConfiguration3))
+    console.write("\nSWIFTOS:USB_DWC2_GHWCFG4=")
+    console.writeHex(UInt64(snapshot.hardwareConfiguration4))
+    console.write("\n")
 }
 
 /// Reserves one transport-neutral high-memory update workspace. The running

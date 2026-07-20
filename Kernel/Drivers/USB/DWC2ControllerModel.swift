@@ -96,6 +96,18 @@ struct DWC2CoreIdentifier: Equatable {
     }
 }
 
+/// Read-only identity and capability words captured before the controller is
+/// reset. A failed physical bring-up can retain this snapshot in the kernel log
+/// without exposing register access or requiring a second interpretation of
+/// the hardware contract.
+struct DWC2HardwareRegisterSnapshot: Equatable {
+    let coreIdentifier: UInt32
+    let hardwareConfiguration1: UInt32
+    let hardwareConfiguration2: UInt32
+    let hardwareConfiguration3: UInt32
+    let hardwareConfiguration4: UInt32
+}
+
 enum DWC2OperationMode: UInt8, Equatable {
     case hnpAndSRPOTG = 0
     case srpOnlyOTG = 1
