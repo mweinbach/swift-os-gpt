@@ -1092,9 +1092,10 @@ private func activateKernelUpdateStaging(
     return layout
 }
 
-/// Transfers the linker-owned scratch prefix to firmware long enough to power
-/// the DWC2 domain. A failure disables only the optional USB debug path; HDMI,
-/// serial, scheduling, and the QEMU platform continue independently.
+/// Transfers the linker-owned scratch prefix to firmware for the optional
+/// legacy USB power-domain request. A well-formed absent domain leaves power
+/// ownership with the DT-described DWC2 driver. Any other failure disables only
+/// the USB debug path; HDMI, serial, scheduling, and QEMU continue independently.
 private func powerOnRaspberryPiUSB(
     console: EarlyConsole,
     platform: Platform,
@@ -1131,11 +1132,11 @@ private func powerOnRaspberryPiUSB(
         waitUntilStable: true,
         maximumPollCount: 100_000
     )
-    switch result {
-    case .completed:
+    switch RaspberryPi5USBPowerPolicy.disposition(for: result) {
+    case .managed:
         console.write("SWIFTOS:USB_POWER_READY\n")
         return true
-    case .deviceUnavailable:
+    case .unmanaged:
         // SET_POWER_STATE device 3 is the legacy USB HCD power domain. Pi 5
         // may expose its DT-described DWC2 device controller without exposing
         // that legacy firmware identifier. A well-formed "does not exist"
@@ -1143,6 +1144,10 @@ private func powerOnRaspberryPiUSB(
         // driver; malformed responses and real state mismatches still fail.
         console.write("SWIFTOS:USB_POWER_UNMANAGED\n")
         return true
+    case .reject:
+        break
+    }
+    switch result {
     case .stateMismatch:
         console.write("SWIFTOS:USB_POWER_STATE_MISMATCH\n")
     case .invalidPollLimit:
@@ -1157,6 +1162,8 @@ private func powerOnRaspberryPiUSB(
         console.write("SWIFTOS:USB_POWER_CACHE_INVALIDATE\n")
     case .malformedResponse(let error):
         console.write(usbPowerResponseMarker(for: error))
+    case .completed, .deviceUnavailable:
+        console.write("SWIFTOS:USB_POWER_POLICY\n")
     }
     return false
 }

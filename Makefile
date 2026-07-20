@@ -184,6 +184,7 @@ firmware-mailbox-host-test: | $(BUILD_DIR)
 		-module-cache-path $(BUILD_DIR)/host-module-cache \
 		Kernel/Core/PhysicalBytes.swift \
 		Kernel/Drivers/FirmwarePropertyMailbox.swift \
+		Kernel/Platform/RaspberryPi5USBPowerPolicy.swift \
 		Tests/Host/FirmwarePropertyMailboxTests.swift \
 		-o $(BUILD_DIR)/firmware-property-mailbox-host-tests
 	$(BUILD_DIR)/firmware-property-mailbox-host-tests

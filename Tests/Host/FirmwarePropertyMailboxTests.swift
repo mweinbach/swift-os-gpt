@@ -146,10 +146,11 @@ struct FirmwarePropertyMailboxTests {
         pollsFullAndEmptyFIFOsWithinBounds()
         skipsUnrelatedMailboxMessages()
         classifiesPowerStateResponseSemantics()
+        classifiesPi5USBPowerHandoff()
         rejectsMalformedResponses()
         reportsBoundedTimeouts()
         validatesBuffersPollLimitsAndCacheOwnership()
-        print("firmware property mailbox: 7 groups passed")
+        print("firmware property mailbox: 8 groups passed")
     }
 
     private static func validatesPowerOnRequestAndResponse() {
@@ -276,6 +277,12 @@ struct FirmwarePropertyMailboxTests {
             message: "unavailable powered-on device was not classified"
         )
         expectPowerStateResult(
+            returnedState: 2,
+            poweredOn: false,
+            expected: .deviceUnavailable,
+            message: "unavailable power-off device was not classified"
+        )
+        expectPowerStateResult(
             returnedState: 0,
             poweredOn: true,
             expected: .stateMismatch,
@@ -293,6 +300,35 @@ struct FirmwarePropertyMailboxTests {
             expected: .completed,
             message: "valid power-off response failed"
         )
+    }
+
+    private static func classifiesPi5USBPowerHandoff() {
+        expect(
+            RaspberryPi5USBPowerPolicy.disposition(for: .completed)
+                == .managed,
+            "completed firmware power handoff was not managed"
+        )
+        expect(
+            RaspberryPi5USBPowerPolicy.disposition(for: .deviceUnavailable)
+                == .unmanaged,
+            "missing legacy HCD power domain did not transfer to DWC2"
+        )
+        let rejected: [FirmwareMailboxPowerStateResult] = [
+            .stateMismatch,
+            .invalidPollLimit,
+            .cacheCleanFailed,
+            .writeTimedOut,
+            .responseTimedOut,
+            .cacheInvalidationFailed,
+            .malformedResponse(.powerStateReservedBits),
+        ]
+        for result in rejected {
+            expect(
+                RaspberryPi5USBPowerPolicy.disposition(for: result)
+                    == .reject,
+                "unsafe firmware power result was accepted"
+            )
+        }
     }
 
     private static func rejectsMalformedResponses() {
