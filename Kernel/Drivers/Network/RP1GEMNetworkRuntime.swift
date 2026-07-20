@@ -130,10 +130,15 @@ enum RP1GEMNetworkRuntime {
             resources: boardResources,
             access: RP1GEMBoardMMIOAccess()
         )
-        switch preparation.prepareRP1Ethernet(
+        let preparationResult = preparation.prepareRP1Ethernet(
             maximumPollCount:
                 RP1GEMNetworkBootPolicy.boardPreparationMaximumPollCount
-        ) {
+        )
+        writeClockEnableDiagnostics(
+            preparation.clockDiagnostics,
+            console: console
+        )
+        switch preparationResult {
         case .ready:
             break
         case .timedOut:
@@ -365,6 +370,79 @@ enum RP1GEMNetworkRuntime {
         console.write("\n")
         console.write("SWIFTOS:RP1_NET_BOARD_OBSERVED=")
         console.writeHex(diagnostic.observedValue)
+        console.write("\n")
+    }
+
+    private static func writeClockEnableDiagnostics(
+        _ diagnostics: RP1GEMClockEnableDiagnostics,
+        console: EarlyConsole
+    ) {
+        if let snapshot = diagnostics.system?.system {
+            writeSystemClockSnapshot(snapshot, console: console)
+        }
+        writeClockEnableDiagnostic(diagnostics.system, console: console)
+        writeClockEnableDiagnostic(diagnostics.ethernet, console: console)
+        writeClockEnableDiagnostic(diagnostics.timestamp, console: console)
+    }
+
+    private static func writeClockEnableDiagnostic(
+        _ diagnostic: RP1GEMClockEnableDiagnostic?,
+        console: EarlyConsole
+    ) {
+        guard let diagnostic else { return }
+        console.write("SWIFTOS:RP1_NET_CLOCK_STAGE=")
+        console.writeHex(UInt64(diagnostic.stage.rawValue))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_METHOD=")
+        console.writeHex(UInt64(diagnostic.method.rawValue))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_RESULT=")
+        console.writeHex(UInt64(diagnostic.result.rawValue))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_INITIAL=")
+        console.writeHex(UInt64(diagnostic.initialControl))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_ALIAS_INITIAL=")
+        console.writeHex(UInt64(diagnostic.initialSetAlias))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_ALIAS_DRAIN=")
+        console.writeHex(UInt64(diagnostic.atomicDrain))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_FINAL=")
+        console.writeHex(UInt64(diagnostic.finalControl))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_POLLS=")
+        console.writeHex(diagnostic.pollCount)
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_ELAPSED_TICKS=")
+        console.writeHex(diagnostic.elapsedTicks)
+        console.write("\n")
+    }
+
+    private static func writeSystemClockSnapshot(
+        _ snapshot: RP1GEMSystemClockSnapshot,
+        console: EarlyConsole
+    ) {
+        console.write("SWIFTOS:RP1_NET_CLOCK_SYS_CTRL=")
+        console.writeHex(UInt64(snapshot.control))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_SYS_DIV_INT=")
+        console.writeHex(UInt64(snapshot.dividerInteger))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_SYS_SEL=")
+        console.writeHex(UInt64(snapshot.selection))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_PLL_SYS_CS=")
+        console.writeHex(UInt64(snapshot.pllControlStatus))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_PLL_SYS_PWR=")
+        console.writeHex(UInt64(snapshot.pllPower))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_PLL_SYS_PRIM=")
+        console.writeHex(UInt64(snapshot.pllPrimary))
+        console.write("\n")
+        console.write("SWIFTOS:RP1_NET_CLOCK_PLL_SYS_SEC=")
+        console.writeHex(UInt64(snapshot.pllSecondary))
         console.write("\n")
     }
 

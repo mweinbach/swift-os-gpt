@@ -121,11 +121,18 @@ private struct TestGPIOMap {
     let mask: UInt32
 }
 
+private struct DelayedClockSet {
+    let value: UInt32
+    var remainingReads: Int
+}
+
 private final class TestBoardAccess: RP1GEMBoardRegisterDelayAccess {
     var registers: [UInt: UInt32] = [:]
     var events: [TestRegisterEvent] = []
     var ignoredWriteAddresses: Set<UInt> = []
     var forcedReadValues: [UInt: UInt32] = [:]
+    var clockSetVisibilityDelayReads: [UInt: Int] = [:]
+    var pendingClockSets: [UInt: DelayedClockSet] = [:]
     var gpio: TestGPIOMap?
     var forceGPIOStatusFailure = false
     var frequency: UInt64 = 1_000
@@ -135,6 +142,19 @@ private final class TestBoardAccess: RP1GEMBoardRegisterDelayAccess {
     func read32(at address: UInt) -> UInt32 {
         events.append(.read(address))
         if let forced = forcedReadValues[address] { return forced }
+        let clockSetBase = UInt(TestAddress.clocks + 0x2_000)
+        let clockSetEnd = UInt(TestAddress.clocks + 0x3_000)
+        let clockAddress = address >= clockSetBase && address < clockSetEnd
+            ? address - 0x2_000 : address
+        if var pending = pendingClockSets[clockAddress] {
+            if pending.remainingReads == 0 {
+                registers[clockAddress, default: 0] |= pending.value
+                pendingClockSets[clockAddress] = nil
+            } else {
+                pending.remainingReads -= 1
+                pendingClockSets[clockAddress] = pending
+            }
+        }
         if let gpio, address == gpio.status {
             if forceGPIOStatusFailure { return 0 }
             var status: UInt32 = 0
@@ -157,7 +177,7 @@ private final class TestBoardAccess: RP1GEMBoardRegisterDelayAccess {
             }
             return status
         }
-        return registers[address, default: 0]
+        return registers[clockAddress, default: 0]
     }
 
     func write32(_ value: UInt32, at address: UInt) {
@@ -166,7 +186,16 @@ private final class TestBoardAccess: RP1GEMBoardRegisterDelayAccess {
         let clockSetBase = UInt(TestAddress.clocks + 0x2_000)
         let clockSetEnd = UInt(TestAddress.clocks + 0x3_000)
         if address >= clockSetBase && address < clockSetEnd {
-            registers[address - 0x2_000, default: 0] |= value
+            let clockAddress = address - 0x2_000
+            let delay = clockSetVisibilityDelayReads[clockAddress, default: 0]
+            if delay > 0 {
+                pendingClockSets[clockAddress] = DelayedClockSet(
+                    value: value,
+                    remainingReads: delay
+                )
+            } else {
+                registers[clockAddress, default: 0] |= value
+            }
             return
         }
         if let gpio {
@@ -224,18 +253,29 @@ private struct GPIOBoundary {
     let localLine: UInt64
 }
 
+private let emptySystemClockSnapshot = RP1GEMSystemClockSnapshot(
+    control: 0,
+    dividerInteger: 0,
+    selection: 0,
+    pllControlStatus: 0,
+    pllPower: 0,
+    pllPrimary: 0,
+    pllSecondary: 0
+)
+
 @main
 struct RP1GEMBoardPreparationTests {
     static func main() {
         preservesStableDiagnosticStageValues()
         enablesExactClocksAndPreservesFields()
+        provesBoundedClockEnablePaths()
         resetsActiveLowGPIO32WithoutOutputGlitches()
         resetsActiveHighGPIO53AndMapsEveryBankBoundary()
         rejectsMalformedResourcesBeforeTouchingHardware()
         reportsReadbackAndBoundedCounterFailures()
         preparesExactlyOnceAndRetriesIncompleteAttempts()
         exercisesConcreteMMIOAccess()
-        print("RP1 GEM board preparation: 8 groups passed")
+        print("RP1 GEM board preparation: 9 groups passed")
     }
 
     private static func preservesStableDiagnosticStageValues() {
@@ -259,6 +299,23 @@ struct RP1GEMBoardPreparationTests {
             stages.map(\.rawValue) == Array(UInt8(1)...UInt8(14)),
             "persistent diagnostic stage raw values drifted"
         )
+        expect(
+            [
+                RP1GEMClockEnableMethod.none,
+                .alreadyEnabled,
+                .atomicSet,
+                .normalReadModifyWrite,
+            ].map(\.rawValue) == [0, 1, 2, 3],
+            "persistent clock method raw values drifted"
+        )
+        expect(
+            [
+                RP1GEMClockEnableResult.ready,
+                .aliasMismatch,
+                .boundedFailure,
+            ].map(\.rawValue) == [1, 2, 3],
+            "persistent clock result raw values drifted"
+        )
     }
 
     private static func enablesExactClocksAndPreservesFields() {
@@ -271,6 +328,12 @@ struct RP1GEMBoardPreparationTests {
         let ethernetSet = ethernet + 0x2_000
         let timestampSet = timestamp + 0x2_000
         access.registers[system] = 0x0101_0003
+        access.registers[UInt(TestAddress.clocks + 0x018)] = 5
+        access.registers[UInt(TestAddress.clocks + 0x020)] = 4
+        access.registers[UInt(TestAddress.clocks + 0x8_000)] = 0x8000_0001
+        access.registers[UInt(TestAddress.clocks + 0x8_004)] = 2
+        access.registers[UInt(TestAddress.clocks + 0x8_010)] = 3
+        access.registers[UInt(TestAddress.clocks + 0x8_014)] = 4
         access.registers[ethernet] = 0x0202_0005
         access.registers[timestamp] = 0x0404_0007
         var preparation = RP1GEMBoardPreparation(
@@ -283,21 +346,49 @@ struct RP1GEMBoardPreparationTests {
             "valid clock-only board preparation failed"
         )
         expect(
-            access.events == [
-                .read(system), .write(systemSet, 0x0000_0800), .barrier,
-                .read(system),
-                .read(ethernet), .write(ethernetSet, 0x0000_0800), .barrier,
-                .read(ethernet),
-                .read(timestamp), .write(timestampSet, 0x0000_0800), .barrier,
-                .read(timestamp),
+            writeEvents(in: access.events) == [
+                .write(systemSet, 0x0000_0800),
+                .write(ethernetSet, 0x0000_0800),
+                .write(timestampSet, 0x0000_0800),
             ],
-            "atomic clock enable ordering or posted-write readback changed"
+            "atomic clock enable write order changed"
+        )
+        expect(
+            count(.barrier, in: access.events) == 3
+                && access.events.contains(.read(systemSet))
+                && access.events.contains(.read(ethernetSet))
+                && access.events.contains(.read(timestampSet)),
+            "atomic alias drain or barrier was omitted"
         )
         expect(
             access.registers[system] == 0x0101_0803
                 && access.registers[ethernet] == 0x0202_0805
                 && access.registers[timestamp] == 0x0404_0807,
             "clock programming did not preserve non-ENABLE fields"
+        )
+        expect(
+            preparation.clockDiagnostics.timestamp
+                == RP1GEMClockEnableDiagnostic(
+                    stage: .timestampClockEnable,
+                    method: .atomicSet,
+                    result: .ready,
+                    initialControl: 0x0404_0007,
+                    initialSetAlias: 0x0404_0007,
+                    atomicDrain: 0x0404_0807,
+                    finalControl: 0x0404_0807,
+                    pollCount: 1,
+                    elapsedTicks: 0,
+                    system: RP1GEMSystemClockSnapshot(
+                        control: 0x0101_0003,
+                        dividerInteger: 5,
+                        selection: 4,
+                        pllControlStatus: 0x8000_0001,
+                        pllPower: 2,
+                        pllPrimary: 3,
+                        pllSecondary: 4
+                    )
+                ),
+            "clock telemetry lost method, readback, or SYS/PLL snapshot"
         )
 
         expectInvalidClockIDs(
@@ -316,6 +407,155 @@ struct RP1GEMBoardPreparationTests {
             makeResources(resetLine: nil, transmitClockID: 15),
             "non-ETH transmit clock accepted"
         )
+    }
+
+    private static func provesBoundedClockEnablePaths() {
+        do {
+            let access = TestBoardAccess()
+            let timestamp = UInt(TestAddress.clocks + 0x134)
+            access.registers[timestamp] = 2
+            access.clockSetVisibilityDelayReads[timestamp] = 2
+            var preparation = RP1GEMBoardPreparation(
+                resources: makeResources(resetLine: nil),
+                access: access
+            )
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 8) == .ready,
+                "delayed atomic SET visibility failed"
+            )
+            expect(
+                preparation.clockDiagnostics.timestamp
+                    == RP1GEMClockEnableDiagnostic(
+                        stage: .timestampClockEnable,
+                        method: .atomicSet,
+                        result: .ready,
+                        initialControl: 2,
+                        initialSetAlias: 2,
+                        atomicDrain: 2,
+                        finalControl: 0x802,
+                        pollCount: 2,
+                        elapsedTicks: 1,
+                        system: emptySystemClockSnapshot
+                    ),
+                "delayed atomic success telemetry is incorrect"
+            )
+            expect(
+                !writeEvents(in: access.events).contains(
+                    .write(timestamp, 0x802)
+                ),
+                "delayed atomic success unnecessarily used normal fallback"
+            )
+        }
+
+        do {
+            let access = TestBoardAccess()
+            let system = UInt(TestAddress.clocks + 0x014)
+            let systemSet = system + 0x2_000
+            access.registers[system] = 2
+            access.ignoredWriteAddresses.insert(systemSet)
+            var preparation = RP1GEMBoardPreparation(
+                resources: makeResources(resetLine: nil),
+                access: access
+            )
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 8) == .ready,
+                "normal RMW fallback did not recover an ignored SET"
+            )
+            expect(
+                writeEvents(in: access.events).contains(
+                    .write(system, 0x802)
+                ),
+                "normal RMW fallback did not preserve the initial CTRL"
+            )
+            expect(
+                preparation.clockDiagnostics.system
+                    == RP1GEMClockEnableDiagnostic(
+                        stage: .systemClockEnable,
+                        method: .normalReadModifyWrite,
+                        result: .ready,
+                        initialControl: 2,
+                        initialSetAlias: 2,
+                        atomicDrain: 2,
+                        finalControl: 0x802,
+                        pollCount: 3,
+                        elapsedTicks: 1,
+                        system: RP1GEMSystemClockSnapshot(
+                            control: 2,
+                            dividerInteger: 0,
+                            selection: 0,
+                            pllControlStatus: 0,
+                            pllPower: 0,
+                            pllPrimary: 0,
+                            pllSecondary: 0
+                        )
+                    ),
+                "normal fallback success was lost after later clocks"
+            )
+            expect(
+                preparation.clockDiagnostics.ethernet?.stage
+                    == .ethernetClockEnable
+                    && preparation.clockDiagnostics.timestamp?.stage
+                        == .timestampClockEnable,
+                "later successful clocks did not retain their own telemetry"
+            )
+        }
+
+        do {
+            let access = TestBoardAccess()
+            let system = UInt(TestAddress.clocks + 0x014)
+            let systemSet = system + 0x2_000
+            access.registers[system] = 2
+            access.ignoredWriteAddresses.insert(systemSet)
+            access.ignoredWriteAddresses.insert(system)
+            access.frequency = 0
+            var preparation = RP1GEMBoardPreparation(
+                resources: makeResources(resetLine: nil),
+                access: access
+            )
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 2) == .failed,
+                "ignored SET and normal writes did not fail closed"
+            )
+            expect(
+                preparation.lastDiagnostic
+                    == RP1GEMBoardPreparationDiagnostic(
+                        stage: .systemClockEnable,
+                        registerAddress: UInt64(system),
+                        expectedValue: 0x800,
+                        observedValue: 2
+                    ),
+                "bounded clock failure lost the stable board diagnostic"
+            )
+            expect(
+                preparation.clockDiagnostics.system
+                    == RP1GEMClockEnableDiagnostic(
+                        stage: .systemClockEnable,
+                        method: .normalReadModifyWrite,
+                        result: .boundedFailure,
+                        initialControl: 2,
+                        initialSetAlias: 2,
+                        atomicDrain: 2,
+                        finalControl: 2,
+                        pollCount: 4,
+                        elapsedTicks: 0,
+                        system: RP1GEMSystemClockSnapshot(
+                            control: 2,
+                            dividerInteger: 0,
+                            selection: 0,
+                            pllControlStatus: 0,
+                            pllPower: 0,
+                            pllPrimary: 0,
+                            pllSecondary: 0
+                        )
+                    ),
+                "bounded clock failure telemetry is incorrect"
+            )
+            expect(
+                count(.spin, in: access.events) == 2
+                    && count(.counterValue, in: access.events) == 0,
+                "clock failure exceeded its counter-independent read cap"
+            )
+        }
     }
 
     private static func resetsActiveLowGPIO32WithoutOutputGlitches() {
@@ -499,6 +739,10 @@ struct RP1GEMBoardPreparationTests {
             "clock aperture missing ETH_TSU atomic SET register accepted"
         )
         expectRejected(
+            makeResources(resetLine: nil, clockLength: 0x8_014),
+            "clock aperture missing PLL_SYS_SEC snapshot register accepted"
+        )
+        expectRejected(
             makeResources(resetLine: nil, clockControllerPhandle: 0),
             "zero clock-controller phandle accepted"
         )
@@ -587,7 +831,7 @@ struct RP1GEMBoardPreparationTests {
             )
             expect(
                 preparation.prepareRP1Ethernet(maximumPollCount: 4) == .failed
-                    && count(.counterFrequency, in: access.events) == 0,
+                    && count(.counterFrequency, in: access.events) == 3,
                 "GPIO output readback failure reached the delay"
             )
             expect(
@@ -611,7 +855,7 @@ struct RP1GEMBoardPreparationTests {
             )
             expect(
                 preparation.prepareRP1Ethernet(maximumPollCount: 4) == .failed
-                    && count(.counterFrequency, in: access.events) == 0,
+                    && count(.counterFrequency, in: access.events) == 3,
                 "invalid GPIO status reached the reset delay"
             )
             let gpio = gpioMap(line: 32)

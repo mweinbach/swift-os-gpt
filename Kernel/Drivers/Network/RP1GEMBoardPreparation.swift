@@ -54,9 +54,20 @@ enum RP1GEMBoardRegisterLayout {
 
     // RP1 clock-generator CTRL registers. Their ENABLE field is bit 11.
     static let systemClockControl: UInt64 = 0x014
+    static let systemClockDividerInteger: UInt64 = 0x018
+    static let systemClockSelection: UInt64 = 0x020
     static let ethernetClockControl: UInt64 = 0x064
     static let ethernetTimestampClockControl: UInt64 = 0x134
     static let clockEnable: UInt32 = 1 << 11
+
+    // RP1 clock-manager offsets named PLL_SYS_CS/PWR/PRIM/SEC by the
+    // published Raspberry Pi clock implementation. Retaining these exact
+    // read-only observations lets a returned-card trace distinguish a leaf
+    // enable failure from an unprepared parent PLL without changing the PLL.
+    static let pllSystemControlStatus: UInt64 = 0x8_000
+    static let pllSystemPower: UInt64 = 0x8_004
+    static let pllSystemPrimary: UInt64 = 0x8_010
+    static let pllSystemSecondary: UInt64 = 0x8_014
 
     // Each RP1 GPIO bank occupies one complete 16-KiB atomic aperture.
     static let gpioBankStride: UInt64 = 0x4_000
@@ -129,6 +140,93 @@ struct RP1GEMBoardPreparationDiagnostic: Equatable {
     let observedValue: UInt64
 }
 
+/// Stable method/result values accompanying a clock readback observation.
+/// They are emitted into the persistent console as hexadecimal wire values.
+enum RP1GEMClockEnableMethod: UInt8, Equatable {
+    case none = 0
+    case alreadyEnabled = 1
+    case atomicSet = 2
+    case normalReadModifyWrite = 3
+}
+
+enum RP1GEMClockEnableResult: UInt8, Equatable {
+    case ready = 1
+    case aliasMismatch = 2
+    case boundedFailure = 3
+}
+
+/// Read-only state of the SYS leaf and its immediate PLL_SYS registers before
+/// board preparation writes any clock register.
+struct RP1GEMSystemClockSnapshot: Equatable {
+    let control: UInt32
+    let dividerInteger: UInt32
+    let selection: UInt32
+    let pllControlStatus: UInt32
+    let pllPower: UInt32
+    let pllPrimary: UInt32
+    let pllSecondary: UInt32
+}
+
+/// Exact clock-attempt telemetry retained even when preparation advances to a
+/// later clock or GPIO stage. Reads through the SET alias are defined by RP1
+/// as normal CTRL reads and also drain the posted write.
+struct RP1GEMClockEnableDiagnostic: Equatable {
+    let stage: RP1GEMBoardPreparationStage
+    let method: RP1GEMClockEnableMethod
+    let result: RP1GEMClockEnableResult
+    let initialControl: UInt32
+    let initialSetAlias: UInt32
+    let atomicDrain: UInt32
+    let finalControl: UInt32
+    let pollCount: UInt64
+    let elapsedTicks: UInt64
+    let system: RP1GEMSystemClockSnapshot
+}
+
+/// Fixed storage for every clock attempted during one board-preparation pass.
+/// Keeping one slot per leaf prevents a successful SYS recovery from being
+/// hidden when the later Ethernet and timestamp clocks are observed.
+struct RP1GEMClockEnableDiagnostics: Equatable {
+    private(set) var system: RP1GEMClockEnableDiagnostic?
+    private(set) var ethernet: RP1GEMClockEnableDiagnostic?
+    private(set) var timestamp: RP1GEMClockEnableDiagnostic?
+
+    init(
+        system: RP1GEMClockEnableDiagnostic? = nil,
+        ethernet: RP1GEMClockEnableDiagnostic? = nil,
+        timestamp: RP1GEMClockEnableDiagnostic? = nil
+    ) {
+        self.system = system
+        self.ethernet = ethernet
+        self.timestamp = timestamp
+    }
+
+    fileprivate mutating func record(
+        _ diagnostic: RP1GEMClockEnableDiagnostic
+    ) {
+        switch diagnostic.stage {
+        case .systemClockEnable:
+            system = diagnostic
+        case .ethernetClockEnable:
+            ethernet = diagnostic
+        case .timestampClockEnable:
+            timestamp = diagnostic
+        default:
+            break
+        }
+    }
+}
+
+private struct RP1GEMClockPollObservation {
+    let observed: UInt32
+    let pollCount: UInt64
+    let elapsedTicks: UInt64
+
+    var isEnabled: Bool {
+        observed & RP1GEMBoardRegisterLayout.clockEnable != 0
+    }
+}
+
 /// Enables the three RP1 clocks needed by GEM and, when described by firmware,
 /// performs a glitch-free external PHY reset through SYS_RIO. No undocumented
 /// ETH_CFG policy is written here; link status remains owned by the separate
@@ -140,6 +238,13 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
     private var access: Access
     private var isPrepared = false
     private(set) var lastDiagnostic: RP1GEMBoardPreparationDiagnostic?
+    private(set) var clockDiagnostics = RP1GEMClockEnableDiagnostics()
+
+    /// A clock-control transition should be visible in far less than one
+    /// millisecond. The independent read cap still terminates if the generic
+    /// architectural counter is absent or stopped.
+    private static var clockEnableMaximumPollCount: UInt64 { 4_096 }
+    private static var clockEnableTimeoutMilliseconds: UInt32 { 1 }
 
     init(resources: RP1GEMBoardResources, access: Access) {
         self.resources = resources
@@ -150,6 +255,7 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
         maximumPollCount: UInt64
     ) -> CadenceGEMBoardPreparationResult {
         lastDiagnostic = nil
+        clockDiagnostics = RP1GEMClockEnableDiagnostics()
         if isPrepared { return .ready }
 
         guard maximumPollCount > 0 else {
@@ -175,18 +281,29 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
             resetGPIO = nil
         }
 
+        guard let systemClockSnapshot = captureSystemClockSnapshot() else {
+            recordFailure(stage: .invalidConfiguration)
+            return .failed
+        }
+
         guard enableClock(
                   at: RP1GEMBoardRegisterLayout.systemClockControl,
-                  stage: .systemClockEnable
+                  stage: .systemClockEnable,
+                  maximumPollCount: maximumPollCount,
+                  systemSnapshot: systemClockSnapshot
               ),
               enableClock(
                   at: RP1GEMBoardRegisterLayout.ethernetClockControl,
-                  stage: .ethernetClockEnable
+                  stage: .ethernetClockEnable,
+                  maximumPollCount: maximumPollCount,
+                  systemSnapshot: systemClockSnapshot
               ),
               enableClock(
                   at: RP1GEMBoardRegisterLayout
                       .ethernetTimestampClockControl,
-                  stage: .timestampClockEnable
+                  stage: .timestampClockEnable,
+                  maximumPollCount: maximumPollCount,
+                  systemSnapshot: systemClockSnapshot
               )
         else {
             return .failed
@@ -262,7 +379,9 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
 
     private mutating func enableClock(
         at offset: UInt64,
-        stage: RP1GEMBoardPreparationStage
+        stage: RP1GEMBoardPreparationStage,
+        maximumPollCount: UInt64,
+        systemSnapshot: RP1GEMSystemClockSnapshot
     ) -> Bool {
         guard let address = Self.wordAddress(
                   in: resources.clocks.controllerRegisters,
@@ -276,8 +395,42 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
             recordFailure(stage: stage)
             return false
         }
-        let current = access.read32(at: address)
-        if current & RP1GEMBoardRegisterLayout.clockEnable != 0 {
+        let initial = access.read32(at: address)
+        let initialAlias = access.read32(at: setAddress)
+        guard initialAlias == initial else {
+            clockDiagnostics.record(RP1GEMClockEnableDiagnostic(
+                stage: stage,
+                method: .none,
+                result: .aliasMismatch,
+                initialControl: initial,
+                initialSetAlias: initialAlias,
+                atomicDrain: initialAlias,
+                finalControl: initial,
+                pollCount: 0,
+                elapsedTicks: 0,
+                system: systemSnapshot
+            ))
+            recordFailure(
+                stage: stage,
+                registerAddress: UInt64(address),
+                expectedValue: UInt64(initial),
+                observedValue: UInt64(initialAlias)
+            )
+            return false
+        }
+        if initial & RP1GEMBoardRegisterLayout.clockEnable != 0 {
+            clockDiagnostics.record(RP1GEMClockEnableDiagnostic(
+                stage: stage,
+                method: .alreadyEnabled,
+                result: .ready,
+                initialControl: initial,
+                initialSetAlias: initialAlias,
+                atomicDrain: initialAlias,
+                finalControl: initial,
+                pollCount: 0,
+                elapsedTicks: 0,
+                system: systemSnapshot
+            ))
             return true
         }
         // clocks_main implements RP1's published atomic register aliases. Use
@@ -289,17 +442,158 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
             at: setAddress
         )
         access.synchronizePostedWrites()
-        let observed = access.read32(at: address)
-        guard observed & RP1GEMBoardRegisterLayout.clockEnable != 0 else {
+        let atomicDrain = access.read32(at: setAddress)
+        let atomic = pollClockEnable(
+            at: address,
+            maximumPollCount: maximumPollCount
+        )
+        if atomic.isEnabled {
+            clockDiagnostics.record(RP1GEMClockEnableDiagnostic(
+                stage: stage,
+                method: .atomicSet,
+                result: .ready,
+                initialControl: initial,
+                initialSetAlias: initialAlias,
+                atomicDrain: atomicDrain,
+                finalControl: atomic.observed,
+                pollCount: atomic.pollCount,
+                elapsedTicks: atomic.elapsedTicks,
+                system: systemSnapshot
+            ))
+            return true
+        }
+
+        // Match the published RP1 clock driver's normal-register RMW as one
+        // bounded fallback. Re-read immediately before the write so no stale
+        // source field from the earlier PCIe transaction can be replayed.
+        let fallbackInitial = access.read32(at: address)
+        access.write32(
+            fallbackInitial | RP1GEMBoardRegisterLayout.clockEnable,
+            at: address
+        )
+        access.synchronizePostedWrites()
+        _ = access.read32(at: address)
+        let fallback = pollClockEnable(
+            at: address,
+            maximumPollCount: maximumPollCount
+        )
+        let totalPollCount = Self.saturatingAdd(
+            atomic.pollCount,
+            fallback.pollCount
+        )
+        let totalElapsedTicks = Self.saturatingAdd(
+            atomic.elapsedTicks,
+            fallback.elapsedTicks
+        )
+        let result: RP1GEMClockEnableResult = fallback.isEnabled
+            ? .ready : .boundedFailure
+        clockDiagnostics.record(RP1GEMClockEnableDiagnostic(
+            stage: stage,
+            method: .normalReadModifyWrite,
+            result: result,
+            initialControl: initial,
+            initialSetAlias: initialAlias,
+            atomicDrain: atomicDrain,
+            finalControl: fallback.observed,
+            pollCount: totalPollCount,
+            elapsedTicks: totalElapsedTicks,
+            system: systemSnapshot
+        ))
+        guard fallback.isEnabled else {
             recordFailure(
                 stage: stage,
                 registerAddress: UInt64(address),
                 expectedValue: UInt64(RP1GEMBoardRegisterLayout.clockEnable),
-                observedValue: UInt64(observed)
+                observedValue: UInt64(fallback.observed)
             )
             return false
         }
         return true
+    }
+
+    private mutating func captureSystemClockSnapshot()
+        -> RP1GEMSystemClockSnapshot?
+    {
+        let registers = resources.clocks.controllerRegisters
+        guard let control = Self.wordAddress(
+                  in: registers,
+                  offset: RP1GEMBoardRegisterLayout.systemClockControl
+              ),
+              let divider = Self.wordAddress(
+                  in: registers,
+                  offset: RP1GEMBoardRegisterLayout.systemClockDividerInteger
+              ),
+              let selection = Self.wordAddress(
+                  in: registers,
+                  offset: RP1GEMBoardRegisterLayout.systemClockSelection
+              ),
+              let pllControlStatus = Self.wordAddress(
+                  in: registers,
+                  offset: RP1GEMBoardRegisterLayout.pllSystemControlStatus
+              ),
+              let pllPower = Self.wordAddress(
+                  in: registers,
+                  offset: RP1GEMBoardRegisterLayout.pllSystemPower
+              ),
+              let pllPrimary = Self.wordAddress(
+                  in: registers,
+                  offset: RP1GEMBoardRegisterLayout.pllSystemPrimary
+              ),
+              let pllSecondary = Self.wordAddress(
+                  in: registers,
+                  offset: RP1GEMBoardRegisterLayout.pllSystemSecondary
+              )
+        else {
+            return nil
+        }
+        return RP1GEMSystemClockSnapshot(
+            control: access.read32(at: control),
+            dividerInteger: access.read32(at: divider),
+            selection: access.read32(at: selection),
+            pllControlStatus: access.read32(at: pllControlStatus),
+            pllPower: access.read32(at: pllPower),
+            pllPrimary: access.read32(at: pllPrimary),
+            pllSecondary: access.read32(at: pllSecondary)
+        )
+    }
+
+    private mutating func pollClockEnable(
+        at address: UInt,
+        maximumPollCount: UInt64
+    ) -> RP1GEMClockPollObservation {
+        let pollLimit = min(
+            maximumPollCount,
+            Self.clockEnableMaximumPollCount
+        )
+        let frequency = access.counterFrequency()
+        let timeoutTicks = Self.counterTicks(
+            frequency: frequency,
+            milliseconds: Self.clockEnableTimeoutMilliseconds
+        )
+        let start = timeoutTicks == nil ? 0 : access.counterValue()
+        var pollCount: UInt64 = 0
+        var observed: UInt32 = 0
+        var elapsedTicks: UInt64 = 0
+        while pollCount < pollLimit {
+            observed = access.read32(at: address)
+            pollCount += 1
+            if observed & RP1GEMBoardRegisterLayout.clockEnable != 0 {
+                break
+            }
+            if let timeoutTicks {
+                elapsedTicks = access.counterValue() &- start
+                if elapsedTicks >= timeoutTicks { break }
+            }
+            if pollCount < pollLimit { access.spinWaitHint() }
+        }
+        if timeoutTicks != nil {
+            elapsedTicks = access.counterValue() &- start
+        }
+        return RP1GEMClockPollObservation(
+            observed: observed,
+            pollCount: pollCount,
+            elapsedTicks: elapsedTicks
+        )
     }
 
     private mutating func driveGPIO(
@@ -493,6 +787,14 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
         return ticks > 0 ? ticks : nil
     }
 
+    private static func saturatingAdd(
+        _ first: UInt64,
+        _ second: UInt64
+    ) -> UInt64 {
+        let (sum, overflow) = first.addingReportingOverflow(second)
+        return overflow ? UInt64.max : sum
+    }
+
     private static func valid(resources: RP1GEMBoardResources) -> Bool {
         let blockLength: UInt64 = 0x4_000
         guard validResource(resources.gemRegisters, length: blockLength),
@@ -511,6 +813,10 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
                   offset: RP1GEMBoardRegisterLayout.atomicSet
                       + RP1GEMBoardRegisterLayout
                           .ethernetTimestampClockControl
+              ) != nil,
+              wordAddress(
+                  in: resources.clocks.controllerRegisters,
+                  offset: RP1GEMBoardRegisterLayout.pllSystemSecondary
               ) != nil,
               resources.clocks.peripheralClockID
                   == RP1GEMBoardRegisterLayout.systemClockID,

@@ -413,6 +413,21 @@ address that was read back, while expected and observed preserve the exact
 values needed to distinguish a wrong aperture from an ignored clock or GPIO
 write.
 
+Clock attempts also emit `RP1_NET_CLOCK_STAGE`, `_METHOD`, `_RESULT`,
+`_INITIAL`, `_ALIAS_INITIAL`, `_ALIAS_DRAIN`, `_FINAL`, `_POLLS`, and
+`_ELAPSED_TICKS`. Method values are `0x0` no write, `0x1` already enabled,
+`0x2` atomic SET, and `0x3` normal-register read/modify/write fallback. Result
+values are `0x1` ready, `0x2` inconsistent normal/SET-alias pre-read, and `0x3`
+bounded failure. Before any clock write, the driver takes a read-only snapshot
+reported as `_SYS_CTRL`, `_SYS_DIV_INT`, `_SYS_SEL`, `_PLL_SYS_CS`,
+`_PLL_SYS_PWR`, `_PLL_SYS_PRIM`, and `_PLL_SYS_SEC`. The atomic attempt and its
+normal-register fallback each use an architectural-counter deadline when the
+counter is usable plus an independent read cap, so an absent or frozen counter
+cannot leave boot stuck in clock preparation. One complete marker group is
+emitted in stage order for each attempted clock, following one shared SYS/PLL
+snapshot group, so a successful SYS fallback remains visible after the
+Ethernet and timestamp stages run without repeating immutable snapshot data.
+
 ## USB-C diagnostic display
 
 USB-C is a post-boot debug transport, not the early console and not a
@@ -732,6 +747,7 @@ selected native mode.
 - [Raspberry Pi BCM2712 documentation](https://www.raspberrypi.com/documentation/computers/processors.html#bcm2712)
 - [Raspberry Pi RP1 overview](https://www.raspberrypi.com/documentation/computers/io-controllers.html)
 - [Raspberry Pi RP1 peripherals specification](https://datasheets.raspberrypi.com/rp1/rp1-peripherals.pdf)
+- [Raspberry Pi downstream RP1 clock driver](https://github.com/raspberrypi/linux/blob/rpi-6.18.y/drivers/clk/clk-rp1.c)
 - [Arm64 Image boot protocol in the Linux kernel documentation](https://www.kernel.org/doc/html/next/arch/arm64/booting.html)
 - [Upstream BCM2712 SoC Device Tree source](https://github.com/torvalds/linux/blob/master/arch/arm64/boot/dts/broadcom/bcm2712.dtsi)
 - [Upstream Raspberry Pi 5 Model B Device Tree source](https://github.com/torvalds/linux/blob/master/arch/arm64/boot/dts/broadcom/bcm2712-rpi-5-b.dts)
