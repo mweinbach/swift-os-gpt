@@ -7,6 +7,13 @@ struct GenericPhysicalTimer {
     private(set) var nextDeadline: UInt64 = 0
     private(set) var isRunning = false
 
+    /// Establishes the safe architectural entry state for the calling PE.
+    /// CNTP_CTL_EL0 is processor-local; this does not mutate the boot CPU's
+    /// scheduler timer bookkeeping when a secondary is brought online.
+    static func initializeCurrentProcessor() {
+        AArch64.disablePhysicalTimer()
+    }
+
     mutating func start(periodTicks: UInt64) -> Bool {
         guard periodTicks > 0 else { return false }
         self.periodTicks = periodTicks

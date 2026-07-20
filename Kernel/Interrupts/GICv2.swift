@@ -24,7 +24,33 @@ struct GICv2: InterruptControllerDriver {
         configurationValue = configuration
     }
 
-    mutating func initialize() -> Bool {
+    /// Enables distributor forwarding once, before any secondary processor is
+    /// released. Banked SGI/PPI and GICC state deliberately remain untouched.
+    func initializeDistributor() -> Bool {
+        guard validResource(configurationValue.distributor),
+              contains(
+                  configurationValue.distributor,
+                  offset: Self.distributorControl,
+                  width: 4
+              )
+        else {
+            return false
+        }
+
+        // In a non-secure view, bit zero enables delivery of Group 1 IRQs.
+        MMIO.store32(
+            1,
+            at: UInt(configurationValue.distributor.baseAddress)
+                + UInt(Self.distributorControl)
+        )
+        AArch64.synchronizeData()
+        return true
+    }
+
+    /// Programs the calling PE's banked GICC and PPI registers. GIC-400 maps
+    /// these registers at the same addresses for every PE, but selects a
+    /// different bank from the requesting PE, so no logical CPU ID is needed.
+    func initializeCurrentProcessor() -> Bool {
         guard validResource(configurationValue.distributor),
               validResource(configurationValue.cpuInterface),
               contains(
@@ -87,9 +113,6 @@ struct GICv2: InterruptControllerDriver {
         )
         MMIO.store32(0xff, at: cpu + UInt(Self.cpuPriorityMask))
         MMIO.store32(0, at: cpu + UInt(Self.cpuBinaryPoint))
-
-        // In a non-secure view, bit zero enables delivery of Group 1 IRQs.
-        MMIO.store32(1, at: distributor + UInt(Self.distributorControl))
         MMIO.store32(1, at: cpu + UInt(Self.cpuControl))
         AArch64.synchronizeData()
         return true
@@ -139,25 +162,43 @@ struct GICv2: InterruptControllerDriver {
         AArch64.synchronizeData()
     }
 
-    mutating func shutdown() -> Bool {
+    func shutdownCurrentProcessor() -> Bool {
         guard validResource(configurationValue.distributor),
               validResource(configurationValue.cpuInterface),
-              contains(
-                  configurationValue.distributor,
-                  offset: Self.distributorControl,
-                  width: 4
-              ),
               contains(
                   configurationValue.cpuInterface,
                   offset: Self.cpuControl,
                   width: 4
               )
         else { return false }
+        let timerBit = UInt32(1) << (timerInterruptID & 31)
         MMIO.store32(
             0,
             at: UInt(configurationValue.cpuInterface.baseAddress)
                 + UInt(Self.cpuControl)
         )
+        MMIO.store32(
+            timerBit,
+            at: UInt(configurationValue.distributor.baseAddress)
+                + UInt(Self.enableClear)
+        )
+        MMIO.store32(
+            timerBit,
+            at: UInt(configurationValue.distributor.baseAddress)
+                + UInt(Self.pendingClear)
+        )
+        AArch64.synchronizeData()
+        return true
+    }
+
+    func shutdownDistributor() -> Bool {
+        guard validResource(configurationValue.distributor),
+              contains(
+                  configurationValue.distributor,
+                  offset: Self.distributorControl,
+                  width: 4
+              )
+        else { return false }
         MMIO.store32(
             0,
             at: UInt(configurationValue.distributor.baseAddress)

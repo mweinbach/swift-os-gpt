@@ -30,7 +30,6 @@ struct GICv3: InterruptControllerDriver {
     private static let maximumRedistributorCount = 256
 
     private let configurationValue: GICv3Configuration
-    private var redistributorBase: UInt64 = 0
 
     var timerInterruptID: UInt32 {
         configurationValue.timerInterruptID
@@ -40,14 +39,27 @@ struct GICv3: InterruptControllerDriver {
         configurationValue = configuration
     }
 
-    mutating func initialize() -> Bool {
+    /// Establishes distributor affinity routing once on the boot processor.
+    /// Redistributor and CPU-system-register state remain processor-local.
+    func initializeDistributor() -> Bool {
         guard validResource(configurationValue.distributor),
-              validResource(configurationValue.redistributor),
               contains(
                   configurationValue.distributor,
                   offset: Self.distributorControl,
                   width: 4
-              ),
+              )
+        else {
+            return false
+        }
+        return enableDistributor()
+    }
+
+    /// Finds and initializes the redistributor belonging to the calling PE.
+    /// No redistributor address is cached in shared driver state: subsequent
+    /// PPI operations resolve the current affinity again, which prevents one
+    /// secondary from redirecting CPU0's local operations to its frame.
+    func initializeCurrentProcessor() -> Bool {
+        guard validResource(configurationValue.redistributor),
               timerInterruptID >= 16,
               timerInterruptID < 32,
               let frame = findRedistributor(
@@ -56,9 +68,8 @@ struct GICv3: InterruptControllerDriver {
         else {
             return false
         }
-        redistributorBase = frame
 
-        guard wakeRedistributor(),
+        guard wakeRedistributor(at: frame),
               AArch64.enableGICv3SystemRegisters()
         else {
             return false
@@ -66,7 +77,7 @@ struct GICv3: InterruptControllerDriver {
         AArch64.prepareGICv3Control()
         AArch64.setGICv3Group1Enabled(false)
 
-        let sgiBase = UInt(redistributorBase + Self.redistributorSGIOffset)
+        let sgiBase = UInt(frame + Self.redistributorSGIOffset)
         let timerBit = UInt32(1) << (timerInterruptID & 31)
         MMIO.store32(timerBit, at: sgiBase + UInt(Self.enableClear))
 
@@ -92,9 +103,6 @@ struct GICv3: InterruptControllerDriver {
         )
         MMIO.store32(timerBit, at: sgiBase + UInt(Self.enableSet))
 
-        guard enableDistributor() else {
-            return false
-        }
         AArch64.setGICv3PriorityMask(0xff)
         AArch64.setGICv3BinaryPoint(0)
         AArch64.setGICv3Group1Enabled(true)
@@ -122,7 +130,9 @@ struct GICv3: InterruptControllerDriver {
 
     func disable(interruptID: UInt32) {
         if interruptID < 32 {
-            guard redistributorBase != 0 else { return }
+            guard let redistributorBase = findRedistributor(
+                affinity: AArch64.redistributorAffinity
+            ) else { return }
             MMIO.store32(
                 UInt32(1) << interruptID,
                 at: UInt(redistributorBase + Self.redistributorSGIOffset)
@@ -151,13 +161,19 @@ struct GICv3: InterruptControllerDriver {
         AArch64.synchronizeData()
     }
 
-    mutating func shutdown() -> Bool {
-        guard redistributorBase != 0 else { return false }
+    func shutdownCurrentProcessor() -> Bool {
+        guard let redistributorBase = findRedistributor(
+            affinity: AArch64.redistributorAffinity
+        ) else { return false }
         AArch64.setGICv3Group1Enabled(false)
         let sgiBase = UInt(redistributorBase + Self.redistributorSGIOffset)
         MMIO.store32(UInt32.max, at: sgiBase + UInt(Self.enableClear))
         MMIO.store32(UInt32.max, at: sgiBase + UInt(Self.pendingClear))
+        AArch64.synchronizeData()
+        return true
+    }
 
+    func shutdownDistributor() -> Bool {
         let controlAddress = UInt(
             configurationValue.distributor.baseAddress
                 + Self.distributorControl
@@ -173,7 +189,7 @@ struct GICv3: InterruptControllerDriver {
         return true
     }
 
-    private mutating func findRedistributor(
+    private func findRedistributor(
         affinity: UInt32
     ) -> UInt64? {
         var offset: UInt64 = 0
@@ -211,7 +227,7 @@ struct GICv3: InterruptControllerDriver {
         return nil
     }
 
-    private func wakeRedistributor() -> Bool {
+    private func wakeRedistributor(at redistributorBase: UInt64) -> Bool {
         let wakerAddress = UInt(
             redistributorBase + Self.redistributorWaker
         )

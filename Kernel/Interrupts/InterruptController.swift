@@ -6,11 +6,18 @@ struct InterruptAcknowledgeToken {
 protocol InterruptControllerDriver {
     var timerInterruptID: UInt32 { get }
 
-    mutating func initialize() -> Bool
+    /// Performs controller-global setup. Only the boot processor may call this
+    /// while all participating processors still have IRQs masked.
+    func initializeDistributor() -> Bool
+
+    /// Initializes the calling processor's banked CPU interface, PPI state,
+    /// and priority mask. This must never rewrite distributor-global state.
+    func initializeCurrentProcessor() -> Bool
     func acknowledge() -> InterruptAcknowledgeToken?
     func end(_ token: InterruptAcknowledgeToken)
     func disable(interruptID: UInt32)
-    mutating func shutdown() -> Bool
+    func shutdownCurrentProcessor() -> Bool
+    func shutdownDistributor() -> Bool
 }
 
 struct GICv2Configuration {

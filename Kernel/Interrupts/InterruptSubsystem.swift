@@ -55,16 +55,31 @@ private enum ActiveInterruptController {
         }
     }
 
+    func initializeCurrentProcessor() -> Bool {
+        switch self {
+        case .none:
+            return false
+        case let .gicV2(driver):
+            return driver.initializeCurrentProcessor()
+        case let .gicV3(driver):
+            return driver.initializeCurrentProcessor()
+        }
+    }
+
     mutating func shutdown() -> Bool {
         switch self {
         case .none:
             return true
-        case .gicV2(var driver):
-            let result = driver.shutdown()
+        case let .gicV2(driver):
+            let local = driver.shutdownCurrentProcessor()
+            let global = driver.shutdownDistributor()
+            let result = local && global
             if result { self = .none }
             return result
-        case .gicV3(var driver):
-            let result = driver.shutdown()
+        case let .gicV3(driver):
+            let local = driver.shutdownCurrentProcessor()
+            let global = driver.shutdownDistributor()
+            let result = local && global
             if result { self = .none }
             return result
         }
@@ -155,8 +170,12 @@ enum InterruptSubsystem {
         _ configuration: GICv2Configuration
     ) -> Bool {
         prepareForConfiguration()
-        var driver = GICv2(configuration: configuration)
-        guard driver.initialize() else { return false }
+        let driver = GICv2(configuration: configuration)
+        guard driver.initializeDistributor() else { return false }
+        guard driver.initializeCurrentProcessor() else {
+            _ = driver.shutdownDistributor()
+            return false
+        }
         controller = .gicV2(driver)
         configured = true
         return true
@@ -166,11 +185,27 @@ enum InterruptSubsystem {
         _ configuration: GICv3Configuration
     ) -> Bool {
         prepareForConfiguration()
-        var driver = GICv3(configuration: configuration)
-        guard driver.initialize() else { return false }
+        let driver = GICv3(configuration: configuration)
+        guard driver.initializeDistributor() else { return false }
+        guard driver.initializeCurrentProcessor() else {
+            _ = driver.shutdownDistributor()
+            return false
+        }
         controller = .gicV3(driver)
         configured = true
         return true
+    }
+
+    /// Prepares one secondary processor after it has installed the shared EL1
+    /// exception vectors and before it publishes ONLINE. IRQs remain masked and
+    /// the local physical timer remains stopped. The distributor is never
+    /// rewritten, so every participating processor may call this exactly once
+    /// without racing the boot processor's global controller setup.
+    static func configureCurrentProcessor() -> Bool {
+        AArch64.disableIRQs()
+        GenericPhysicalTimer.initializeCurrentProcessor()
+        guard configured else { return false }
+        return controller.initializeCurrentProcessor()
     }
 
     /// Installs one noncapturing callback. It runs once per acknowledged timer
