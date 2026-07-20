@@ -182,7 +182,7 @@ rsync -t --checksum "$BOOT_PACKAGE/SHA256SUMS" "$BOOT_VOLUME/SHA256SUMS"
 (cd "$BOOT_VOLUME" && shasum -a 256 -c SHA256SUMS)
 sync
 diskutil unmountDisk /dev/diskN
-sudo python3 tools/verify_rpi5_boot_partition.py /dev/rdiskN \
+sudo python3 tools/verify_rpi5_boot_partition.py /dev/diskN \
   --expected-block-count EXACT_CARD_BLOCK_COUNT \
   --expected-sha256sums "$BOOT_PACKAGE/SHA256SUMS"
 diskutil eject /dev/diskN
@@ -197,6 +197,10 @@ whole-card initialization when preserving its old contents is no longer
 required. The semantic verifier follows only paths named by the package hash
 manifest, so unrelated `.Spotlight-V100`, `.fseventsd`, and AppleDouble files
 neither invalidate the boot payload nor expand the verifier's read scope.
+On macOS this FAT verifier deliberately uses the buffered whole-disk node:
+variable-length file reads can be rejected as unaligned on `/dev/rdiskN` even
+though the card is healthy. The persistent-log inspector below performs aligned
+block reads and continues to use the raw whole-disk node.
 
 ### Live USB kernel update: volatile
 
