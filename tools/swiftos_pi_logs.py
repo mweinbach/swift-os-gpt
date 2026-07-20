@@ -1,0 +1,902 @@
+#!/usr/bin/env python3
+"""Pull SwiftOS Raspberry Pi logs from returned media or a live USB link.
+
+Returned-card inspection is deliberately read-only.  On macOS the tool takes a
+fresh ``diskutil list external physical`` snapshot, admits only one removable
+whole disk with the SwiftOS boot/data partition sentinels, verifies its exact
+geometry with ``diskutil info``, and then delegates bounded parsing to the
+persistent-log inspector.  It never mounts, unmounts, writes, partitions, or
+ejects media.
+
+Live inspection delegates the versioned CDC/SDBG exchange to ``swiftosctl`` so
+there is only one implementation of tty setup, SwiftOS USB identity matching,
+framing, and console reconstruction.  This wrapper adds repeatable capture and
+developer-friendly output without opening the tty a second time.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import binascii
+from contextlib import contextmanager
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import subprocess
+import stat
+import sys
+import time
+from typing import Any, BinaryIO, Callable, Iterator, Mapping, Sequence, TextIO
+
+import build_rpi5_media as media
+import inspect_rpi5_persistent_log as persistent
+
+
+REPOSITORY = Path(__file__).resolve().parents[1]
+DEFAULT_SWIFTOSCTL = REPOSITORY / ".build" / "swiftosctl"
+DISKUTIL = Path("/usr/sbin/diskutil")
+MAXIMUM_DISKUTIL_OUTPUT_BYTES = 8 * 1024 * 1024
+MAXIMUM_LIVE_REPORT_BYTES = 32 * 1024 * 1024
+MAXIMUM_SAVED_CAPTURE_BYTES = 64 * 1024 * 1024
+LOGICAL_BLOCK_BYTES = 512
+
+
+class PiLogToolError(Exception):
+    """A refusal or operational failure safe to present to an operator."""
+
+
+@dataclass(frozen=True)
+class CardCandidate:
+    identifier: str
+    device_path: Path
+    raw_device_path: Path
+    byte_count: int
+    logical_block_bytes: int
+    media_name: str
+    protocol: str
+
+    @property
+    def logical_block_count(self) -> int:
+        return self.byte_count // self.logical_block_bytes
+
+
+CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[bytes]]
+
+
+def run_bytes(arguments: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        list(arguments),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def _run_plist(
+    arguments: Sequence[str],
+    *,
+    runner: CommandRunner,
+) -> Mapping[str, Any]:
+    try:
+        completed = runner(arguments)
+    except OSError as error:
+        raise PiLogToolError(
+            f"could not execute {arguments[0]}: {error}"
+        ) from error
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        if not detail:
+            detail = f"exit status {completed.returncode}"
+        raise PiLogToolError(f"{' '.join(arguments)} failed: {detail}")
+    if len(completed.stdout) > MAXIMUM_DISKUTIL_OUTPUT_BYTES:
+        raise PiLogToolError("diskutil returned an unexpectedly large report")
+    try:
+        value = plistlib.loads(completed.stdout)
+    except (plistlib.InvalidFileException, ValueError) as error:
+        raise PiLogToolError("diskutil returned an invalid property list") from error
+    if not isinstance(value, dict):
+        raise PiLogToolError("diskutil property-list root is not a dictionary")
+    return value
+
+
+def _whole_identifier(requested_path: str) -> str:
+    match = re.fullmatch(r"/dev/(?:r)?(disk[0-9]+)", requested_path)
+    if match is None:
+        raise PiLogToolError(
+            "card device must be an explicit macOS whole disk such as "
+            "/dev/disk4 or /dev/rdisk4"
+        )
+    return match.group(1)
+
+
+def _content_key(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _has_swiftos_partition_sentinels(record: Mapping[str, Any]) -> bool:
+    if _content_key(record.get("Content")) not in {
+        "fdiskpartitionscheme",
+        "masterbootrecord",
+    }:
+        return False
+    partitions = record.get("Partitions")
+    if not isinstance(partitions, list):
+        return False
+    has_boot = False
+    has_data = False
+    for partition in partitions:
+        if not isinstance(partition, dict):
+            continue
+        content = _content_key(partition.get("Content"))
+        volume = partition.get("VolumeName")
+        if volume == "SWIFTOS" and content in {
+            "dosfat32",
+            "windowsfat32",
+            "0c",
+            "c",
+        }:
+            has_boot = True
+        if content in {"da", "0xda"}:
+            has_data = True
+    return has_boot and has_data
+
+
+def _require_bool(
+    info: Mapping[str, Any],
+    key: str,
+    expected: bool,
+    *,
+    identifier: str,
+) -> None:
+    value = info.get(key)
+    if value is not expected:
+        expectation = "true" if expected else "false"
+        raise PiLogToolError(
+            f"{identifier} is not eligible: diskutil {key} must be {expectation}"
+        )
+
+
+def _require_string_if_present(
+    info: Mapping[str, Any],
+    key: str,
+    expected: str,
+    *,
+    identifier: str,
+) -> None:
+    value = info.get(key)
+    if value is not None and (
+        not isinstance(value, str) or value.lower() != expected.lower()
+    ):
+        raise PiLogToolError(
+            f"{identifier} is not eligible: diskutil {key} is {value!r}"
+        )
+
+
+def _positive_integer(value: object, description: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise PiLogToolError(f"diskutil {description} is missing or invalid")
+    return value
+
+
+def _validate_candidate(
+    identifier: str,
+    record: Mapping[str, Any],
+    info: Mapping[str, Any],
+) -> CardCandidate:
+    if record.get("DeviceIdentifier") != identifier:
+        raise PiLogToolError(f"diskutil list record changed for {identifier}")
+    if info.get("DeviceIdentifier") != identifier:
+        raise PiLogToolError(f"diskutil info returned a different device identifier")
+    _require_bool(info, "Whole", True, identifier=identifier)
+    _require_bool(info, "Internal", False, identifier=identifier)
+    _require_bool(info, "RemovableMedia", True, identifier=identifier)
+    _require_string_if_present(
+        info,
+        "VirtualOrPhysical",
+        "Physical",
+        identifier=identifier,
+    )
+    _require_string_if_present(
+        info,
+        "DeviceLocation",
+        "External",
+        identifier=identifier,
+    )
+
+    block_bytes = _positive_integer(
+        info.get("DeviceBlockSize"),
+        "logical block size",
+    )
+    if block_bytes != LOGICAL_BLOCK_BYTES:
+        raise PiLogToolError(
+            f"{identifier} has unsupported {block_bytes}-byte logical blocks"
+        )
+    listed_size = _positive_integer(record.get("Size"), "listed whole-disk size")
+    info_size_value = info.get("TotalSize", info.get("DiskSize"))
+    info_size = _positive_integer(info_size_value, "whole-disk size")
+    if listed_size != info_size:
+        raise PiLogToolError(
+            f"{identifier} geometry changed between diskutil list and info"
+        )
+    if info_size % block_bytes:
+        raise PiLogToolError(f"{identifier} size is not block aligned")
+    if not _has_swiftos_partition_sentinels(record):
+        raise PiLogToolError(
+            f"{identifier} does not have the SWIFTOS FAT32 plus type-0xDA layout"
+        )
+    partitions = record.get("Partitions")
+    assert isinstance(partitions, list)
+    mounted = [
+        partition.get("MountPoint")
+        for partition in partitions
+        if isinstance(partition, dict)
+        and isinstance(partition.get("MountPoint"), str)
+        and partition.get("MountPoint")
+    ]
+    if mounted:
+        locations = ", ".join(str(value) for value in mounted)
+        raise PiLogToolError(
+            f"{identifier} has mounted child partitions ({locations}); run "
+            f"`diskutil unmountDisk /dev/{identifier}` yourself and rerun so the "
+            "read-only capture cannot overlap filesystem metadata changes"
+        )
+
+    expected_node = f"/dev/{identifier}"
+    device_node = info.get("DeviceNode", expected_node)
+    if device_node != expected_node:
+        raise PiLogToolError(
+            f"{identifier} diskutil device node does not match {expected_node}"
+        )
+    media_name = info.get("MediaName")
+    protocol = info.get("BusProtocol")
+    return CardCandidate(
+        identifier=identifier,
+        device_path=Path(expected_node),
+        raw_device_path=Path(f"/dev/r{identifier}"),
+        byte_count=info_size,
+        logical_block_bytes=block_bytes,
+        media_name=media_name if isinstance(media_name, str) else "unknown media",
+        protocol=protocol if isinstance(protocol, str) else "unknown protocol",
+    )
+
+
+def discover_swiftos_card(
+    requested_device: str | None = None,
+    *,
+    runner: CommandRunner = run_bytes,
+    diskutil: Path = DISKUTIL,
+) -> CardCandidate:
+    """Resolve one card from a new external-physical diskutil snapshot."""
+
+    if sys.platform != "darwin":
+        raise PiLogToolError(
+            "automatic card discovery requires macOS diskutil; use --image for "
+            "a regular media image"
+        )
+    requested_identifier = (
+        _whole_identifier(requested_device) if requested_device is not None else None
+    )
+    executable = str(diskutil)
+    listing = _run_plist(
+        [executable, "list", "-plist", "external", "physical"],
+        runner=runner,
+    )
+    raw_whole = listing.get("WholeDisks")
+    raw_records = listing.get("AllDisksAndPartitions")
+    if not isinstance(raw_whole, list) or not isinstance(raw_records, list):
+        raise PiLogToolError("diskutil list omitted whole-disk records")
+    whole = {
+        value for value in raw_whole
+        if isinstance(value, str) and re.fullmatch(r"disk[0-9]+", value)
+    }
+    records = {
+        record.get("DeviceIdentifier"): record
+        for record in raw_records
+        if isinstance(record, dict)
+        and isinstance(record.get("DeviceIdentifier"), str)
+        and record.get("DeviceIdentifier") in whole
+    }
+    identifiers = (
+        [requested_identifier]
+        if requested_identifier is not None
+        else sorted(
+            identifier for identifier, record in records.items()
+            if _has_swiftos_partition_sentinels(record)
+        )
+    )
+    if requested_identifier is not None and requested_identifier not in whole:
+        raise PiLogToolError(
+            f"{requested_identifier} is not in the fresh external physical disk list"
+        )
+    if not identifiers:
+        raise PiLogToolError(
+            "no removable external disk has the SWIFTOS FAT32 plus type-0xDA layout"
+        )
+
+    candidates: list[CardCandidate] = []
+    refusals: list[str] = []
+    for identifier in identifiers:
+        record = records.get(identifier)
+        if record is None:
+            refusals.append(f"{identifier}: missing whole-disk record")
+            continue
+        try:
+            info = _run_plist(
+                [executable, "info", "-plist", f"/dev/{identifier}"],
+                runner=runner,
+            )
+            candidates.append(_validate_candidate(identifier, record, info))
+        except PiLogToolError as error:
+            refusals.append(str(error))
+
+    if requested_identifier is not None:
+        if candidates:
+            return candidates[0]
+        detail = refusals[0] if refusals else "fresh validation failed"
+        raise PiLogToolError(detail)
+    if len(candidates) > 1:
+        paths = ", ".join(str(candidate.device_path) for candidate in candidates)
+        raise PiLogToolError(
+            f"multiple eligible SwiftOS cards are connected ({paths}); "
+            "select one with --device after checking its identity"
+        )
+    if len(candidates) == 1:
+        return candidates[0]
+    detail = "; ".join(refusals) if refusals else "no candidate passed validation"
+    raise PiLogToolError(f"no eligible SwiftOS card passed validation: {detail}")
+
+
+def inspect_card(
+    candidate: CardCandidate,
+    *,
+    inspector: Callable[..., dict[str, object]] = persistent.inspect_path,
+) -> dict[str, object]:
+    """Inspect a selected raw disk using its independently observed geometry."""
+
+    try:
+        report = inspector(
+            candidate.raw_device_path,
+            expected_byte_count=candidate.byte_count,
+        )
+    except PermissionError as error:
+        raise PiLogToolError(
+            "macOS denied read-only raw-disk access. Re-run this same card command "
+            "with the privilege mechanism you trust; the tool does not invoke sudo "
+            "and will perform fresh discovery again."
+        ) from error
+    except (media.MediaError, OSError, ValueError) as error:
+        raise PiLogToolError(f"persistent-log inspection failed: {error}") from error
+    enriched = dict(report)
+    enriched["host_card_discovery"] = {
+        "method": "fresh-diskutil-external-physical",
+        "device_identifier": candidate.identifier,
+        "device_path": str(candidate.device_path),
+        "raw_device_path": str(candidate.raw_device_path),
+        "media_name": candidate.media_name,
+        "protocol": candidate.protocol,
+        "byte_count": candidate.byte_count,
+        "logical_block_bytes": candidate.logical_block_bytes,
+        "logical_block_count": candidate.logical_block_count,
+        "read_only": True,
+    }
+    return enriched
+
+
+def _sequence_summary(report: Mapping[str, object]) -> str:
+    metadata = report.get("sequence_metadata")
+    persistent_record = (
+        metadata.get("persistent_record")
+        if isinstance(metadata, dict) else None
+    )
+    if not isinstance(persistent_record, dict):
+        return "unavailable"
+    first = persistent_record.get("first_sequence")
+    last = persistent_record.get("last_sequence")
+    count = persistent_record.get("record_count", 0)
+    gaps = persistent_record.get("gap_count", 0)
+    resets = persistent_record.get("reset_count", 0)
+    if not count:
+        return "empty"
+    return f"{first}...{last}; {count} records; {gaps} gaps; {resets} resets"
+
+
+def card_summary_lines(report: Mapping[str, object]) -> list[str]:
+    source = report.get("source")
+    source_path = source.get("path") if isinstance(source, dict) else "unknown"
+    capture = report.get("capture_summary")
+    status = capture.get("status") if isinstance(capture, dict) else "unknown"
+    console = report.get("canonical_console_stream")
+    console_bytes = console.get("byte_count", 0) if isinstance(console, dict) else 0
+    complete = console.get("is_complete") if isinstance(console, dict) else False
+    boot = report.get("boot_epoch_markers")
+    boot_count = boot.get("count", 0) if isinstance(boot, dict) else 0
+    lines = [
+        f"source: {source_path} (read-only)",
+        f"data superblocks: {report.get('data_superblock_status', 'unknown')}",
+        f"capture: {status}; boot epochs {boot_count}",
+        f"sequences: {_sequence_summary(report)}",
+        f"console: {console_bytes} bytes; complete {'yes' if complete else 'no'}",
+    ]
+    diagnostics = diagnostic_console_lines(report)
+    if diagnostics:
+        lines.append(f"diagnostic markers: {len(diagnostics)}")
+        lines.extend(f"  {marker}" for marker in diagnostics)
+    else:
+        lines.append("diagnostic markers: none")
+    return lines
+
+
+def diagnostic_console_lines(report: Mapping[str, object]) -> list[str]:
+    """Return unique failure-oriented markers in retained console order."""
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw_line in canonical_console_text(report).splitlines():
+        line = raw_line.strip()
+        if not line.startswith("SWIFTOS:"):
+            continue
+        marker = line.removeprefix("SWIFTOS:").split("=", 1)[0]
+        suspicious = (
+            any(
+                token in marker
+                for token in (
+                    "PANIC",
+                    "FAILED",
+                    "TIMEOUT",
+                    "MISSING",
+                    "UNSUPPORTED",
+                    "DEFERRED",
+                )
+            )
+            or marker.endswith("_STATE")
+        )
+        if suspicious and line not in seen:
+            seen.add(line)
+            result.append(line)
+    return result
+
+
+def canonical_console_text(report: Mapping[str, object]) -> str:
+    console = report.get("canonical_console_stream")
+    if not isinstance(console, dict):
+        return ""
+    text = console.get("text")
+    if isinstance(text, str):
+        return text
+    encoded = console.get("bytes_hex")
+    if not isinstance(encoded, str):
+        return ""
+    try:
+        return bytes.fromhex(encoded).decode("utf-8", errors="replace")
+    except ValueError:
+        return ""
+
+
+def write_new_file(path: Path, value: bytes) -> None:
+    """Create one evidence file without replacing an earlier capture."""
+
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        view = memoryview(value)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("capture write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def open_new_capture(path: Path | None) -> Iterator[BinaryIO | None]:
+    if path is None:
+        yield None
+        return
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    stream = os.fdopen(descriptor, "wb", closefd=True)
+    try:
+        yield stream
+        stream.flush()
+        os.fsync(stream.fileno())
+    finally:
+        stream.close()
+
+
+def save_json_capture(path: Path, report: Mapping[str, object]) -> None:
+    value = (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    write_new_file(path, value)
+
+
+def load_json_capture(path: Path) -> dict[str, object]:
+    """Read one bounded, non-symlink persistent-log evidence file."""
+
+    before = os.lstat(path)
+    if stat.S_ISLNK(before.st_mode):
+        raise PiLogToolError("saved capture symlinks are forbidden")
+    if not stat.S_ISREG(before.st_mode):
+        raise PiLogToolError("saved capture is not a regular file")
+    if not 0 < before.st_size <= MAXIMUM_SAVED_CAPTURE_BYTES:
+        raise PiLogToolError("saved capture size is empty or exceeds the safety bound")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or before.st_size != after.st_size
+        ):
+            raise PiLogToolError("saved capture changed while it was being opened")
+        chunks: list[bytes] = []
+        remaining = after.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise PiLogToolError("saved capture ended before its declared size")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(b"".join(chunks))
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise PiLogToolError("saved capture is not valid JSON") from error
+    if not isinstance(value, dict):
+        raise PiLogToolError("saved capture JSON root is not an object")
+    if value.get("format") != "swiftos-persistent-log-capture-v1":
+        raise PiLogToolError("saved capture has an unsupported format")
+    return value
+
+
+@dataclass(frozen=True)
+class LiveResult:
+    last_command: tuple[str, ...]
+    byte_count: int
+    poll_count: int
+    boot_session_id: str | None
+
+
+def _live_command(
+    swiftosctl: Path,
+    *,
+    device: str | None,
+    timeout_seconds: float,
+    starting_sequence: int | None,
+    count: int,
+) -> list[str]:
+    command = [
+        str(swiftosctl),
+        "console",
+        "--timeout",
+        str(timeout_seconds),
+        "--count",
+        str(count),
+        "--json",
+    ]
+    if device is not None:
+        command.extend(["--device", device])
+    if starting_sequence is not None:
+        command.extend(["--start", str(starting_sequence)])
+    return command
+
+
+def _decode_live_report(value: bytes) -> tuple[dict[str, object], bytes]:
+    if len(value) > MAXIMUM_LIVE_REPORT_BYTES:
+        raise PiLogToolError("swiftosctl returned an unexpectedly large report")
+    try:
+        report = json.loads(value)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise PiLogToolError("swiftosctl console returned invalid JSON") from error
+    if not isinstance(report, dict):
+        raise PiLogToolError("swiftosctl console JSON root is not an object")
+    encoded = report.get("consoleBase64")
+    if not isinstance(encoded, str):
+        raise PiLogToolError("swiftosctl console report omitted consoleBase64")
+    try:
+        console = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise PiLogToolError("swiftosctl console returned invalid consoleBase64") from error
+    byte_count = report.get("consoleByteCount")
+    if isinstance(byte_count, bool) or not isinstance(byte_count, int):
+        raise PiLogToolError("swiftosctl console report omitted consoleByteCount")
+    if byte_count != len(console):
+        raise PiLogToolError("swiftosctl console byte count does not match its payload")
+    return report, console
+
+
+def run_live_console(
+    *,
+    swiftosctl: Path,
+    device: str | None,
+    timeout_seconds: float,
+    starting_sequence: int | None,
+    count: int,
+    follow: bool,
+    poll_interval_seconds: float,
+    output: Path | None,
+    runner: CommandRunner = run_bytes,
+    stdout: BinaryIO | None = None,
+    stderr: TextIO = sys.stderr,
+    sleeper: Callable[[float], None] = time.sleep,
+    maximum_polls: int | None = None,
+) -> LiveResult:
+    """Poll the canonical live-console client and tee exact console bytes."""
+
+    if not swiftosctl.is_file() or not os.access(swiftosctl, os.X_OK):
+        raise PiLogToolError(
+            f"{swiftosctl} is not an executable swiftosctl; run `make swiftosctl`"
+        )
+    if device is not None:
+        if re.fullmatch(r"/dev/cu\.usbmodem[^/]*", device) is None:
+            raise PiLogToolError(
+                "live device must be a macOS /dev/cu.usbmodem* callout path"
+            )
+    sink = stdout if stdout is not None else sys.stdout.buffer
+    cursor = starting_sequence
+    selected_device = device
+    boot_session: str | None = None
+    total_bytes = 0
+    polls = 0
+    last_command: tuple[str, ...] = ()
+    with open_new_capture(output) as capture:
+        while True:
+            command = _live_command(
+                swiftosctl,
+                device=selected_device,
+                timeout_seconds=timeout_seconds,
+                starting_sequence=cursor,
+                count=count,
+            )
+            last_command = tuple(command)
+            try:
+                completed = runner(command)
+            except OSError as error:
+                raise PiLogToolError(f"could not execute swiftosctl: {error}") from error
+            if completed.stderr:
+                stderr.write(completed.stderr.decode("utf-8", errors="replace"))
+                stderr.flush()
+            if completed.returncode != 0:
+                raise PiLogToolError(
+                    f"swiftosctl console exited with status {completed.returncode}"
+                )
+            report, console = _decode_live_report(completed.stdout)
+            report_device = report.get("devicePath")
+            report_boot = report.get("bootSessionID")
+            if not isinstance(report_device, str) or not isinstance(report_boot, str):
+                raise PiLogToolError(
+                    "swiftosctl console report omitted device or boot-session identity"
+                )
+            if selected_device is None:
+                selected_device = report_device
+                stderr.write(f"live SwiftOS console: {selected_device}\n")
+                stderr.flush()
+            elif report_device != selected_device:
+                raise PiLogToolError("swiftosctl switched CDC devices while following logs")
+            if boot_session is None:
+                boot_session = report_boot
+                stderr.write(f"boot session: {boot_session}\n")
+                stderr.flush()
+            elif report_boot != boot_session:
+                raise PiLogToolError(
+                    "SwiftOS rebooted while logs were being followed; restart the "
+                    "command to establish the new boot-session cursor"
+                )
+
+            if console:
+                sink.write(console)
+                sink.flush()
+                if capture is not None:
+                    capture.write(console)
+                    capture.flush()
+                total_bytes += len(console)
+            discontinuities = report.get("sequenceDiscontinuityCount", 0)
+            incomplete = report.get("incompleteMessageCount", 0)
+            if discontinuities or incomplete:
+                stderr.write(
+                    "warning: live console reports "
+                    f"{discontinuities} sequence discontinuities and "
+                    f"{incomplete} incomplete messages\n"
+                )
+                stderr.flush()
+
+            polls += 1
+            next_sequence = report.get("nextSequence")
+            if next_sequence is not None and (
+                isinstance(next_sequence, bool)
+                or not isinstance(next_sequence, int)
+                or next_sequence <= 0
+            ):
+                raise PiLogToolError("swiftosctl console returned an invalid nextSequence")
+            if isinstance(next_sequence, int):
+                if cursor is not None and next_sequence < cursor:
+                    raise PiLogToolError("swiftosctl console cursor moved backwards")
+                cursor = next_sequence
+            if not follow or (
+                maximum_polls is not None and polls >= maximum_polls
+            ):
+                break
+            more_available = report.get("moreAvailable") is True
+            if not more_available:
+                sleeper(poll_interval_seconds)
+
+    return LiveResult(
+        last_command=last_command,
+        byte_count=total_bytes,
+        poll_count=polls,
+        boot_session_id=boot_session,
+    )
+
+
+def argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    card = commands.add_parser(
+        "card",
+        help="discover and inspect returned Pi microSD logs read-only",
+    )
+    source = card.add_mutually_exclusive_group()
+    source.add_argument(
+        "--device",
+        help="select a whole disk, revalidated against a fresh diskutil snapshot",
+    )
+    source.add_argument(
+        "--image",
+        type=Path,
+        help="inspect a regular SwiftOS media image instead of physical media",
+    )
+    card.add_argument("--output", type=Path, help="create a full JSON evidence file")
+    card.add_argument(
+        "--json",
+        action="store_true",
+        help="print the full JSON report instead of the readable summary/console",
+    )
+    card.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="omit canonical console text from readable output",
+    )
+
+    show = commands.add_parser(
+        "show",
+        help="summarize a previously saved persistent-log JSON capture",
+    )
+    show.add_argument("capture", type=Path)
+    show.add_argument(
+        "--json",
+        action="store_true",
+        help="print the validated complete JSON capture",
+    )
+    show.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="omit canonical console text from readable output",
+    )
+
+    live = commands.add_parser(
+        "live",
+        help="view canonical console logs from a connected Pi over USB CDC/SDBG",
+    )
+    live.add_argument(
+        "--device",
+        help="explicit /dev/cu.usbmodem* path; omitted means exact SwiftOS discovery",
+    )
+    live.add_argument(
+        "--swiftosctl",
+        type=Path,
+        default=DEFAULT_SWIFTOSCTL,
+        help="path to the built SwiftOS control client",
+    )
+    live.add_argument("--timeout", type=float, default=30.0)
+    live.add_argument("--start", type=int)
+    live.add_argument("--count", type=int, default=4096)
+    live.add_argument(
+        "--poll-interval",
+        type=float,
+        default=0.5,
+        help="seconds between idle follow requests",
+    )
+    live.add_argument(
+        "--once",
+        action="store_true",
+        help="pull the retained console once instead of following new entries",
+    )
+    live.add_argument(
+        "--output",
+        type=Path,
+        help="create an exact live-console transcript alongside terminal output",
+    )
+    return parser
+
+
+def _validate_live_arguments(arguments: argparse.Namespace) -> None:
+    if not 0.001 <= arguments.timeout <= 3600:
+        raise PiLogToolError("--timeout must be between 0.001 and 3600 seconds")
+    if arguments.start is not None and arguments.start <= 0:
+        raise PiLogToolError("--start must be greater than zero")
+    if not 1 <= arguments.count <= 4096:
+        raise PiLogToolError("--count must be between 1 and 4096")
+    if not 0.05 <= arguments.poll_interval <= 60:
+        raise PiLogToolError("--poll-interval must be between 0.05 and 60 seconds")
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = argument_parser().parse_args(argv)
+    try:
+        if arguments.command == "live":
+            _validate_live_arguments(arguments)
+            run_live_console(
+                swiftosctl=arguments.swiftosctl,
+                device=arguments.device,
+                timeout_seconds=arguments.timeout,
+                starting_sequence=arguments.start,
+                count=arguments.count,
+                follow=not arguments.once,
+                poll_interval_seconds=arguments.poll_interval,
+                output=arguments.output,
+            )
+            return 0
+
+        if arguments.command == "show":
+            report = load_json_capture(arguments.capture)
+        else:
+            if arguments.image is not None:
+                try:
+                    report = persistent.inspect_path(arguments.image)
+                except (media.MediaError, OSError, ValueError) as error:
+                    raise PiLogToolError(
+                        f"persistent-log inspection failed: {error}"
+                    ) from error
+            else:
+                candidate = discover_swiftos_card(arguments.device)
+                report = inspect_card(candidate)
+            if arguments.output is not None:
+                save_json_capture(arguments.output, report)
+        if arguments.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            for line in card_summary_lines(report):
+                print(line)
+            if not arguments.summary_only:
+                text = canonical_console_text(report)
+                if text:
+                    print("console:")
+                    print(text, end="" if text.endswith("\n") else "\n")
+                else:
+                    print("console: no retained console bytes")
+        return 0
+    except FileExistsError as error:
+        print(
+            f"swiftos-pi-logs: refusing to overwrite capture: {error.filename}",
+            file=sys.stderr,
+        )
+        return 1
+    except PiLogToolError as error:
+        print(f"swiftos-pi-logs: {error}", file=sys.stderr)
+        return 1
+    except OSError as error:
+        print(f"swiftos-pi-logs: host I/O failed: {error}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nswiftos-pi-logs: live log follow stopped", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

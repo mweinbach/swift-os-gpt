@@ -20,6 +20,7 @@ RPI5_MEDIA_SIZE_MIB ?= 1024
 RPI5_MEDIA_BLOCK_COUNT ?=
 RPI5_BOOT_SIZE_MIB ?= 256
 RPI5_KERNEL_LOG_BLOCK_COUNT ?= 4096
+RPI5_LOG_ARGS ?=
 USB_DISPLAY_VIEWER := $(BUILD_DIR)/swiftos-usb-display
 USB_UPDATE := $(BUILD_DIR)/swiftos-usb-update
 SWIFTOS_CONTROL := $(BUILD_DIR)/swiftosctl
@@ -60,7 +61,7 @@ QEMU_FLAGS := \
 	-serial stdio \
 	-no-reboot
 
-.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-gpu-3d-acceptance virtio-net-smoke virtio-input-smoke virtio-block-swiftfs-smoke smp-el0-smoke cpu-config-smoke test host-test per-cpu-interrupt-host-test interrupt-subsystem-host-test boot-liveness-policy-host-test vfs-host-test filesystem-host-test file-manager-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test rpi5-swiftfs-storage-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test virtio-block-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test platform-storage-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-boot-verifier-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
+.PHONY: all build run inspect smoke monitor-smoke frame-smoke animation-smoke virtio-gpu-smoke virtio-gpu-3d-acceptance virtio-net-smoke virtio-input-smoke virtio-block-swiftfs-smoke smp-el0-smoke cpu-config-smoke test host-test per-cpu-interrupt-host-test interrupt-subsystem-host-test boot-liveness-policy-host-test vfs-host-test filesystem-host-test file-manager-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test rpi5-swiftfs-storage-policy-host-test rpi5-log-tool-host-test rpi5-card-logs rpi5-live-logs sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test virtio-block-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test platform-network-pinned-fdt-test platform-storage-pinned-fdt-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test usb-update swiftos-control-host-test swiftosctl userland-test qemu-fdt-test rpi5-fdt-test rpi5-package-test rpi5-boot-verifier-test rpi5-build rpi5-inspect rpi5-package clean toolchain-check source-check
 
 .PHONY: secondary-work-scheduler-host-test
 
@@ -170,6 +171,16 @@ rpi5-package-test:
 
 rpi5-boot-verifier-test:
 	$(PYTHON) Tests/Host/rpi5_boot_partition_verifier_test.py
+
+rpi5-log-tool-host-test:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) Tests/Host/rpi5_log_tool_test.py
+
+rpi5-card-logs:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/swiftos_pi_logs.py card $(RPI5_LOG_ARGS)
+
+rpi5-live-logs: swiftosctl
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/swiftos_pi_logs.py live \
+		--swiftosctl $(SWIFTOS_CONTROL) $(RPI5_LOG_ARGS)
 
 run: build
 	$(QEMU) $(QEMU_FLAGS) -display cocoa -kernel $(KERNEL_BIN)
@@ -1031,7 +1042,7 @@ rpi5-swiftfs-storage-policy-host-test: | $(BUILD_DIR)
 	$(BUILD_DIR)/rpi5-swiftfs-storage-policy-host-tests
 
 host-test: secondary-work-scheduler-host-test
-host-test: per-cpu-interrupt-host-test interrupt-subsystem-host-test boot-liveness-policy-host-test vfs-host-test filesystem-host-test file-manager-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test rpi5-swiftfs-storage-policy-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test virtio-block-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
+host-test: per-cpu-interrupt-host-test interrupt-subsystem-host-test boot-liveness-policy-host-test vfs-host-test filesystem-host-test file-manager-host-test input-host-test storage-host-test persistent-log-host-test deferred-persistent-log-host-test rpi5-cooperative-policy-host-test rpi5-swiftfs-storage-policy-host-test rpi5-log-tool-host-test sdhci-block-device-host-test bcm2712-sd-card-host-test kernel-monitor-service-host-test debug-observability-host-test sdbg-protocol-host-test network-wire-host-test network-stack-host-test network-boot-coordinator-host-test virtio-net-host-test virtio-input-host-test virtio-block-host-test cadence-gem-device-host-test cadence-gem-mac-address-selector-host-test rp1-gem-bootstrap-memory-host-test rp1-gem-board-preparation-host-test platform-deferred-activation-host-test platform-network-discovery-host-test firmware-mailbox-host-test usb-gadget-host-test usb-dwc2-host-test usb-debug-display-host-test usb-kernel-update-guest-host-test kernel-update-activation-host-test usb-display-viewer-host-test usb-display-viewer usb-update-host-test swiftos-control-host-test
 	$(SWIFTC) --version
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library \

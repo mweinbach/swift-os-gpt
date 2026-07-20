@@ -1,0 +1,622 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import base64
+from contextlib import contextmanager, redirect_stderr
+import io
+import json
+import os
+from pathlib import Path
+import plistlib
+import subprocess
+import sys
+import tempfile
+from unittest import mock
+
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+TOOLS = REPOSITORY / "tools"
+sys.path.insert(0, str(TOOLS))
+import swiftos_pi_logs as logs  # noqa: E402
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+def expect_error(action, text: str) -> None:
+    try:
+        action()
+    except logs.PiLogToolError as error:
+        require(text in str(error), f"unexpected refusal: {error}")
+    else:
+        raise AssertionError(f"expected refusal containing: {text}")
+
+
+def partition(
+    identifier: str,
+    content: str,
+    *,
+    volume_name: str | None = None,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "DeviceIdentifier": identifier,
+        "Content": content,
+        "Size": 64 * 1024 * 1024,
+    }
+    if volume_name is not None:
+        result["VolumeName"] = volume_name
+    return result
+
+
+def whole_record(
+    identifier: str,
+    size: int,
+    *,
+    swiftos: bool,
+) -> dict[str, object]:
+    partitions = [
+        partition(
+            f"{identifier}s1",
+            "DOS_FAT_32",
+            volume_name="SWIFTOS" if swiftos else "OTHER",
+        ),
+        partition(
+            f"{identifier}s2",
+            "DA" if swiftos else "Apple_APFS",
+        ),
+    ]
+    return {
+        "DeviceIdentifier": identifier,
+        "Content": "FDisk_partition_scheme",
+        "Size": size,
+        "Partitions": partitions,
+    }
+
+
+def disk_info(
+    identifier: str,
+    size: int,
+    *,
+    removable: bool = True,
+) -> dict[str, object]:
+    return {
+        "DeviceIdentifier": identifier,
+        "DeviceNode": f"/dev/{identifier}",
+        "Whole": True,
+        "Internal": False,
+        "RemovableMedia": removable,
+        "VirtualOrPhysical": "Physical",
+        "DeviceLocation": "External",
+        "DeviceBlockSize": 512,
+        "TotalSize": size,
+        "MediaName": "Fake SD Card Reader Media",
+        "BusProtocol": "USB",
+    }
+
+
+class FakeDiskutil:
+    def __init__(
+        self,
+        records: list[dict[str, object]],
+        infos: dict[str, dict[str, object]],
+    ) -> None:
+        self.records = records
+        self.infos = infos
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(
+        self,
+        arguments,
+    ) -> subprocess.CompletedProcess[bytes]:
+        command = tuple(arguments)
+        self.calls.append(command)
+        if command[1:] == ("list", "-plist", "external", "physical"):
+            value = {
+                "WholeDisks": [record["DeviceIdentifier"] for record in self.records],
+                "AllDisksAndPartitions": self.records,
+            }
+        elif len(command) == 4 and command[1:3] == ("info", "-plist"):
+            identifier = command[3].removeprefix("/dev/")
+            value = self.infos[identifier]
+        else:
+            raise AssertionError(f"unexpected diskutil invocation: {command}")
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            stdout=plistlib.dumps(value),
+            stderr=b"",
+        )
+
+
+@contextmanager
+def darwin_platform():
+    with mock.patch.object(logs.sys, "platform", "darwin"):
+        yield
+
+
+def test_fresh_card_discovery_ignores_unrelated_fixed_disk() -> None:
+    card_size = 128_177_930_240
+    fixed_size = 2_000_398_934_016
+    fake = FakeDiskutil(
+        [
+            whole_record("disk4", card_size, swiftos=True),
+            whole_record("disk6", fixed_size, swiftos=False),
+        ],
+        {
+            "disk4": disk_info("disk4", card_size),
+            "disk6": disk_info("disk6", fixed_size, removable=False),
+        },
+    )
+    with darwin_platform():
+        candidate = logs.discover_swiftos_card(
+            runner=fake,
+            diskutil=Path("/usr/sbin/diskutil"),
+        )
+    require(candidate.identifier == "disk4", "wrong removable card selected")
+    require(candidate.raw_device_path == Path("/dev/rdisk4"), "raw path changed")
+    require(candidate.byte_count == card_size, "card size changed")
+    require(candidate.logical_block_count == card_size // 512,
+            "card block count changed")
+    require(len(fake.calls) == 2, "unrelated disk was queried after sentinel filter")
+    require(fake.calls[0][1:] == ("list", "-plist", "external", "physical"),
+            "discovery did not take a fresh external physical snapshot")
+    require(fake.calls[1][-1] == "/dev/disk4", "wrong disk was validated")
+
+
+def test_ambiguous_cards_and_unrelated_selection_are_refused() -> None:
+    size = 64 * 1024 * 1024
+    ambiguous = FakeDiskutil(
+        [
+            whole_record("disk4", size, swiftos=True),
+            whole_record("disk5", size, swiftos=True),
+        ],
+        {
+            "disk4": disk_info("disk4", size),
+            "disk5": disk_info("disk5", size),
+        },
+    )
+    with darwin_platform():
+        expect_error(
+            lambda: logs.discover_swiftos_card(runner=ambiguous),
+            "multiple eligible SwiftOS cards",
+        )
+
+    unrelated = FakeDiskutil(
+        [whole_record("disk6", size, swiftos=False)],
+        {"disk6": disk_info("disk6", size)},
+    )
+    with darwin_platform():
+        expect_error(
+            lambda: logs.discover_swiftos_card(
+                "/dev/rdisk6",
+                runner=unrelated,
+            ),
+            "does not have the SWIFTOS FAT32 plus type-0xDA layout",
+        )
+        expect_error(
+            lambda: logs.discover_swiftos_card(
+                "/dev/disk99",
+                runner=unrelated,
+            ),
+            "is not in the fresh external physical disk list",
+        )
+        expect_error(
+            lambda: logs.discover_swiftos_card(
+                "/dev/disk6s1",
+                runner=unrelated,
+            ),
+            "whole disk",
+        )
+
+
+def test_geometry_and_removability_must_match_fresh_info() -> None:
+    size = 64 * 1024 * 1024
+    mismatch = FakeDiskutil(
+        [whole_record("disk4", size, swiftos=True)],
+        {"disk4": disk_info("disk4", size + 512)},
+    )
+    with darwin_platform():
+        expect_error(
+            lambda: logs.discover_swiftos_card(runner=mismatch),
+            "geometry changed",
+        )
+
+    fixed = FakeDiskutil(
+        [whole_record("disk4", size, swiftos=True)],
+        {"disk4": disk_info("disk4", size, removable=False)},
+    )
+    with darwin_platform():
+        expect_error(
+            lambda: logs.discover_swiftos_card(runner=fixed),
+            "RemovableMedia must be true",
+        )
+
+    mounted_record = whole_record("disk4", size, swiftos=True)
+    mounted_record["Partitions"][0]["MountPoint"] = "/Volumes/SWIFTOS"
+    mounted = FakeDiskutil(
+        [mounted_record],
+        {"disk4": disk_info("disk4", size)},
+    )
+    with darwin_platform():
+        expect_error(
+            lambda: logs.discover_swiftos_card(runner=mounted),
+            "diskutil unmountDisk /dev/disk4",
+        )
+
+
+def candidate() -> logs.CardCandidate:
+    return logs.CardCandidate(
+        identifier="disk4",
+        device_path=Path("/dev/disk4"),
+        raw_device_path=Path("/dev/rdisk4"),
+        byte_count=128_177_930_240,
+        logical_block_bytes=512,
+        media_name="Fake SD",
+        protocol="USB",
+    )
+
+
+def test_card_inspection_is_read_only_geometry_bounded() -> None:
+    calls: list[tuple[Path, dict[str, object]]] = []
+
+    def fake_inspector(path: Path, **options):
+        calls.append((path, options))
+        return {
+            "format": "swiftos-persistent-log-capture-v1",
+            "source": {"path": str(path)},
+            "data_superblock_status": "healthy",
+            "persistent_record_count": 0,
+        }
+
+    report = logs.inspect_card(candidate(), inspector=fake_inspector)
+    require(calls == [(
+        Path("/dev/rdisk4"),
+        {"expected_byte_count": 128_177_930_240},
+    )], "inspector did not receive exact raw-device geometry")
+    discovery = report["host_card_discovery"]
+    require(discovery["read_only"] is True, "capture omitted read-only contract")
+    require(discovery["logical_block_count"] == 250_347_520,
+            "capture block geometry changed")
+
+    def denied(path: Path, **options):
+        del path, options
+        raise PermissionError("denied")
+
+    expect_error(
+        lambda: logs.inspect_card(candidate(), inspector=denied),
+        "does not invoke sudo",
+    )
+
+
+def sample_card_report() -> dict[str, object]:
+    return {
+        "format": "swiftos-persistent-log-capture-v1",
+        "source": {"path": "/dev/rdisk4"},
+        "data_superblock_status": "healthy",
+        "capture_summary": {"status": "records-present"},
+        "boot_epoch_markers": {"count": 1},
+        "sequence_metadata": {
+            "persistent_record": {
+                "first_sequence": 1,
+                "last_sequence": 8,
+                "record_count": 8,
+                "gap_count": 0,
+                "reset_count": 0,
+            }
+        },
+        "canonical_console_stream": {
+            "byte_count": 20,
+            "is_complete": True,
+            "text": "SWIFTOS:BOOT\r\nREADY\r\n",
+        },
+    }
+
+
+def test_card_summary_and_evidence_files_are_stable_and_non_overwriting() -> None:
+    report = sample_card_report()
+    lines = logs.card_summary_lines(report)
+    require(lines == [
+        "source: /dev/rdisk4 (read-only)",
+        "data superblocks: healthy",
+        "capture: records-present; boot epochs 1",
+        "sequences: 1...8; 8 records; 0 gaps; 0 resets",
+        "console: 20 bytes; complete yes",
+        "diagnostic markers: none",
+    ], "readable card summary changed")
+    require(logs.canonical_console_text(report).endswith("READY\r\n"),
+            "canonical console text changed")
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "capture.json"
+        logs.save_json_capture(path, report)
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        require(saved == report, "JSON evidence did not round-trip")
+        require(logs.load_json_capture(path) == report,
+                "saved JSON capture could not be viewed without media")
+        try:
+            logs.save_json_capture(path, report)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("evidence capture was overwritten")
+
+        symlink = Path(directory) / "capture-link.json"
+        symlink.symlink_to(path)
+        expect_error(
+            lambda: logs.load_json_capture(symlink),
+            "symlinks are forbidden",
+        )
+
+        unsupported = Path(directory) / "unsupported.json"
+        unsupported.write_text('{"format":"future"}\n', encoding="utf-8")
+        expect_error(
+            lambda: logs.load_json_capture(unsupported),
+            "unsupported format",
+        )
+
+
+def live_report(
+    console: bytes,
+    *,
+    next_sequence: int,
+    more_available: bool = False,
+    device: str = "/dev/cu.usbmodemSWIFTOS1",
+    boot: str = "00112233445566778899aabbccddeeff",
+) -> bytes:
+    value = {
+        "devicePath": device,
+        "bootSessionID": boot,
+        "requestedStartingSequence": None,
+        "effectiveStartingSequence": 1,
+        "oldestAvailableSequence": 1,
+        "newestAvailableSequence": next_sequence - 1,
+        "lostEntryCount": 0,
+        "moreAvailable": more_available,
+        "nextSequence": next_sequence,
+        "consoleByteCount": len(console),
+        "consoleText": console.decode("utf-8"),
+        "consoleBase64": base64.b64encode(console).decode("ascii"),
+        "consoleChunkCount": 1 if console else 0,
+        "nonConsoleEntryCount": 0,
+        "sequenceDiscontinuityCount": 0,
+        "incompleteMessageCount": 0,
+        "startsMidMessage": False,
+        "endsMidMessage": False,
+    }
+    return json.dumps(value).encode("utf-8")
+
+
+class FakeLiveRunner:
+    def __init__(self, responses: list[bytes]) -> None:
+        self.responses = list(responses)
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, arguments) -> subprocess.CompletedProcess[bytes]:
+        self.calls.append(tuple(arguments))
+        require(bool(self.responses), "live wrapper polled beyond its bound")
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            stdout=self.responses.pop(0),
+            stderr=b"",
+        )
+
+
+def executable_fixture(directory: Path) -> Path:
+    path = directory / "swiftosctl"
+    path.write_bytes(b"#!/bin/sh\nexit 0\n")
+    path.chmod(0o700)
+    return path
+
+
+def test_live_follow_polls_cursor_and_tees_exact_console_bytes() -> None:
+    with tempfile.TemporaryDirectory() as directory_name:
+        directory = Path(directory_name)
+        executable = executable_fixture(directory)
+        output = directory / "live.log"
+        runner = FakeLiveRunner([
+            live_report(b"SWIFTOS:BOOT\r\n", next_sequence=5),
+            live_report(b"SWIFTOS:READY\r\n", next_sequence=9),
+        ])
+        terminal = io.BytesIO()
+        diagnostics = io.StringIO()
+        sleeps: list[float] = []
+        result = logs.run_live_console(
+            swiftosctl=executable,
+            device=None,
+            timeout_seconds=2.0,
+            starting_sequence=None,
+            count=32,
+            follow=True,
+            poll_interval_seconds=0.25,
+            output=output,
+            runner=runner,
+            stdout=terminal,
+            stderr=diagnostics,
+            sleeper=sleeps.append,
+            maximum_polls=2,
+        )
+        expected = b"SWIFTOS:BOOT\r\nSWIFTOS:READY\r\n"
+        require(terminal.getvalue() == expected, "terminal transcript changed")
+        require(output.read_bytes() == expected, "saved transcript is not exact")
+        require(result.byte_count == len(expected) and result.poll_count == 2,
+                "live result counts changed")
+        require("live SwiftOS console: /dev/cu.usbmodemSWIFTOS1"
+                in diagnostics.getvalue(), "automatic device was not reported")
+        require("--json" in runner.calls[0], "wrapper did not request stable JSON")
+        require("--device" not in runner.calls[0],
+                "automatic discovery was bypassed on first connection")
+        require(runner.calls[1][-2:] == ("--start", "5"),
+                "follow poll did not advance the structured-log cursor")
+        require(sleeps == [0.25], "idle polling interval changed")
+
+
+def test_live_once_validates_device_and_refuses_capture_overwrite() -> None:
+    with tempfile.TemporaryDirectory() as directory_name:
+        directory = Path(directory_name)
+        executable = executable_fixture(directory)
+        runner = FakeLiveRunner([live_report(b"READY\n", next_sequence=2)])
+        result = logs.run_live_console(
+            swiftosctl=executable,
+            device="/dev/cu.usbmodemSWIFTOS1",
+            timeout_seconds=1.0,
+            starting_sequence=1,
+            count=1,
+            follow=False,
+            poll_interval_seconds=0.5,
+            output=None,
+            runner=runner,
+            stdout=io.BytesIO(),
+            stderr=io.StringIO(),
+        )
+        require(result.poll_count == 1, "one-shot live pull repeated")
+        require("--device" in runner.calls[0], "explicit CDC path was omitted")
+        expect_error(
+            lambda: logs.run_live_console(
+                swiftosctl=executable,
+                device="/dev/tty.Bluetooth-Incoming-Port",
+                timeout_seconds=1.0,
+                starting_sequence=None,
+                count=1,
+                follow=False,
+                poll_interval_seconds=0.5,
+                output=None,
+                runner=runner,
+                stdout=io.BytesIO(),
+                stderr=io.StringIO(),
+            ),
+            "/dev/cu.usbmodem",
+        )
+
+        occupied = directory / "occupied.log"
+        occupied.write_bytes(b"prior evidence")
+        try:
+            logs.run_live_console(
+                swiftosctl=executable,
+                device=None,
+                timeout_seconds=1.0,
+                starting_sequence=None,
+                count=1,
+                follow=False,
+                poll_interval_seconds=0.5,
+                output=occupied,
+                runner=runner,
+                stdout=io.BytesIO(),
+                stderr=io.StringIO(),
+            )
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("live evidence capture was overwritten")
+        require(occupied.read_bytes() == b"prior evidence",
+                "existing live evidence was modified")
+
+
+def test_failure_markers_are_promoted_in_capture_order() -> None:
+    report = sample_card_report()
+    report["canonical_console_stream"] = {
+        "byte_count": 120,
+        "is_complete": True,
+        "text": (
+            "SWIFTOS:BOOT\r\n"
+            "SWIFTOS:PI_SIMPLE_FB_MISSING\r\n"
+            "SWIFTOS:USB_POWER_STATE\r\n"
+            "SWIFTOS:RP1_NET_DEFERRED\r\n"
+            "SWIFTOS:RP1_NET_BOARD_FAILED\r\n"
+            "SWIFTOS:RP1_NET_BOARD_FAILED\r\n"
+            "READY\r\n"
+        ),
+    }
+    require(logs.diagnostic_console_lines(report) == [
+        "SWIFTOS:PI_SIMPLE_FB_MISSING",
+        "SWIFTOS:USB_POWER_STATE",
+        "SWIFTOS:RP1_NET_DEFERRED",
+        "SWIFTOS:RP1_NET_BOARD_FAILED",
+    ], "failure marker triage order or de-duplication changed")
+    summary = logs.card_summary_lines(report)
+    require("diagnostic markers: 4" in summary,
+            "failure count was not promoted into summary")
+
+
+def test_live_report_corruption_and_device_switch_are_refused() -> None:
+    with tempfile.TemporaryDirectory() as directory_name:
+        executable = executable_fixture(Path(directory_name))
+        invalid = FakeLiveRunner([b"not-json"])
+        expect_error(
+            lambda: logs.run_live_console(
+                swiftosctl=executable,
+                device=None,
+                timeout_seconds=1.0,
+                starting_sequence=None,
+                count=1,
+                follow=False,
+                poll_interval_seconds=0.5,
+                output=None,
+                runner=invalid,
+                stdout=io.BytesIO(),
+                stderr=io.StringIO(),
+            ),
+            "invalid JSON",
+        )
+
+        switched = FakeLiveRunner([
+            live_report(b"A", next_sequence=2),
+            live_report(
+                b"B",
+                next_sequence=3,
+                device="/dev/cu.usbmodemOTHER",
+            ),
+        ])
+        expect_error(
+            lambda: logs.run_live_console(
+                swiftosctl=executable,
+                device=None,
+                timeout_seconds=1.0,
+                starting_sequence=None,
+                count=1,
+                follow=True,
+                poll_interval_seconds=0.5,
+                output=None,
+                runner=switched,
+                stdout=io.BytesIO(),
+                stderr=io.StringIO(),
+                sleeper=lambda _: None,
+                maximum_polls=2,
+            ),
+            "switched CDC devices",
+        )
+
+
+def test_live_keyboard_interrupt_has_clean_cli_exit() -> None:
+    error_output = io.StringIO()
+    with mock.patch.object(logs, "run_live_console", side_effect=KeyboardInterrupt):
+        with redirect_stderr(error_output):
+            status = logs.main(["live"])
+    require(status == 130, "Control-C did not produce the conventional exit status")
+    require("live log follow stopped" in error_output.getvalue(),
+            "Control-C did not emit a concise stop message")
+
+
+def main() -> int:
+    tests = [
+        test_fresh_card_discovery_ignores_unrelated_fixed_disk,
+        test_ambiguous_cards_and_unrelated_selection_are_refused,
+        test_geometry_and_removability_must_match_fresh_info,
+        test_card_inspection_is_read_only_geometry_bounded,
+        test_card_summary_and_evidence_files_are_stable_and_non_overwriting,
+        test_live_follow_polls_cursor_and_tees_exact_console_bytes,
+        test_live_once_validates_device_and_refuses_capture_overwrite,
+        test_failure_markers_are_promoted_in_capture_order,
+        test_live_report_corruption_and_device_switch_are_refused,
+        test_live_keyboard_interrupt_has_clean_cli_exit,
+    ]
+    for test in tests:
+        test()
+    print(f"Raspberry Pi log tool host tests: {len(tests)} groups passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
