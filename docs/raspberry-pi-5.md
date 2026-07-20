@@ -211,8 +211,15 @@ The inspector rejects partition nodes and symlinks, opens the source
 `O_RDONLY`, verifies discovered geometry when the host exposes it, and reads
 only the MBR, two signed superblocks, and bounded log arena. Its JSON preserves
 structured records and reconstructs retained canonical console bytes in
-chronological order. An empty arena means the boot never reached a successful
-SD/log recovery crossing; use UART10 or HDMI evidence for that earlier failure.
+chronological order. Every initialized volatile log starts with a structured
+`BOOT` epoch record containing its initial counter tick, processor affinity,
+DTB address, and counter frequency. The inspector reports these under
+`boot_epoch_markers` and describes an unused arena explicitly as
+`capture_summary.status = "empty"`; an empty console stream is never labelled
+complete. The epoch and console records become durable only after the SD/log
+service recovers the arena and drains the retained ring. An empty arena means
+the boot never reached that crossing; use second-stage UART10 firmware output,
+kernel UART10 output, or HDMI evidence for the earlier failure.
 If the card never received a destructive whole-card initialization, the signed
 type-`0xda` partition does not exist and there are no persistent SwiftOS logs to
 inspect, regardless of how recently its FAT boot files were updated.

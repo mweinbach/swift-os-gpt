@@ -313,7 +313,10 @@ DT-discovered BCM2712 SDHCI controller in allocator-owned stable memory,
 derives disjoint kernel-log and user-filesystem ranges from the signed `0xda`
 layout, and can publish the same SwiftFS provider seam used by QEMU. The log
 service and filesystem share one serialized SD owner; raw blocks are never
-exposed to EL0. This Pi PIO/SwiftFS path remains physical-hardware-unverified.
+exposed to EL0. Each initialized retained ring starts with a structured `BOOT`
+epoch, and the read-only media inspector distinguishes an unused arena from a
+complete console capture. This Pi PIO/SwiftFS path remains
+physical-hardware-unverified.
 Physical Raspberry Pi 5 execution remains unverified. The Pi path currently
 consumes a firmware-configured scanout; it does not yet own native HVS/HDMI
 modesetting or V3D VII rendering. It can also export that completed diagnostic
