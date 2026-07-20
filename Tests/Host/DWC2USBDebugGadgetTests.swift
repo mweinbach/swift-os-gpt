@@ -3,6 +3,8 @@ private final class USBDebugGadgetRegisterBank {
     var registerReadOffsets = [UInt]()
     var receiveWords = [UInt32]()
     var nextReceiveWord = 0
+    var receiveStatuses = [UInt32]()
+    var nextReceiveStatus = 0
     var endpointTwoTransmitWords = [UInt32]()
 
     init() {
@@ -39,11 +41,22 @@ private final class USBDebugGadgetRegisterBank {
         packetStatus: DWC2ReceivePacketStatus,
         byteCount: UInt16
     ) {
-        words[Int(DWC2RegisterLayout.receiveStatusPop / 4)]
-            = UInt32(endpoint)
+        receiveStatuses.append(
+            UInt32(endpoint)
                 | UInt32(byteCount) << 4
                 | UInt32(packetStatus.rawValue) << 17
+        )
         injectGlobal(DWC2CoreBits.receiveFIFOLevelInterrupt)
+    }
+
+    var pendingReceiveStatusCount: Int {
+        receiveStatuses.count - nextReceiveStatus
+    }
+
+    func clearReceiveFIFO() {
+        receiveStatuses.removeAll(keepingCapacity: true)
+        nextReceiveStatus = 0
+        loadReceiveData([])
     }
 
     func injectInCompletion(_ endpoint: UInt8) {
@@ -91,6 +104,15 @@ private struct USBDebugGadgetTestRegisters: DWC2RegisterAccess {
     mutating func read32(at offset: UInt) -> UInt32 {
         bank.registerReadOffsets.append(offset)
         if offset == DWC2RegisterLayout.receiveStatusPop {
+            if bank.nextReceiveStatus < bank.receiveStatuses.count {
+                let status = bank.receiveStatuses[bank.nextReceiveStatus]
+                bank.nextReceiveStatus += 1
+                if bank.nextReceiveStatus == bank.receiveStatuses.count {
+                    bank.words[Int(DWC2RegisterLayout.interruptStatus / 4)]
+                        &= ~DWC2CoreBits.receiveFIFOLevelInterrupt
+                }
+                return status
+            }
             bank.words[Int(DWC2RegisterLayout.interruptStatus / 4)]
                 &= ~DWC2CoreBits.receiveFIFOLevelInterrupt
         }
@@ -119,7 +141,7 @@ private struct USBDebugGadgetTestRegisters: DWC2RegisterAccess {
             if value & DWC2CoreBits.receiveFIFOFlush != 0 {
                 bank.words[Int(DWC2RegisterLayout.interruptStatus / 4)]
                     &= ~DWC2CoreBits.receiveFIFOLevelInterrupt
-                bank.loadReceiveData([])
+                bank.clearReceiveFIFO()
             }
             return
         }
@@ -229,6 +251,11 @@ struct DWC2USBDebugGadgetTests {
                     "high-speed enumeration not handled"
                 )
 
+                boundReceiveFIFOServiceWork(bank: bank, gadget: &gadget)
+                acceptLatestSetupFromReceiveBacklog(
+                    bank: bank,
+                    gadget: &gadget
+                )
                 requestFullConfigurationDescriptor(
                     bank: bank,
                     gadget: &gadget
@@ -910,6 +937,107 @@ struct DWC2USBDebugGadgetTests {
             gadget: &gadget
         )
         completeEndpointZero(bank: bank, gadget: &gadget)
+    }
+
+    private static func boundReceiveFIFOServiceWork(
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        for _ in 0..<9 {
+            bank.injectReceiveStatus(
+                endpoint: 0,
+                packetStatus: .globalOutNAK,
+                byteCount: 0
+            )
+        }
+        expect(
+            gadget.service() == .none,
+            "bounded receive FIFO batch faulted gadget"
+        )
+        expect(
+            bank.pendingReceiveStatusCount == 1,
+            "receive service pass did not stop after eight FIFO entries"
+        )
+        expect(
+            bank.words[Int(DWC2RegisterLayout.interruptStatus / 4)]
+                & DWC2CoreBits.receiveFIFOLevelInterrupt != 0,
+            "receive FIFO level dropped while one queued entry remained"
+        )
+        expect(
+            gadget.service() == .none,
+            "remaining receive FIFO entry faulted gadget"
+        )
+        expect(
+            bank.pendingReceiveStatusCount == 0,
+            "remaining receive FIFO entry was not drained on the next pass"
+        )
+    }
+
+    private static func acceptLatestSetupFromReceiveBacklog(
+        bank: USBDebugGadgetRegisterBank,
+        gadget: inout DWC2USBDebugGadget<USBDebugGadgetTestRegisters>
+    ) {
+        let inputTransferSize = Int(
+            DWC2RegisterLayout.inEndpointTransferSize(0)! / 4
+        )
+        let supersededSetup = [
+            UInt8(0x80),
+            USBStandardRequest.getDescriptor,
+            0,
+            USBDescriptorType.device,
+            0,
+            0,
+            18,
+            0,
+        ]
+        let latestSetup = [
+            UInt8(0x80),
+            USBStandardRequest.getDescriptor,
+            0,
+            USBDescriptorType.device,
+            0,
+            0,
+            8,
+            0,
+        ]
+        bank.loadReceiveData(supersededSetup + latestSetup)
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .setupDataReceived,
+            byteCount: UInt16(USBSetupPacket.byteCount)
+        )
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .outTransferComplete,
+            byteCount: 0
+        )
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .setupDataReceived,
+            byteCount: UInt16(USBSetupPacket.byteCount)
+        )
+        bank.injectReceiveStatus(
+            endpoint: 0,
+            packetStatus: .setupTransactionComplete,
+            byteCount: 0
+        )
+
+        expect(
+            gadget.service() == .none,
+            "newer SETUP in receive backlog faulted gadget"
+        )
+        expect(
+            bank.pendingReceiveStatusCount == 0,
+            "SETUP receive backlog was not drained in one service pass"
+        )
+        expect(
+            bank.words[inputTransferSize]
+                == DWC2TransferSize.endpoint0In(byteCount: 8),
+            "superseded SETUP was executed instead of the newest request"
+        )
+
+        completeEndpointZero(bank: bank, gadget: &gadget)
+        completeEndpointZeroOutStatus(bank: bank, gadget: &gadget)
     }
 
     private static func requestFullConfigurationDescriptor(

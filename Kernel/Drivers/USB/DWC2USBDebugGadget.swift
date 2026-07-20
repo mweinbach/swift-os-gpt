@@ -488,37 +488,44 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         }
 
         if snapshot.hasReceiveFIFOEntry {
-            serviceFaultReason = .receiveProtocol
-            let receive = receiveBuffer
-            let receiveResult = controller.pollReceive(into: receive)
-            switch receiveResult {
-            case .noPacket:
-                break
-            case .malformedStatus(let rawValue, _):
-                serviceFaultReason = .malformedReceiveStatus
-                serviceReceiveStatus = rawValue
-                return fail()
-            case .packet(let status, let copiedByteCount, let wasTruncated):
-                serviceReceiveStatus = encodedReceiveStatus(status)
-                switch status.endpoint {
-                case 0:
-                    serviceFaultReason = .endpointZero
-                case 2, 3:
-                    serviceFaultReason = .endpointTwoProtocol
-                default:
-                    serviceFaultReason = .receiveProtocol
-                }
-                if wasTruncated {
-                    guard status.packetStatus == .outDataReceived,
-                          status.endpoint == 2 || status.endpoint == 3
-                    else { return fail() }
-                }
-                if let receiveEvent = handleReceivePacket(
-                    status: status,
-                    copiedByteCount: copiedByteCount
-                ), receiveEvent != .none {
-                    if receiveEvent == .faulted { return .faulted }
-                    event = receiveEvent
+            // RXFLVL is a FIFO-not-empty indication. Drain a bounded batch so
+            // host retries cannot strand SETUP state across long cooperative
+            // monitor work, while preserving a deterministic service budget.
+            var remainingReceiveEntryBudget = 8
+            receiveLoop: while remainingReceiveEntryBudget > 0 {
+                serviceFaultReason = .receiveProtocol
+                let receive = receiveBuffer
+                let receiveResult = controller.pollReceive(into: receive)
+                switch receiveResult {
+                case .noPacket:
+                    break receiveLoop
+                case .malformedStatus(let rawValue, _):
+                    serviceFaultReason = .malformedReceiveStatus
+                    serviceReceiveStatus = rawValue
+                    return fail()
+                case .packet(let status, let copiedByteCount, let wasTruncated):
+                    remainingReceiveEntryBudget -= 1
+                    serviceReceiveStatus = encodedReceiveStatus(status)
+                    switch status.endpoint {
+                    case 0:
+                        serviceFaultReason = .endpointZero
+                    case 2, 3:
+                        serviceFaultReason = .endpointTwoProtocol
+                    default:
+                        serviceFaultReason = .receiveProtocol
+                    }
+                    if wasTruncated {
+                        guard status.packetStatus == .outDataReceived,
+                              status.endpoint == 2 || status.endpoint == 3
+                        else { return fail() }
+                    }
+                    if let receiveEvent = handleReceivePacket(
+                        status: status,
+                        copiedByteCount: copiedByteCount
+                    ), receiveEvent != .none {
+                        if receiveEvent == .faulted { return .faulted }
+                        event = receiveEvent
+                    }
                 }
             }
         }
@@ -753,11 +760,11 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
     ) -> USBDebugGadgetEvent? {
         switch status.packetStatus {
         case .setupDataReceived:
-            guard copiedByteCount == USBSetupPacket.byteCount,
-                  endpointZeroReceiveStage != .setup
-            else {
+            guard copiedByteCount == USBSetupPacket.byteCount else {
                 return fail()
             }
+            // USB control transfers are preempted by a newer SETUP packet.
+            // Discard every staged action and retain only the newest request.
             resetEndpointZeroTransaction()
             guard stageEndpointZeroReceiveBytes(copiedByteCount) else {
                 return fail()
