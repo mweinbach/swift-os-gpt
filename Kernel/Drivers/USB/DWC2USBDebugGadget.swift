@@ -214,6 +214,14 @@ struct DWC2USBDebugGadget<Registers: DWC2RegisterAccess> {
         updateStagingRegion: USBKernelUpdateRAMStagingRegion? = nil,
         maximumInitializationPollCount: Int = 100_000
     ) -> DWC2USBDebugGadgetInitializationOutcome<Registers> {
+        guard maximumInitializationPollCount > 0 else {
+            return .failed(
+                DWC2USBDebugGadgetInitializationFailure(
+                    reason: .controller(.invalidPollLimit),
+                    hardwareSnapshot: nil
+                )
+            )
+        }
         guard scratchBaseAddress <= UInt64(UInt.max),
               scratchByteCount >= UInt64(
                   DWC2USBDebugScratchLayout.requiredByteCount

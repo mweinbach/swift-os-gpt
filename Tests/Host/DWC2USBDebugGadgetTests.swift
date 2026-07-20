@@ -1,5 +1,6 @@
 private final class USBDebugGadgetRegisterBank {
     var words = [UInt32](repeating: 0, count: 0x5_000 / 4)
+    var registerReadOffsets = [UInt]()
     var receiveWords = [UInt32]()
     var nextReceiveWord = 0
     var endpointTwoTransmitWords = [UInt32]()
@@ -57,6 +58,10 @@ private final class USBDebugGadgetRegisterBank {
         endpointTwoTransmitWords.removeAll(keepingCapacity: true)
     }
 
+    func clearRegisterReadTrace() {
+        registerReadOffsets.removeAll(keepingCapacity: true)
+    }
+
     var endpointTwoTransmitBytes: [UInt8] {
         var bytes: [UInt8] = []
         bytes.reserveCapacity(endpointTwoTransmitWords.count * 4)
@@ -84,6 +89,7 @@ private struct USBDebugGadgetTestRegisters: DWC2RegisterAccess {
     let bank: USBDebugGadgetRegisterBank
 
     mutating func read32(at offset: UInt) -> UInt32 {
+        bank.registerReadOffsets.append(offset)
         if offset == DWC2RegisterLayout.receiveStatusPop {
             bank.words[Int(DWC2RegisterLayout.interruptStatus / 4)]
                 &= ~DWC2CoreBits.receiveFIFOLevelInterrupt
@@ -416,6 +422,35 @@ struct DWC2USBDebugGadgetTests {
                     "hardware configuration snapshot changed"
                 )
 
+                bank.clearRegisterReadTrace()
+                let invalidPollLimit = DWC2USBDebugGadget<
+                    USBDebugGadgetTestRegisters
+                >.bringUp(
+                    registers: USBDebugGadgetTestRegisters(bank: bank),
+                    scratchBaseAddress: UInt64(UInt(bitPattern: scratchBase)),
+                    scratchByteCount: UInt64(scratchBytes.count),
+                    scanout: scanout,
+                    viewportScale: 1,
+                    kernelDescription: makeKernelDescription(),
+                    maximumInitializationPollCount: 0
+                )
+                guard case .failed(let pollFailure) = invalidPollLimit else {
+                    fail("zero DWC2 poll limit activated")
+                }
+                expect(
+                    pollFailure.reason == .controller(.invalidPollLimit),
+                    "zero poll limit was misclassified"
+                )
+                expect(
+                    pollFailure.hardwareSnapshot == nil,
+                    "zero poll limit captured a hardware snapshot"
+                )
+                expect(
+                    bank.registerReadOffsets.isEmpty,
+                    "zero poll limit touched DWC2 MMIO"
+                )
+
+                bank.clearRegisterReadTrace()
                 let invalid = DWC2USBDebugGadget<
                     USBDebugGadgetTestRegisters
                 >.bringUp(
@@ -436,6 +471,10 @@ struct DWC2USBDebugGadgetTests {
                 )
                 expect(
                     invalidFailure.hardwareSnapshot == nil,
+                    "software rejection captured a hardware snapshot"
+                )
+                expect(
+                    bank.registerReadOffsets.isEmpty,
                     "software rejection touched DWC2 MMIO"
                 )
             }
