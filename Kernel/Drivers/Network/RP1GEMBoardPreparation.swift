@@ -151,6 +151,8 @@ enum RP1GEMClockEnableMethod: UInt8, Equatable {
 
 enum RP1GEMClockEnableResult: UInt8, Equatable {
     case ready = 1
+    /// Retained so returned-card traces from older kernels remain decodable.
+    /// Current kernels treat alias divergence as telemetry and use normal RMW.
     case aliasMismatch = 2
     case boundedFailure = 3
 }
@@ -414,36 +416,47 @@ struct RP1GEMBoardPreparation<Access: RP1GEMBoardRegisterDelayAccess>:
             ))
             return true
         }
-        // clocks_main publishes an atomic SET aperture. Use it first so the
-        // posted PCIe transaction carries only the ENABLE bit. Some physical
-        // Pi 5 executions return zero from the alias even though RP1 documents
-        // normal read semantics, so never use the alias value as a validity
-        // gate: poll the normal CTRL register and retain the alias only as
-        // evidence.
-        access.write32(
-            RP1GEMBoardRegisterLayout.clockEnable,
-            at: setAddress
-        )
-        access.synchronizePostedWrites()
-        let atomicDrain = access.read32(at: setAddress)
-        let atomic = pollClockEnable(
-            at: address,
-            maximumPollCount: maximumPollCount
-        )
-        if atomic.isEnabled {
-            clockDiagnostics.record(RP1GEMClockEnableDiagnostic(
-                stage: stage,
-                method: .atomicSet,
-                result: .ready,
-                initialControl: initial,
-                initialSetAlias: initialAlias,
-                atomicDrain: atomicDrain,
-                finalControl: atomic.observed,
-                pollCount: atomic.pollCount,
-                elapsedTicks: atomic.elapsedTicks,
-                system: systemSnapshot
-            ))
-            return true
+        // clocks_main publishes an atomic SET aperture. Use it only when its
+        // initial read agrees with the normal CTRL register. Physical Pi 5
+        // executions have returned zero from this alias while CTRL remained
+        // readable, so divergence makes the aperture unsuitable for writes,
+        // not a terminal error. Retain both values as evidence and proceed to
+        // the normal-register RMW used by the published RP1 clock driver.
+        let atomicDrain: UInt32
+        let atomic: RP1GEMClockPollObservation
+        if initialAlias == initial {
+            access.write32(
+                RP1GEMBoardRegisterLayout.clockEnable,
+                at: setAddress
+            )
+            access.synchronizePostedWrites()
+            atomicDrain = access.read32(at: setAddress)
+            atomic = pollClockEnable(
+                at: address,
+                maximumPollCount: maximumPollCount
+            )
+            if atomic.isEnabled {
+                clockDiagnostics.record(RP1GEMClockEnableDiagnostic(
+                    stage: stage,
+                    method: .atomicSet,
+                    result: .ready,
+                    initialControl: initial,
+                    initialSetAlias: initialAlias,
+                    atomicDrain: atomicDrain,
+                    finalControl: atomic.observed,
+                    pollCount: atomic.pollCount,
+                    elapsedTicks: atomic.elapsedTicks,
+                    system: systemSnapshot
+                ))
+                return true
+            }
+        } else {
+            atomicDrain = initialAlias
+            atomic = RP1GEMClockPollObservation(
+                observed: initial,
+                pollCount: 0,
+                elapsedTicks: 0
+            )
         }
 
         // Match the published RP1 clock driver's normal-register RMW as one

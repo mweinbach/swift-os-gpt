@@ -451,12 +451,57 @@ struct RP1GEMBoardPreparationTests {
             let access = TestBoardAccess()
             let system = UInt(TestAddress.clocks + 0x014)
             let systemSet = system + 0x2_000
+            access.registers[system] = 0x802
+            access.forcedReadValues[systemSet] = 0
+            var preparation = RP1GEMBoardPreparation(
+                resources: makeResources(resetLine: nil),
+                access: access
+            )
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 8) == .ready,
+                "enabled normal CTRL was rejected when SET alias read zero"
+            )
+            let writes = writeEvents(in: access.events)
+            expect(
+                !writes.contains(.write(systemSet, 0x800))
+                    && !writes.contains(.write(system, 0x802)),
+                "already-enabled clock wrote through a divergent SET alias"
+            )
+            expect(
+                preparation.clockDiagnostics.system
+                    == RP1GEMClockEnableDiagnostic(
+                        stage: .systemClockEnable,
+                        method: .alreadyEnabled,
+                        result: .ready,
+                        initialControl: 0x802,
+                        initialSetAlias: 0,
+                        atomicDrain: 0,
+                        finalControl: 0x802,
+                        pollCount: 0,
+                        elapsedTicks: 0,
+                        system: RP1GEMSystemClockSnapshot(
+                            control: 0x802,
+                            dividerInteger: 0,
+                            selection: 0,
+                            pllControlStatus: 0,
+                            pllPower: 0,
+                            pllPrimary: 0,
+                            pllSecondary: 0
+                        )
+                    ),
+                "already-enabled divergent-alias telemetry is incorrect"
+            )
+        }
+
+        do {
+            let access = TestBoardAccess()
+            let system = UInt(TestAddress.clocks + 0x014)
+            let systemSet = system + 0x2_000
             access.registers[system] = 2
             // Returned Pi 5 media proved that the normal CTRL register can
             // read 0x2 while the SET alias reads zero. The alias observation
             // must not prevent the documented normal-register fallback.
             access.forcedReadValues[systemSet] = 0
-            access.ignoredWriteAddresses.insert(systemSet)
             var preparation = RP1GEMBoardPreparation(
                 resources: makeResources(resetLine: nil),
                 access: access
@@ -468,8 +513,10 @@ struct RP1GEMBoardPreparationTests {
             expect(
                 writeEvents(in: access.events).contains(
                     .write(system, 0x802)
+                ) && !writeEvents(in: access.events).contains(
+                    .write(systemSet, 0x800)
                 ),
-                "normal RMW fallback did not preserve the initial CTRL"
+                "divergent alias was written or normal RMW lost CTRL fields"
             )
             expect(
                 preparation.clockDiagnostics.system
@@ -481,8 +528,8 @@ struct RP1GEMBoardPreparationTests {
                         initialSetAlias: 0,
                         atomicDrain: 0,
                         finalControl: 0x802,
-                        pollCount: 3,
-                        elapsedTicks: 1,
+                        pollCount: 1,
+                        elapsedTicks: 0,
                         system: RP1GEMSystemClockSnapshot(
                             control: 2,
                             dividerInteger: 0,
@@ -558,6 +605,54 @@ struct RP1GEMBoardPreparationTests {
                 count(.spin, in: access.events) == 2
                     && count(.counterValue, in: access.events) == 0,
                 "clock failure exceeded its counter-independent read cap"
+            )
+        }
+
+        do {
+            let access = TestBoardAccess()
+            let system = UInt(TestAddress.clocks + 0x014)
+            let systemSet = system + 0x2_000
+            access.registers[system] = 2
+            access.forcedReadValues[systemSet] = 0
+            access.ignoredWriteAddresses.insert(system)
+            access.frequency = 0
+            var preparation = RP1GEMBoardPreparation(
+                resources: makeResources(resetLine: nil),
+                access: access
+            )
+            expect(
+                preparation.prepareRP1Ethernet(maximumPollCount: 2) == .failed,
+                "ignored normal write did not fail closed after alias skip"
+            )
+            expect(
+                preparation.clockDiagnostics.system
+                    == RP1GEMClockEnableDiagnostic(
+                        stage: .systemClockEnable,
+                        method: .normalReadModifyWrite,
+                        result: .boundedFailure,
+                        initialControl: 2,
+                        initialSetAlias: 0,
+                        atomicDrain: 0,
+                        finalControl: 2,
+                        pollCount: 2,
+                        elapsedTicks: 0,
+                        system: RP1GEMSystemClockSnapshot(
+                            control: 2,
+                            dividerInteger: 0,
+                            selection: 0,
+                            pllControlStatus: 0,
+                            pllPower: 0,
+                            pllPrimary: 0,
+                            pllSecondary: 0
+                        )
+                    ),
+                "divergent-alias bounded failure telemetry is incorrect"
+            )
+            expect(
+                !writeEvents(in: access.events).contains(
+                    .write(systemSet, 0x800)
+                ) && count(.spin, in: access.events) == 1,
+                "alias-skip failure wrote the alias or exceeded its read cap"
             )
         }
     }
