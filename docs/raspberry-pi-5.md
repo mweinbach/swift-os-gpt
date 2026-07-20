@@ -420,8 +420,9 @@ DisplayPort signal. After final mappings are installed, SwiftOS:
 
 1. uses the discovered `brcm,bcm2835-mbox` aperture and property channel 8 to
    request legacy firmware USB device ID 3 with a bounded wait; a well-formed
-   `device unavailable` response transfers the decision to the DT-discovered
-   DWC2 driver, while malformed or mismatched state still fails closed;
+   `device unavailable` or observed exists-but-off response transfers the
+   decision to the independently DT-discovered DWC2 driver, while malformed,
+   cache-maintenance, and mailbox-transport failures still fail closed;
 2. validates the DWC2 identity, device-mode endpoint/FIFO capabilities, UTMI
    PHY width, and dynamic FIFO plan before attaching to the host;
 3. initializes the core in polled PIO device mode and enumerates one composite
@@ -454,8 +455,8 @@ scale, PPI, and refresh metadata. Unknown Pi simplefb PPI and refresh remain
 unknown rather than being invented. AppKit, Foundation, Dispatch, and Darwin
 remain confined to `tools/USBDisplay`; none link into the boot artifact.
 
-Expected UART markers are `SWIFTOS:USB_POWER_READY` or
-`SWIFTOS:USB_POWER_UNMANAGED`, followed by
+Expected UART markers are `SWIFTOS:USB_POWER_READY`,
+`SWIFTOS:USB_POWER_UNMANAGED`, or `SWIFTOS:USB_POWER_UNMANAGED_OFF`, followed by
 `SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, and
 `SWIFTOS:USB_DEBUG_FRAME`. Failures before SD log recovery remain visible only
 on UART10; later pre-USB failures can also be recovered from the returned card.
@@ -469,8 +470,12 @@ timeouts without treating any failed path as hardware support.
 The host-test suite covers descriptors, control transactions,
 reset/reconnect, DTR restart, frame chunking, CRC, damage assembly, and viewer
 bounds, but no physical Pi has passed the complete enumeration sequence yet.
-The 2026-07-20 artifact stopped at its former generic `USB_POWER_STATE` marker;
-the corrected unmanaged handoff still requires a new physical trace.
+The first 2026-07-20 artifact stopped at its former generic `USB_POWER_STATE`
+marker. The next artifact classified the firmware's validated response as
+`USB_POWER_STATE_MISMATCH`, proving that legacy HCD device 3 was reported as
+existing but off. The Pi 5 policy now retains that distinction as
+`USB_POWER_UNMANAGED_OFF` and continues to DWC2's typed identity/capability
+probe; that handoff still requires a new physical trace.
 
 ## Interrupt controller and timer
 
@@ -668,8 +673,9 @@ separate EEPROM bootloader build, image/DTB hashes, and test build revision.
 - HDMI capture shows the diagnostic Swift-rendered desktop at the firmware-
   selected mode; the captured mode, reported refresh, display EDID, viewport
   scale, and visible letterbox bounds are retained with the boot evidence.
-- With and without HDMI attached, the log reaches `SWIFTOS:USB_POWER_READY` or
-  the valid Pi 5 fallback `SWIFTOS:USB_POWER_UNMANAGED`,
+- With and without HDMI attached, the log reaches `SWIFTOS:USB_POWER_READY`,
+  `SWIFTOS:USB_POWER_UNMANAGED`, or the observed Pi 5 fallback
+  `SWIFTOS:USB_POWER_UNMANAGED_OFF`,
   `SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, and
   `SWIFTOS:USB_DEBUG_FRAME`; macOS reports VID `0x1209`, PID `0x5a17`, and a
   `/dev/cu.usbmodem*` node, while the viewer validates hello, mode, full-frame,

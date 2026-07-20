@@ -75,8 +75,9 @@ changing the viewer.
    enumeration, while the first displayed frame also proves CDC data, wire
    framing, semantic negotiation, and framebuffer export.
 
-The expected UART sequence is `SWIFTOS:USB_POWER_READY`,
-`SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, then
+The expected UART sequence starts with `SWIFTOS:USB_POWER_READY`,
+`SWIFTOS:USB_POWER_UNMANAGED`, or `SWIFTOS:USB_POWER_UNMANAGED_OFF`, followed
+by `SWIFTOS:USB_DEBUG_ATTACHED`, `SWIFTOS:USB_DEBUG_CONFIGURED`, then
 `SWIFTOS:USB_DEBUG_FRAME`. Configuration follows host enumeration; the frame
 marker requires the macOS viewer to open the tty and assert DTR.
 `SWIFTOS:GRAPHICS_DIAGNOSTIC` identifies the current Pi renderer honestly; it is

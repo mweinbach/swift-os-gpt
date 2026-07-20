@@ -13,10 +13,13 @@ enum RaspberryPi5USBPowerPolicy {
         switch result {
         case .completed:
             return .managed
-        case .deviceUnavailable:
+        case .deviceUnavailable, .stateMismatch:
+            // Device ID 3 describes the legacy USB HCD power domain, not the
+            // DT-selected BCM2712 DWC2 instance. Pi 5 firmware may return a
+            // fully validated exists-but-off state even though DWC2 MMIO is
+            // independently described and available for capability probing.
             return .unmanaged
-        case .stateMismatch,
-             .invalidPollLimit,
+        case .invalidPollLimit,
              .cacheCleanFailed,
              .writeTimedOut,
              .responseTimedOut,

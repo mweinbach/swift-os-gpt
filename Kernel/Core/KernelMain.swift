@@ -1093,9 +1093,11 @@ private func activateKernelUpdateStaging(
 }
 
 /// Transfers the linker-owned scratch prefix to firmware for the optional
-/// legacy USB power-domain request. A well-formed absent domain leaves power
-/// ownership with the DT-described DWC2 driver. Any other failure disables only
-/// the USB debug path; HDMI, serial, scheduling, and QEMU continue independently.
+/// legacy USB power-domain request. A well-formed absent or exists-but-off
+/// legacy HCD response leaves the capability decision with the independently
+/// DT-described DWC2 driver. Mailbox transport, cache, and response-validation
+/// failures disable only the USB debug path; HDMI, serial, scheduling, and QEMU
+/// continue independently.
 private func powerOnRaspberryPiUSB(
     console: EarlyConsole,
     platform: Platform,
@@ -1138,11 +1140,15 @@ private func powerOnRaspberryPiUSB(
         return true
     case .unmanaged:
         // SET_POWER_STATE device 3 is the legacy USB HCD power domain. Pi 5
-        // may expose its DT-described DWC2 device controller without exposing
-        // that legacy firmware identifier. A well-formed "does not exist"
-        // response therefore transfers the capability decision to the DWC2
-        // driver; malformed responses and real state mismatches still fail.
-        console.write("SWIFTOS:USB_POWER_UNMANAGED\n")
+        // may expose its independently DT-described DWC2 device controller
+        // while reporting that legacy domain as absent or still off. Preserve
+        // that distinction in the log, then transfer the capability decision
+        // to the DWC2 driver's read-only identity/configuration snapshot.
+        if result == .stateMismatch {
+            console.write("SWIFTOS:USB_POWER_UNMANAGED_OFF\n")
+        } else {
+            console.write("SWIFTOS:USB_POWER_UNMANAGED\n")
+        }
         return true
     case .reject:
         break

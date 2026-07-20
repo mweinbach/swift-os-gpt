@@ -313,8 +313,12 @@ struct FirmwarePropertyMailboxTests {
                 == .unmanaged,
             "missing legacy HCD power domain did not transfer to DWC2"
         )
+        expect(
+            RaspberryPi5USBPowerPolicy.disposition(for: .stateMismatch)
+                == .unmanaged,
+            "powered-off legacy HCD response did not transfer to Pi 5 DWC2"
+        )
         let rejected: [FirmwareMailboxPowerStateResult] = [
-            .stateMismatch,
             .invalidPollLimit,
             .cacheCleanFailed,
             .writeTimedOut,

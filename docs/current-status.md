@@ -344,13 +344,18 @@ The Pi image also contains a board-neutral, bounded DWC2 device-mode stack. It
 requests the legacy USB power device through the discovered firmware property
 mailbox, enumerates a CDC ACM plus vendor-debug composite device, and carries a
 versioned full-frame/damage stream to the macOS viewer over USB-C. A well-formed
-Pi 5 response saying that legacy power device is unavailable now emits
-`USB_POWER_UNMANAGED` and transfers the decision to DWC2; malformed or
-mismatched responses still fail closed. The same completed simplefb surface is
+Pi 5 response saying that legacy power device is unavailable emits
+`USB_POWER_UNMANAGED`; the observed exists-but-off response emits
+`USB_POWER_UNMANAGED_OFF`. Both transfer the hardware decision to DWC2's typed
+identity/capability probe, while malformed, cache, and transport responses still
+fail closed. The same completed simplefb surface is
 mirrored when HDMI exists; otherwise the kernel owns an 800 x 600 headless
 diagnostic surface and remains in the monitor loop so the polled controller
-progresses. The previous physical artifact stopped at the old power-state
-classification, so the corrected handoff and USB enumeration require a new
+progresses. The latest returned-card trace reached the validated
+`USB_POWER_STATE_MISMATCH` classification: Pi 5 firmware reported legacy HCD
+device 3 as existing but off. The board policy now records that as
+`USB_POWER_UNMANAGED_OFF` and continues to the DWC2 probe; its identity,
+capabilities, initialization, and USB enumeration still require a new physical
 boot.
 
 The Pi image also binds the boot-DT's removable `brcm,bcm2712-sdhci` controller
