@@ -433,6 +433,174 @@ def _sequence_summary(report: Mapping[str, object]) -> str:
     return f"{first}...{last}; {count} records; {gaps} gaps; {resets} resets"
 
 
+def _report_integer(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _latest_kernel_epoch(
+    report: Mapping[str, object],
+) -> tuple[int, int, int, int, Mapping[str, object]] | None:
+    metadata = report.get("sequence_metadata")
+    kernel = metadata.get("kernel_log") if isinstance(metadata, dict) else None
+    epochs = kernel.get("epochs") if isinstance(kernel, dict) else None
+    if not isinstance(epochs, list) or not epochs:
+        return None
+    epoch = epochs[-1]
+    if not isinstance(epoch, dict):
+        return None
+    index = _report_integer(epoch.get("index"))
+    first = _report_integer(epoch.get("first_persistent_sequence"))
+    last = _report_integer(epoch.get("last_persistent_sequence"))
+    count = _report_integer(kernel.get("epoch_count"))
+    if (
+        index is None
+        or first is None
+        or last is None
+        or count is None
+        or index < 0
+        or count <= index
+        or first <= 0
+        or last < first
+    ):
+        return None
+    return index, count, first, last, epoch
+
+
+def _persistent_gap_in_range(
+    report: Mapping[str, object],
+    first: int,
+    last: int,
+) -> bool:
+    metadata = report.get("sequence_metadata")
+    persistent_record = (
+        metadata.get("persistent_record") if isinstance(metadata, dict) else None
+    )
+    gaps = (
+        persistent_record.get("gaps")
+        if isinstance(persistent_record, dict) else None
+    )
+    if not isinstance(gaps, list):
+        return False
+    for gap in gaps:
+        if not isinstance(gap, dict):
+            continue
+        previous = _report_integer(gap.get("previous_persistent_sequence"))
+        following = _report_integer(gap.get("next_persistent_sequence"))
+        if (
+            previous is not None
+            and following is not None
+            and first <= previous < following <= last
+        ):
+            return True
+    return False
+
+
+def latest_kernel_epoch_console(
+    report: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Reconstruct and assess only the newest retained kernel epoch."""
+
+    scope = _latest_kernel_epoch(report)
+    records = report.get("persistent_records")
+    if scope is None or not isinstance(records, list):
+        return None
+    index, count, first, last, epoch = scope
+    selected: list[tuple[int, Mapping[str, object]]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        sequence = _report_integer(record.get("sequence"))
+        chunk = record.get("console_chunk")
+        if (
+            sequence is not None
+            and first <= sequence <= last
+            and isinstance(chunk, dict)
+        ):
+            selected.append((sequence, chunk))
+    selected.sort(key=lambda item: item[0])
+
+    encoded = bytearray()
+    malformed_chunk_count = 0
+    boundary_issue_count = 0
+    message_open = False
+    active_source: int | None = None
+    for _, chunk in selected:
+        encoded_hex = chunk.get("bytes_hex")
+        try:
+            chunk_bytes = (
+                bytes.fromhex(encoded_hex) if isinstance(encoded_hex, str) else b""
+            )
+        except ValueError:
+            chunk_bytes = b""
+        expected_bytes = _report_integer(chunk.get("byte_count"))
+        if (
+            expected_bytes is None
+            or expected_bytes <= 0
+            or len(chunk_bytes) != expected_bytes
+        ):
+            malformed_chunk_count += 1
+            continue
+        encoded.extend(chunk_bytes)
+
+        is_first = chunk.get("is_first") is True
+        is_last = chunk.get("is_last") is True
+        source = _report_integer(chunk.get("source"))
+        if is_first:
+            if message_open:
+                boundary_issue_count += 1
+            message_open = True
+            active_source = source
+        elif not message_open:
+            boundary_issue_count += 1
+            message_open = True
+            active_source = source
+        elif source != active_source:
+            boundary_issue_count += 1
+            active_source = source
+        if is_last:
+            message_open = False
+            active_source = None
+    if message_open:
+        boundary_issue_count += 1
+
+    try:
+        text = bytes(encoded).decode("utf-8")
+        utf8_valid = True
+    except UnicodeDecodeError:
+        text = bytes(encoded).decode("utf-8", errors="replace")
+        utf8_valid = False
+
+    reasons: list[str] = []
+    if not encoded:
+        reasons.append("no console bytes")
+    missing_prefix = _report_integer(epoch.get("missing_prefix_count"))
+    if missing_prefix is None or missing_prefix != 0:
+        reasons.append("kernel prefix loss")
+    missing_between = _report_integer(epoch.get("missing_between_count"))
+    if missing_between is None or missing_between != 0:
+        reasons.append("kernel sequence gaps")
+    if _persistent_gap_in_range(report, first, last):
+        reasons.append("persistent sequence gaps")
+    if boundary_issue_count:
+        reasons.append("message boundary issues")
+    if malformed_chunk_count:
+        reasons.append("malformed console chunks")
+    if not utf8_valid:
+        reasons.append("invalid UTF-8")
+    return {
+        "epoch_index": index,
+        "epoch_count": count,
+        "first_persistent_sequence": first,
+        "last_persistent_sequence": last,
+        "byte_count": len(encoded),
+        "text": text,
+        "is_complete": not reasons,
+        "incomplete_reasons": reasons,
+    }
+
+
 def card_summary_lines(report: Mapping[str, object]) -> list[str]:
     source = report.get("source")
     source_path = source.get("path") if isinstance(source, dict) else "unknown"
@@ -443,32 +611,81 @@ def card_summary_lines(report: Mapping[str, object]) -> list[str]:
     complete = console.get("is_complete") if isinstance(console, dict) else False
     boot = report.get("boot_epoch_markers")
     boot_count = boot.get("count", 0) if isinstance(boot, dict) else 0
+    crosses_epochs = (
+        console.get("crosses_kernel_epochs") is True
+        if isinstance(console, dict) else False
+    )
+    latest = latest_kernel_epoch_console(report)
+    if crosses_epochs:
+        epoch_count = (
+            latest.get("epoch_count") if isinstance(latest, dict) else boot_count
+        )
+        console_line = (
+            f"console: {console_bytes} bytes; aggregate complete "
+            f"{'yes' if complete else 'no'} (crosses {epoch_count} kernel epochs)"
+        )
+    else:
+        console_line = (
+            f"console: {console_bytes} bytes; complete {'yes' if complete else 'no'}"
+        )
     lines = [
         f"source: {source_path} (read-only)",
         f"data superblocks: {report.get('data_superblock_status', 'unknown')}",
         f"capture: {status}; boot epochs {boot_count}",
         f"sequences: {_sequence_summary(report)}",
-        f"console: {console_bytes} bytes; complete {'yes' if complete else 'no'}",
+        console_line,
     ]
+    diagnostic_label = "diagnostic markers"
+    if isinstance(latest, dict):
+        index = int(latest["epoch_index"]) + 1
+        count = int(latest["epoch_count"])
+        first = latest["first_persistent_sequence"]
+        last = latest["last_persistent_sequence"]
+        latest_complete = latest["is_complete"] is True
+        completeness = "yes" if latest_complete else "no"
+        if not latest_complete:
+            reasons = latest.get("incomplete_reasons")
+            if isinstance(reasons, list) and reasons:
+                completeness += f" ({', '.join(str(reason) for reason in reasons)})"
+        lines.append(
+            f"newest kernel epoch: {index}/{count}; persistent {first}...{last}; "
+            f"{latest['byte_count']} console bytes; complete {completeness}"
+        )
+        diagnostic_label += f" (newest kernel epoch {index}/{count})"
     diagnostics = diagnostic_console_lines(report)
     if diagnostics:
-        lines.append(f"diagnostic markers: {len(diagnostics)}")
+        lines.append(f"{diagnostic_label}: {len(diagnostics)}")
         lines.extend(f"  {marker}" for marker in diagnostics)
     else:
-        lines.append("diagnostic markers: none")
+        lines.append(f"{diagnostic_label}: none")
     return lines
 
 
 def diagnostic_console_lines(report: Mapping[str, object]) -> list[str]:
-    """Return unique failure-oriented markers in retained console order."""
+    """Return newest-epoch failures with adjacent RP1 board context."""
 
     result: list[str] = []
     seen: set[str] = set()
-    for raw_line in canonical_console_text(report).splitlines():
+    latest = latest_kernel_epoch_console(report)
+    console_text = (
+        str(latest["text"])
+        if isinstance(latest, dict) else canonical_console_text(report)
+    )
+    board_context_names = (
+        "RP1_NET_BOARD_STAGE",
+        "RP1_NET_BOARD_REGISTER",
+        "RP1_NET_BOARD_EXPECTED",
+        "RP1_NET_BOARD_OBSERVED",
+    )
+    board_context: dict[str, str] = {}
+    for raw_line in console_text.splitlines():
         line = raw_line.strip()
         if not line.startswith("SWIFTOS:"):
             continue
         marker = line.removeprefix("SWIFTOS:").split("=", 1)[0]
+        if marker in board_context_names:
+            board_context[marker] = line
+            continue
         suspicious = (
             any(
                 token in marker
@@ -479,11 +696,22 @@ def diagnostic_console_lines(report: Mapping[str, object]) -> list[str]:
                     "MISSING",
                     "UNSUPPORTED",
                     "DEFERRED",
+                    "MISMATCH",
+                    "INVALID",
+                    "UNAVAILABLE",
+                    "LOST",
                 )
             )
             or marker.endswith("_STATE")
         )
         if suspicious and line not in seen:
+            if marker in ("RP1_NET_BOARD_FAILED", "RP1_NET_BOARD_TIMEOUT"):
+                result.extend(
+                    board_context[name]
+                    for name in board_context_names
+                    if name in board_context
+                )
+                board_context.clear()
             seen.add(line)
             result.append(line)
     return result

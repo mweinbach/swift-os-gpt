@@ -336,6 +336,93 @@ def sample_card_report() -> dict[str, object]:
     }
 
 
+def multi_epoch_card_report() -> tuple[dict[str, object], str, int, int]:
+    records: list[dict[str, object]] = []
+    persistent_sequence = 1
+
+    def append_message(text: str) -> None:
+        nonlocal persistent_sequence
+        encoded = text.encode("utf-8")
+        for offset in range(0, len(encoded), logs.MAXIMUM_CONSOLE_CHUNK_BYTES):
+            chunk = encoded[offset:offset + logs.MAXIMUM_CONSOLE_CHUNK_BYTES]
+            records.append({
+                "sequence": persistent_sequence,
+                "console_chunk": {
+                    "source": 1,
+                    "is_first": offset == 0,
+                    "is_last": offset + len(chunk) == len(encoded),
+                    "byte_count": len(chunk),
+                    "bytes_hex": chunk.hex(),
+                },
+            })
+            persistent_sequence += 1
+
+    old_text = "SWIFTOS:OLD_BOOT_PANIC\r\n"
+    append_message(old_text)
+    old_last = persistent_sequence - 1
+    latest_first = persistent_sequence
+    latest_lines = [
+        "SWIFTOS:USB_POWER_STATE_MISMATCH",
+        "SWIFTOS:INPUT_INVALID",
+        "SWIFTOS:DATA_UNAVAILABLE",
+        "SWIFTOS:PACKET_LOST",
+        "SWIFTOS:RP1_NET_BOARD_STAGE=0x2",
+        "SWIFTOS:RP1_NET_BOARD_REGISTER=0x18014",
+        "SWIFTOS:RP1_NET_BOARD_EXPECTED=0x800",
+        "SWIFTOS:RP1_NET_BOARD_OBSERVED=0x2",
+        "SWIFTOS:RP1_NET_BOARD_FAILED",
+    ]
+    latest_text = "".join(f"{line}\r\n" for line in latest_lines)
+    for line in latest_lines:
+        append_message(f"{line}\r\n")
+    latest_last = persistent_sequence - 1
+    aggregate_text = old_text + latest_text
+    report: dict[str, object] = {
+        "format": "swiftos-persistent-log-capture-v1",
+        "source": {"path": "/dev/rdisk4"},
+        "data_superblock_status": "healthy",
+        "capture_summary": {"status": "records-present"},
+        "boot_epoch_markers": {"count": 2},
+        "persistent_records": records,
+        "sequence_metadata": {
+            "persistent_record": {
+                "first_sequence": 1,
+                "last_sequence": latest_last,
+                "record_count": latest_last,
+                "gap_count": 0,
+                "reset_count": 0,
+                "gaps": [],
+            },
+            "kernel_log": {
+                "epoch_count": 2,
+                "epochs": [
+                    {
+                        "index": 0,
+                        "first_persistent_sequence": 1,
+                        "last_persistent_sequence": old_last,
+                        "missing_prefix_count": 0,
+                        "missing_between_count": 0,
+                    },
+                    {
+                        "index": 1,
+                        "first_persistent_sequence": latest_first,
+                        "last_persistent_sequence": latest_last,
+                        "missing_prefix_count": 0,
+                        "missing_between_count": 0,
+                    },
+                ],
+            },
+        },
+        "canonical_console_stream": {
+            "byte_count": len(aggregate_text.encode("utf-8")),
+            "is_complete": False,
+            "crosses_kernel_epochs": True,
+            "text": aggregate_text,
+        },
+    }
+    return report, latest_text, latest_first, latest_last
+
+
 def test_card_summary_and_evidence_files_are_stable_and_non_overwriting() -> None:
     report = sample_card_report()
     lines = logs.card_summary_lines(report)
@@ -605,6 +692,61 @@ def test_failure_markers_are_promoted_in_capture_order() -> None:
     summary = logs.card_summary_lines(report)
     require("diagnostic markers: 4" in summary,
             "failure count was not promoted into summary")
+
+
+def test_newest_epoch_diagnostics_include_actionable_context() -> None:
+    report, latest_text, latest_first, latest_last = multi_epoch_card_report()
+    latest = logs.latest_kernel_epoch_console(report)
+    require(latest is not None, "newest kernel epoch was not reconstructed")
+    require(latest["text"] == latest_text,
+            "newest kernel epoch included bytes from an older boot")
+    require(latest["is_complete"] is True,
+            "gap-free newest kernel epoch was called incomplete")
+
+    expected = [
+        "SWIFTOS:USB_POWER_STATE_MISMATCH",
+        "SWIFTOS:INPUT_INVALID",
+        "SWIFTOS:DATA_UNAVAILABLE",
+        "SWIFTOS:PACKET_LOST",
+        "SWIFTOS:RP1_NET_BOARD_STAGE=0x2",
+        "SWIFTOS:RP1_NET_BOARD_REGISTER=0x18014",
+        "SWIFTOS:RP1_NET_BOARD_EXPECTED=0x800",
+        "SWIFTOS:RP1_NET_BOARD_OBSERVED=0x2",
+        "SWIFTOS:RP1_NET_BOARD_FAILED",
+    ]
+    diagnostics = logs.diagnostic_console_lines(report)
+    require(diagnostics == expected,
+            "newest-epoch failure promotion or RP1 context changed")
+    require("OLD_BOOT_PANIC" not in "\n".join(diagnostics),
+            "older kernel epoch contaminated current diagnostics")
+
+    summary = logs.card_summary_lines(report)
+    aggregate_bytes = report["canonical_console_stream"]["byte_count"]
+    require(
+        f"console: {aggregate_bytes} bytes; aggregate complete no "
+        "(crosses 2 kernel epochs)" in summary,
+        "cross-epoch aggregate completeness was not explained",
+    )
+    require(
+        f"newest kernel epoch: 2/2; persistent {latest_first}...{latest_last}; "
+        f"{len(latest_text.encode('utf-8'))} console bytes; complete yes" in summary,
+        "newest epoch completeness was not reported independently",
+    )
+    require("diagnostic markers (newest kernel epoch 2/2): 9" in summary,
+            "diagnostic scope was not made explicit")
+
+    lossy = json.loads(json.dumps(report))
+    lossy["sequence_metadata"]["kernel_log"]["epochs"][-1][
+        "missing_between_count"
+    ] = 1
+    require(
+        any(
+            "newest kernel epoch:" in line
+            and "complete no (kernel sequence gaps)" in line
+            for line in logs.card_summary_lines(lossy)
+        ),
+        "newest-epoch loss reason was not explained",
+    )
 
 
 def test_live_report_corruption_and_device_switch_are_refused() -> None:
@@ -1095,6 +1237,7 @@ def main() -> int:
         test_live_follow_polls_cursor_and_tees_exact_console_bytes,
         test_live_once_validates_device_and_refuses_capture_overwrite,
         test_failure_markers_are_promoted_in_capture_order,
+        test_newest_epoch_diagnostics_include_actionable_context,
         test_live_report_corruption_and_device_switch_are_refused,
         test_invalid_live_pages_do_not_contaminate_transcripts,
         test_live_idle_and_sequence_exhaustion_are_bounded,

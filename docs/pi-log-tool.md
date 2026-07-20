@@ -47,15 +47,24 @@ read-only, bounds the inspector to the independently reported exact byte size,
 and reads only the MBR, redundant SwiftOS data superblocks, and declared log
 arena. It does not mount, unmount, eject, format, repartition, or write media.
 
-The default terminal view starts with capture health, sequence gaps/resets, and
-failure-oriented markers (`PANIC`, `FAILED`, `TIMEOUT`, `MISSING`,
-`UNSUPPORTED`, `DEFERRED`, and suspicious `_STATE` markers), then prints the
-reconstructed canonical console. `--summary-only` hides the full console;
-`--json` prints the complete machine-readable report. `--output` creates a
-mode-`0600` JSON evidence file and refuses to overwrite an existing capture.
-The privileged redirection example instead relies on the unprivileged shell's
-`noclobber` guard, which also prevents replacement while keeping the file owned
-by the developer rather than root.
+The default terminal view starts with capture health and sequence gaps/resets.
+When a retained console crosses kernel sequence resets, it labels the aggregate
+stream incomplete because it spans boots, then reconstructs and reports the
+newest kernel epoch separately. Failure triage is scoped to that newest epoch,
+so a stale failure from an older boot cannot obscure the current result. The
+promoted markers include `PANIC`, `FAILED`, `TIMEOUT`, `MISSING`, `UNSUPPORTED`,
+`DEFERRED`, `MISMATCH`, `INVALID`, `UNAVAILABLE`, `LOST`, and suspicious
+`_STATE` markers. An `RP1_NET_BOARD_FAILED` or `_TIMEOUT` result also carries
+its immediately preceding `BOARD_STAGE`, `BOARD_REGISTER`, `BOARD_EXPECTED`,
+and `BOARD_OBSERVED` values into the summary as one adjacent diagnostic group.
+
+The full reconstructed canonical console remains an aggregate in persistent
+record order so older boot evidence is not discarded. `--summary-only` hides
+that full console; `--json` prints the complete machine-readable report.
+`--output` creates a mode-`0600` JSON evidence file and refuses to overwrite an
+existing capture. The privileged redirection example instead relies on the
+unprivileged shell's `noclobber` guard, which also prevents replacement while
+keeping the file owned by the developer rather than root.
 
 View a saved capture later without reopening or rereading the microSD card:
 
