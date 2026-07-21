@@ -1,3 +1,110 @@
+/// Describes the small set of bytes that are physically different between two
+/// semantically identical boot slots. Content digests normalize these bytes;
+/// copies validate the source value and encode the destination value. Boards
+/// without location-specific metadata retain exact byte semantics.
+enum BootSlotMetadataPolicy: Equatable {
+    case none
+    case fat32HiddenSectors(
+        primaryBootBlock: UInt64,
+        backupBootBlock: UInt64
+    )
+
+    private static let fat32HiddenSectorsOffset = 28
+
+    func isValid(blockCount: UInt64) -> Bool {
+        switch self {
+        case .none:
+            return true
+        case .fat32HiddenSectors(let primary, let backup):
+            return primary < blockCount
+                && backup < blockCount
+                && primary != backup
+        }
+    }
+
+    /// Validates the source's physical metadata and rewrites it for the
+    /// destination before a copied block is written or compared.
+    func relocateForCopy(
+        relativeBlock: UInt64,
+        sourceStartBlock: UInt64,
+        destinationStartBlock: UInt64,
+        bytes: UnsafeMutableRawBufferPointer
+    ) -> Bool {
+        switch self {
+        case .none:
+            return true
+        case .fat32HiddenSectors(let primary, let backup):
+            guard relativeBlock == primary || relativeBlock == backup else {
+                return true
+            }
+            guard sourceStartBlock <= UInt64(UInt32.max),
+                  destinationStartBlock <= UInt64(UInt32.max),
+                  Self.readLE32(
+                      bytes,
+                      at: Self.fat32HiddenSectorsOffset
+                  ) == UInt32(sourceStartBlock)
+            else { return false }
+            return Self.writeLE32(
+                UInt32(destinationStartBlock),
+                into: bytes,
+                at: Self.fat32HiddenSectorsOffset
+            )
+        }
+    }
+
+    /// Produces the location-neutral byte stream used by release and journal
+    /// identities, while still rejecting a slot whose BPB names another LBA.
+    func normalizeForContentDigest(
+        relativeBlock: UInt64,
+        slotStartBlock: UInt64,
+        bytes: UnsafeMutableRawBufferPointer
+    ) -> Bool {
+        switch self {
+        case .none:
+            return true
+        case .fat32HiddenSectors(let primary, let backup):
+            guard relativeBlock == primary || relativeBlock == backup else {
+                return true
+            }
+            guard slotStartBlock <= UInt64(UInt32.max),
+                  Self.readLE32(
+                      bytes,
+                      at: Self.fat32HiddenSectorsOffset
+                  ) == UInt32(slotStartBlock)
+            else { return false }
+            return Self.writeLE32(
+                0,
+                into: bytes,
+                at: Self.fat32HiddenSectorsOffset
+            )
+        }
+    }
+
+    private static func readLE32(
+        _ bytes: UnsafeMutableRawBufferPointer,
+        at offset: Int
+    ) -> UInt32? {
+        guard offset >= 0, offset <= bytes.count - 4 else { return nil }
+        return UInt32(bytes[offset])
+            | UInt32(bytes[offset + 1]) << 8
+            | UInt32(bytes[offset + 2]) << 16
+            | UInt32(bytes[offset + 3]) << 24
+    }
+
+    private static func writeLE32(
+        _ value: UInt32,
+        into bytes: UnsafeMutableRawBufferPointer,
+        at offset: Int
+    ) -> Bool {
+        guard offset >= 0, offset <= bytes.count - 4 else { return false }
+        bytes[offset] = UInt8(truncatingIfNeeded: value)
+        bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+        bytes[offset + 2] = UInt8(truncatingIfNeeded: value >> 16)
+        bytes[offset + 3] = UInt8(truncatingIfNeeded: value >> 24)
+        return true
+    }
+}
+
 /// Board-neutral ordering policy for media whose firmware recognizes a small
 /// set of blocks as the bootability commit point. Direct layouts copy in block
 /// order. Deferred layouts keep both activation blocks zero while payload data
@@ -79,19 +186,23 @@ struct VerifiedSlotCopyPlan: Equatable {
     let source: BlockDeviceRange
     let destination: BlockDeviceRange
     let writePolicy: BootSlotWritePolicy
+    let metadataPolicy: BootSlotMetadataPolicy
 
     init?(
         source: BlockDeviceRange,
         destination: BlockDeviceRange,
-        writePolicy: BootSlotWritePolicy = .direct
+        writePolicy: BootSlotWritePolicy = .direct,
+        metadataPolicy: BootSlotMetadataPolicy = .none
     ) {
         guard source.blockCount == destination.blockCount,
               !source.overlaps(destination),
-              writePolicy.isValid(blockCount: source.blockCount)
+              writePolicy.isValid(blockCount: source.blockCount),
+              metadataPolicy.isValid(blockCount: source.blockCount)
         else { return nil }
         self.source = source
         self.destination = destination
         self.writePolicy = writePolicy
+        self.metadataPolicy = metadataPolicy
     }
 
     var blockCount: UInt64 { source.blockCount }
@@ -104,6 +215,7 @@ enum VerifiedSlotCopyFailure: Equatable {
     case invalidateDestination(block: UInt64, result: BlockDeviceIOResult)
     case activationStateMismatch(block: UInt64)
     case readSource(block: UInt64, result: BlockDeviceIOResult)
+    case sourceMetadataMismatch(block: UInt64)
     case writeDestination(block: UInt64, result: BlockDeviceIOResult)
     case synchronize(BlockDeviceIOResult)
     case readbackSource(block: UInt64, result: BlockDeviceIOResult)
@@ -195,6 +307,8 @@ enum VerifiedSlotCopier {
             } else {
                 if let failure = requireSourceMatch(
                     on: &device,
+                    plan: plan,
+                    relativeBlock: activation.first,
                     sourceBlock: plan.source.startBlock + activation.first,
                     destinationBlock:
                         plan.destination.startBlock + activation.first,
@@ -218,6 +332,15 @@ enum VerifiedSlotCopier {
             let read = device.readBlock(at: sourceBlock, into: first)
             guard read == .success else {
                 return .failure(.readSource(block: sourceBlock, result: read))
+            }
+            guard plan.metadataPolicy.relocateForCopy(
+                      relativeBlock: relative,
+                      sourceStartBlock: plan.source.startBlock,
+                      destinationStartBlock: plan.destination.startBlock,
+                      bytes: first
+                  )
+            else {
+                return .failure(.sourceMetadataMismatch(block: sourceBlock))
             }
             let write = device.writeBlock(
                 at: destinationBlock,
@@ -254,6 +377,15 @@ enum VerifiedSlotCopier {
                     block: sourceBlock,
                     result: sourceRead
                 ))
+            }
+            guard plan.metadataPolicy.relocateForCopy(
+                      relativeBlock: relative,
+                      sourceStartBlock: plan.source.startBlock,
+                      destinationStartBlock: plan.destination.startBlock,
+                      bytes: first
+                  )
+            else {
+                return .failure(.sourceMetadataMismatch(block: sourceBlock))
             }
             let destinationRead = device.readBlock(
                 at: destinationBlock,
@@ -364,6 +496,8 @@ enum VerifiedSlotCopier {
 
     private static func requireSourceMatch<Device: BlockDevice>(
         on device: inout Device,
+        plan: VerifiedSlotCopyPlan,
+        relativeBlock: UInt64,
         sourceBlock: UInt64,
         destinationBlock: UInt64,
         source: UnsafeMutableRawBufferPointer,
@@ -373,6 +507,13 @@ enum VerifiedSlotCopier {
         guard sourceRead == .success else {
             return .readSource(block: sourceBlock, result: sourceRead)
         }
+        guard plan.metadataPolicy.relocateForCopy(
+                  relativeBlock: relativeBlock,
+                  sourceStartBlock: plan.source.startBlock,
+                  destinationStartBlock: plan.destination.startBlock,
+                  bytes: source
+              )
+        else { return .sourceMetadataMismatch(block: sourceBlock) }
         let destinationRead = device.readBlock(
             at: destinationBlock,
             into: destination

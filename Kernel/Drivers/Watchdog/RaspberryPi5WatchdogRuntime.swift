@@ -2,10 +2,11 @@ private typealias RaspberryPi5PMWatchdog = BCM2712PMWatchdog<
     BCM2712PMWatchdogMMIORegisterAccess
 >
 
-/// Owns the continuously armed Pi watchdog after the final page table maps its
-/// DT-described PM aperture. Kicks are driven by cooperative scheduler
-/// progress, never by timer IRQ delivery, so a wedged scheduler cannot conceal
-/// itself by continuing to acknowledge interrupts.
+/// Owns the Pi rollback watchdog only for a firmware-observed tryboot payload
+/// candidate. Stable, rescue, unsupported, and unidentified boots leave the
+/// hardware untouched. Kicks are driven by cooperative scheduler progress,
+/// never by timer IRQ delivery, so a wedged scheduler cannot conceal itself by
+/// continuing to acknowledge interrupts.
 enum RaspberryPi5WatchdogRuntime {
     static let timeoutSeconds: UInt32 = 15
     static let serviceIntervalSeconds: UInt64 = 5
@@ -27,6 +28,16 @@ enum RaspberryPi5WatchdogRuntime {
     static func activate(console: EarlyConsole, platform: Platform) -> Bool {
         guard platform.kind == .raspberryPi5 else { return true }
         if activeWatchdog != nil { return true }
+        self.console = console
+        guard RaspberryPi5WatchdogBootPolicy.requiresAdoption(
+                  payloadWasTryBoot: platform.bootObservation?.wasTryBoot
+              )
+        else {
+            // Retaining the discovered page in the final map is not an MMIO
+            // access. Stable boots need that mapping only if the A/B executor
+            // later reaches an explicit, no-return reset boundary.
+            return true
+        }
         guard case .bcm2712PM(let resource)? = platform.systemWatchdog,
               let registers = BCM2712PMWatchdogMMIORegisterAccess(
                   resource: resource
@@ -51,10 +62,9 @@ enum RaspberryPi5WatchdogRuntime {
             console.write("SWIFTOS:WATCHDOG_ADOPT_FAILED\n")
             return false
         }
-        self.console = console
         activeWatchdog = watchdog
         probation = RaspberryPi5WatchdogProbationPolicy(
-            isTryBootCandidate: platform.bootObservation?.wasTryBoot == true
+            isTryBootCandidate: true
         )
         lastServiceTicks = AArch64.counterValue
         serviceIntervalTicks = interval.partialValue
@@ -64,8 +74,13 @@ enum RaspberryPi5WatchdogRuntime {
 
     @discardableResult
     static func serviceNow() -> Bool {
-        if probation.serviceAction == .suppressDuringTrialProbation {
+        switch probation.serviceAction {
+        case .inactive:
+            return false
+        case .suppressDuringTrialProbation:
             return activeWatchdog != nil
+        case .programService:
+            break
         }
         guard var watchdog = activeWatchdog, watchdog.service() else {
             return false
@@ -77,7 +92,7 @@ enum RaspberryPi5WatchdogRuntime {
 
     static func serviceIfDue() {
         guard activeWatchdog != nil, serviceIntervalTicks != 0 else { return }
-        guard probation.serviceAction == .programService else { return }
+        guard case .programService = probation.serviceAction else { return }
         let now = AArch64.counterValue
         guard now &- lastServiceTicks >= serviceIntervalTicks else { return }
         guard serviceNow() else {
@@ -100,16 +115,36 @@ enum RaspberryPi5WatchdogRuntime {
 
     /// Irreversibly returns through firmware partition zero. All managed
     /// secondaries and interrupt delivery are quiesced before the global PM
-    /// reset is armed; any failed quiescence simply leaves the already-running
-    /// rollback watchdog to expire rather than resuming normal execution.
+    /// reset is armed. Failed quiescence never resumes normal execution: an
+    /// active candidate remains rollback-bound, while a stable explicit-reset
+    /// caller parks after its no-return boundary.
     static func resetToDefault(platform: Platform) -> Never {
         AArch64.disableIRQs()
         guard RaspberryPiKernelUpdateActivator.quiesceProcessors(
                   platform: platform
-              ), InterruptSubsystem.quiesceForKernelRestart(),
-              var watchdog = activeWatchdog
+              ), InterruptSubsystem.quiesceForKernelRestart()
         else {
             console?.write("SWIFTOS:WATCHDOG_RESET_QUIESCE_FAILED\n")
+            while true { AArch64.waitForEvent() }
+        }
+        let resetWatchdog: RaspberryPi5PMWatchdog?
+        if let activeWatchdog {
+            resetWatchdog = activeWatchdog
+        } else if case .bcm2712PM(let resource)? = platform.systemWatchdog,
+                  let registers = BCM2712PMWatchdogMMIORegisterAccess(
+                      resource: resource
+                  ) {
+            // A stable boot may reach this path only after update policy has
+            // authorized a no-return reset (including an armed tryboot). Merely
+            // constructing the accessor performs no register access.
+            resetWatchdog = RaspberryPi5PMWatchdog(registers: registers)
+        } else {
+            resetWatchdog = nil
+        }
+        guard var watchdog = resetWatchdog else {
+            console?.write("SWIFTOS:WATCHDOG_RESET_UNAVAILABLE\n")
+            // Reset authority is already committed or media durability is
+            // ambiguous. Resuming could violate rollback invariants.
             while true { AArch64.waitForEvent() }
         }
         AArch64.synchronizeData()

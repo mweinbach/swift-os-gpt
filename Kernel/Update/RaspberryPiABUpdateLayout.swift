@@ -3,10 +3,14 @@
 /// only the stable format identity and bootability ordering. QEMU and future
 /// boards continue to use the same orchestrator with their own adapter.
 enum RaspberryPiABUpdateLayout {
-    static let mediaLayoutFingerprint: UInt64 = 0x5357_4142_0000_0002
+    static let mediaLayoutFingerprint: UInt64 = 0x5357_4142_0000_0003
     static let writePolicy = BootSlotWritePolicy.deferredActivation(
         firstCommitBlock: 6,
         lastCommitBlock: 0
+    )
+    static let metadataPolicy = BootSlotMetadataPolicy.fat32HiddenSectors(
+        primaryBootBlock: 0,
+        backupBootBlock: 6
     )
 
     static func make(
@@ -25,7 +29,8 @@ enum RaspberryPiABUpdateLayout {
             slotA: slotA,
             slotB: slotB,
             mediaLayoutFingerprint: mediaLayoutFingerprint,
-            writePolicy: writePolicy
+            writePolicy: writePolicy,
+            metadataPolicy: metadataPolicy
         )
     }
 }

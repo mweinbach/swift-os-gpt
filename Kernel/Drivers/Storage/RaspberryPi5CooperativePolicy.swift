@@ -22,29 +22,55 @@ enum RaspberryPi5CooperativePolicy {
 }
 
 enum RaspberryPi5WatchdogServiceAction: UInt8, Equatable {
+    case inactive
     case programService
     case suppressDuringTrialProbation
 }
 
+enum RaspberryPi5WatchdogBootPolicy {
+    /// Only a payload partition that firmware explicitly reports as the
+    /// one-shot tryboot target may adopt the rollback watchdog during boot.
+    /// A stable payload reports `false`; rescue, unsupported, and missing boot
+    /// identity report `nil`. Both remain disarmed so early diagnosis never
+    /// probes the still-hardware-unverified PM register aperture.
+    static func requiresAdoption(payloadWasTryBoot: Bool?) -> Bool {
+        payloadWasTryBoot == true
+    }
+}
+
 /// Pure policy for the Pi one-shot trial watchdog. Firmware has already given
-/// the candidate one initial timeout window when the watchdog is adopted. No
-/// later cooperative checkpoint may extend that window until the exact
-/// candidate-health transition has become durable in the A/B journal.
+/// an observed tryboot payload one initial timeout window when the watchdog is
+/// adopted. Stable, rescue, unsupported, and unidentified boots stay inactive.
+/// No later cooperative checkpoint may extend a candidate's window until the
+/// exact candidate-health transition has become durable in the A/B journal.
 struct RaspberryPi5WatchdogProbationPolicy {
-    private(set) var isTrialProbationActive: Bool
+    private enum State {
+        case inactive
+        case trialProbation
+        case released
+    }
+
+    private var state: State
 
     init(isTryBootCandidate: Bool) {
-        isTrialProbationActive = isTryBootCandidate
+        state = isTryBootCandidate ? .trialProbation : .inactive
+    }
+
+    var isTrialProbationActive: Bool {
+        state == .trialProbation
     }
 
     var serviceAction: RaspberryPi5WatchdogServiceAction {
-        isTrialProbationActive
-            ? .suppressDuringTrialProbation : .programService
+        switch state {
+        case .inactive: return .inactive
+        case .trialProbation: return .suppressDuringTrialProbation
+        case .released: return .programService
+        }
     }
 
     mutating func releaseAfterDurableCandidateHealth() -> Bool {
-        guard isTrialProbationActive else { return false }
-        isTrialProbationActive = false
+        guard state == .trialProbation else { return false }
+        state = .released
         return true
     }
 }

@@ -8,7 +8,8 @@ struct BootUpdateControlTests {
         rejectsNonzeroJournalGarbage()
         copiesDisjointSlotChunksDurably()
         defersBootabilityUntilPayloadCopyCompletes()
-        print("boot update control host tests: 7 groups passed")
+        relocatesFAT32SlotMetadataDuringConvergence()
+        print("boot update control host tests: 8 groups passed")
     }
 
     private static let oldDigest = BootImageDigest(
@@ -483,6 +484,123 @@ struct BootUpdateControlTests {
             )
             relative += 1
         }
+    }
+
+    private static func relocatesFAT32SlotMetadataDuringConvergence() {
+        var device = MemoryBlockDevice(blockCount: 40)
+        let source = BlockDeviceRange(
+            startBlock: 2,
+            blockCount: 10,
+            within: 40
+        )!
+        let destination = BlockDeviceRange(
+            startBlock: 20,
+            blockCount: 10,
+            within: 40
+        )!
+        let plan = VerifiedSlotCopyPlan(
+            source: source,
+            destination: destination,
+            writePolicy: .deferredActivation(
+                firstCommitBlock: 6,
+                lastCommitBlock: 0
+            ),
+            metadataPolicy: .fat32HiddenSectors(
+                primaryBootBlock: 0,
+                backupBootBlock: 6
+            )
+        )!
+        var relative = 0
+        while relative < 10 {
+            let sourceOffset = (2 + relative) * 512
+            var byte = 0
+            while byte < 512 {
+                device.bytes[sourceOffset + byte] = UInt8(
+                    truncatingIfNeeded: relative &* 19 &+ byte
+                )
+                byte += 1
+            }
+            relative += 1
+        }
+        writeLE32(2, into: &device.bytes, at: 2 * 512 + 28)
+        writeLE32(2, into: &device.bytes, at: 8 * 512 + 28)
+
+        withScratch(byteCount: 1_024) { scratch in
+            var progress: UInt64 = 0
+            while progress < plan.blockCount {
+                let count = plan.writePolicy.boundedOperationCount(
+                    atProgress: progress,
+                    blockCount: plan.blockCount,
+                    requested: plan.blockCount
+                )!
+                guard case .advanced(let nextBlock, _) =
+                        VerifiedSlotCopier.copyNextChunk(
+                            on: &device,
+                            plan: plan,
+                            nextBlock: progress,
+                            maximumBlockCount: count,
+                            scratch: scratch
+                        )
+                else { fail("FAT32 metadata-aware slot copy") }
+                progress = nextBlock
+            }
+            expect(
+                readLE32(device.bytes, at: 20 * 512 + 28) == 20,
+                "primary BPB_HiddSec did not name the destination slot"
+            )
+            expect(
+                readLE32(device.bytes, at: 26 * 512 + 28) == 20,
+                "backup BPB_HiddSec did not name the destination slot"
+            )
+
+            writeLE32(0, into: &device.bytes, at: 2 * 512 + 28)
+            expect(
+                VerifiedSlotCopier.copyNextChunk(
+                    on: &device,
+                    plan: plan,
+                    nextBlock: 9,
+                    maximumBlockCount: 1,
+                    scratch: scratch
+                ) == .failure(.sourceMetadataMismatch(block: 2)),
+                "copy accepted a source BPB that named the wrong partition"
+            )
+        }
+
+        relative = 0
+        while relative < 10 {
+            var byte = 0
+            while byte < 512 {
+                let isHiddenSectorByte = (relative == 0 || relative == 6)
+                    && byte >= 28 && byte < 32
+                if !isHiddenSectorByte {
+                    expect(
+                        device.bytes[(20 + relative) * 512 + byte]
+                            == device.bytes[(2 + relative) * 512 + byte],
+                        "location-neutral FAT32 payload bytes diverged"
+                    )
+                }
+                byte += 1
+            }
+            relative += 1
+        }
+    }
+
+    private static func writeLE32(
+        _ value: UInt32,
+        into bytes: inout [UInt8],
+        at offset: Int
+    ) {
+        bytes[offset] = UInt8(truncatingIfNeeded: value)
+        bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+        bytes[offset + 2] = UInt8(truncatingIfNeeded: value >> 16)
+        bytes[offset + 3] = UInt8(truncatingIfNeeded: value >> 24)
+    }
+
+    private static func readLE32(_ bytes: [UInt8], at offset: Int) -> UInt32 {
+        UInt32(bytes[offset])
+            | UInt32(bytes[offset + 1]) << 8
+            | UInt32(bytes[offset + 2]) << 16
+            | UInt32(bytes[offset + 3]) << 24
     }
 
     private static func formattedDataDevice() -> MemoryBlockDevice {

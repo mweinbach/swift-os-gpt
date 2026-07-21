@@ -11,8 +11,10 @@ Partition 1:
   start block: 1
   block count: 2047
   volume label: SWIFTOS-CTL
-  contents: autoboot.txt, config.txt, kernel8.img, rescue.dtb
-  rescue manifest: CRC-protected SWRSQ001 record in boot-sector bytes 64...191
+  contents: autoboot.txt, config.txt, kernel8.img, bcm2712-rpi-5-b.dtb,
+            overlays/dwc2.dtbo
+  naming: valid VFAT long names plus deterministic short aliases
+  rescue manifest: CRC-protected SWRSQ001 v2 record in bytes 64...255
   sole update-writable sector: partition-relative block 15 (autoboot.txt)
 
 Partition 2:
@@ -41,21 +43,27 @@ Partition 4:
   size: remaining image blocks
   blocks 0 and 1, bytes 0...63: SwiftOS data-volume v1 superblocks
   blocks 0 and 1, bytes 64...223: redundant A/B boot-control records
-  initial boot-control state: sequence 1, stable A, generation 1, raw-slot SHA-256
+  initial boot-control state: sequence 1, stable A, generation 1,
+                              location-neutral content SHA-256
   default kernel-log arena: blocks 2 through 4097 (2 MiB)
   remaining blocks: SwiftFS user/system data
 
-Fresh media gives both payload slots the same FAT32 identity and byte-for-byte
-contents so a full raw-slot SHA-256 describes either slot. Slot identity comes
-from the MBR entry and the firmware-reported boot partition, never the common
-volume label. Slots may temporarily differ during a transaction and converge
-again only after the new release is confirmed and mirrored.
+Fresh media gives both payload slots the same FAT32 identity and equivalent
+content. Primary sector 0 and backup sector 6 in each slot record that slot's
+actual partition start in BPB_HiddSec, so their raw extent hashes are distinct.
+The boot-control journal uses a location-neutral SHA-256 that first validates
+both fields and then normalizes only those eight bytes in the hash stream. Slot
+identity comes from the MBR entry and firmware-reported boot partition, never
+the common volume label. Slots may temporarily contain different releases
+during a transaction and converge semantically only after confirmation and
+mirroring.
 
 The selector normally points to partition 2 and uses Raspberry Pi tryboot to
 select partition 3 once. The reverse mapping applies after B becomes confirmed.
 Before changing the selector, the kernel validates its exact boot sector, both
-FAT copies, root directory, rescue manifest, and SHA-256 of config.txt,
-kernel8.img, and rescue.dtb. It can then synchronize and read back only the
+FAT copies, root and overlays directories, rescue manifest, and SHA-256 of
+config.txt, kernel8.img, bcm2712-rpi-5-b.dtb, and overlays/dwc2.dtbo. It can
+then synchronize and read back only the
 single 512-byte autoboot.txt sector; no selector FAT, directory, rescue file,
 MBR, payload, log, or SwiftFS write is expressible through that writer.
 

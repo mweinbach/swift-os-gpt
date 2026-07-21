@@ -11,11 +11,6 @@ os_check=0
 # let an ordinary kernel/DT/config package trigger an EEPROM self-update.
 bootloader_update=0
 
-# Carry rollback coverage across firmware handoff. SwiftOS adopts and services
-# the same PM watchdog, and partition zero re-evaluates the A/B selector.
-kernel_watchdog_timeout=15
-kernel_watchdog_partition=0
-
 # Keep the firmware-expanded DTB outside both the 32 MiB live-update
 # destination and the >=64 MiB upload workspace. The kernel independently
 # validates and reserves the actual x0 span before enabling activation.
@@ -45,5 +40,13 @@ uart_2ndstage=1
 
 # Emit hashes of firmware-loaded files in the second-stage UART log.
 sha256=1
+
+# Arm rollback coverage only for the one-shot candidate. Stable payload,
+# rescue, and unsupported boots must reach SwiftOS with the PM watchdog
+# untouched. SwiftOS adopts this candidate watchdog once, and partition zero
+# re-evaluates the unchanged A/B selector if probation expires.
+[tryboot]
+kernel_watchdog_timeout=15
+kernel_watchdog_partition=0
 
 [all]

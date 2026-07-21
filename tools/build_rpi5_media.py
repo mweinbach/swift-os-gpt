@@ -61,7 +61,12 @@ MAXIMUM_TOTAL_BOOT_FILE_BYTES = 512 * 1_024 * 1_024
 MAXIMUM_BOOT_MANIFEST_BYTES = 1 * 1_024 * 1_024
 AB_SLOT_VOLUME_ID = 0x5357_4142
 AB_SLOT_VOLUME_LABEL = b"SWIFTOS-AB "
-AB_MEDIA_LAYOUT_FINGERPRINT = 0x5357_4142_0000_0002
+# Revision three records location-neutral slot digests while requiring each
+# FAT32 BPB_HiddSec replica to name its actual MBR partition start. Revision
+# two incorrectly forced both fields to zero and journaled raw-slot hashes.
+AB_MEDIA_LAYOUT_FINGERPRINT = 0x5357_4142_0000_0003
+AB_SLOT_BOOT_SECTORS = (0, 6)
+FAT32_HIDDEN_SECTORS_OFFSET = 28
 BOOT_CONTROL_MAGIC = b"SWABCTL1"
 BOOT_CONTROL_VERSION = 1
 BOOT_CONTROL_BYTES = 160
@@ -164,13 +169,16 @@ class FATDirectoryEntry:
 
 
 class FAT12SelectorVolume:
-    """Deterministic flat FAT12 selector with an immutable rescue payload.
+    """Deterministic FAT12 selector with an immutable rescue payload.
 
     AUTOBOOT.TXT always owns cluster 2, which is partition-relative block 15.
     The runtime selector writer therefore needs authority over only that block.
-    CONFIG.TXT, KERNEL8.IMG, and RESCUE.DTB occupy deterministic sequential
-    chains after it and make partition 1 independently bootable if firmware
-    cannot apply autoboot.txt.
+    Lowercase VFAT names are emitted alongside deterministic short aliases for
+    compatibility with both current and factory Pi 5 EEPROM firmware.
+    CONFIG.TXT, KERNEL8.IMG, the canonical board DTB, and OVERLAYS/DWC2.DTBO
+    occupy deterministic sequential chains after it and make partition 1
+    independently bootable with USB diagnostics if firmware cannot apply
+    autoboot.txt.
     """
 
     reserved_sectors = 1
@@ -181,13 +189,22 @@ class FAT12SelectorVolume:
     sectors_per_cluster = 1
     first_file_cluster = 2
     rescue_manifest_offset = 64
-    rescue_manifest_bytes = 128
+    rescue_manifest_version = 2
+    rescue_manifest_bytes = 192
     rescue_manifest_magic = b"SWRSQ001"
-    file_layout = (
+    root_file_layout = (
         ("autoboot.txt", b"AUTOBOOTTXT"),
         ("config.txt", b"CONFIG  TXT"),
         ("kernel8.img", b"KERNEL8 IMG"),
-        ("rescue.dtb", b"RESCUE  DTB"),
+        ("bcm2712-rpi-5-b.dtb", b"BCM271~1DTB"),
+    )
+    overlay_directory = ("overlays", b"OVERLAYS   ")
+    overlay_file_layout = ("dwc2.dtbo", b"DWC2~1  DTB")
+    rescue_file_names = (
+        "config.txt",
+        "kernel8.img",
+        "bcm2712-rpi-5-b.dtb",
+        "overlays/dwc2.dtbo",
     )
 
     def __init__(
@@ -199,6 +216,7 @@ class FAT12SelectorVolume:
         rescue_config: bytes,
         kernel: bytes,
         device_tree: bytes,
+        dwc2_overlay: bytes,
     ) -> None:
         if (
             partition_start != SELECTOR_START_SECTOR
@@ -208,20 +226,35 @@ class FAT12SelectorVolume:
             or not rescue_config
             or not kernel
             or not device_tree
+            or not dwc2_overlay
         ):
             raise MediaError("invalid FAT12 selector geometry or payload")
         self.image = image
         self.partition_start = partition_start
         self.partition_sectors = partition_sectors
-        self.files = (
-            (self.file_layout[0][0], self.file_layout[0][1], autoboot),
-            (self.file_layout[1][0], self.file_layout[1][1], rescue_config),
-            (self.file_layout[2][0], self.file_layout[2][1], kernel),
-            (self.file_layout[3][0], self.file_layout[3][1], device_tree),
+        self.root_files = (
+            (self.root_file_layout[0][0], self.root_file_layout[0][1], autoboot),
+            (
+                self.root_file_layout[1][0],
+                self.root_file_layout[1][1],
+                rescue_config,
+            ),
+            (self.root_file_layout[2][0], self.root_file_layout[2][1], kernel),
+            (
+                self.root_file_layout[3][0],
+                self.root_file_layout[3][1],
+                device_tree,
+            ),
+        )
+        self.overlay_file = (
+            self.overlay_file_layout[0],
+            self.overlay_file_layout[1],
+            dwc2_overlay,
         )
         if self._allocated_cluster_count(
-            tuple(contents for _, _, contents in self.files)
-        ) > self.data_cluster_count:
+            tuple(contents for _, _, contents in self.root_files)
+            + (dwc2_overlay,)
+        ) + 1 > self.data_cluster_count:
             raise MediaError("rescue payload does not fit the FAT12 selector")
 
     @property
@@ -253,8 +286,11 @@ class FAT12SelectorVolume:
     def _allocations(
         cls,
         files: tuple[tuple[str, bytes, bytes], ...],
+        first_cluster: int | None = None,
     ) -> tuple[tuple[str, bytes, bytes, tuple[int, ...]], ...]:
-        next_cluster = cls.first_file_cluster
+        next_cluster = (
+            cls.first_file_cluster if first_cluster is None else first_cluster
+        )
         output: list[tuple[str, bytes, bytes, tuple[int, ...]]] = []
         for name, short_name, contents in files:
             count = cls._file_cluster_count(contents)
@@ -264,16 +300,31 @@ class FAT12SelectorVolume:
         return tuple(output)
 
     @classmethod
-    def _rescue_manifest(cls, rescue_files: tuple[bytes, bytes, bytes]) -> bytes:
+    def _rescue_manifest(cls, rescue_files: tuple[bytes, ...]) -> bytes:
+        if len(rescue_files) != len(cls.rescue_file_names):
+            raise MediaError("selector rescue manifest membership changed")
         manifest = bytearray(cls.rescue_manifest_bytes)
         manifest[0:8] = cls.rescue_manifest_magic
-        struct.pack_into("<HHHH", manifest, 8, 1, len(manifest), 3, 0)
+        struct.pack_into(
+            "<HHHH",
+            manifest,
+            8,
+            cls.rescue_manifest_version,
+            len(manifest),
+            len(rescue_files),
+            0,
+        )
         for index, contents in enumerate(rescue_files):
             struct.pack_into("<I", manifest, 16 + index * 4, len(contents))
-            manifest[28 + index * 32:60 + index * 32] = hashlib.sha256(
+            manifest[32 + index * 32:64 + index * 32] = hashlib.sha256(
                 contents
             ).digest()
-        struct.pack_into("<I", manifest, 124, crc32(manifest[:124]))
+        struct.pack_into(
+            "<I",
+            manifest,
+            len(manifest) - 4,
+            crc32(manifest[:-4]),
+        )
         return bytes(manifest)
 
     @classmethod
@@ -281,7 +332,7 @@ class FAT12SelectorVolume:
         cls,
         partition_start: int,
         partition_sectors: int,
-        rescue_files: tuple[bytes, bytes, bytes] | None = None,
+        rescue_files: tuple[bytes, ...] | None = None,
     ) -> bytes:
         sector = bytearray(SECTOR_SIZE)
         sector[0:3] = b"\xeb\x3c\x90"
@@ -315,16 +366,110 @@ class FAT12SelectorVolume:
         short_name: bytes,
         first_cluster: int,
         byte_count: int,
+        attributes: int = 0x20,
     ) -> bytes:
         entry = bytearray(32)
         entry[0:11] = short_name
-        entry[11] = 0x20
+        entry[11] = attributes
         struct.pack_into("<H", entry, 16, 0x0021)
         struct.pack_into("<H", entry, 18, 0x0021)
         struct.pack_into("<H", entry, 24, 0x0021)
         struct.pack_into("<H", entry, 26, first_cluster)
         struct.pack_into("<I", entry, 28, byte_count)
         return bytes(entry)
+
+    @staticmethod
+    def _lfn_checksum(short_name: bytes) -> int:
+        checksum = 0
+        for byte in short_name:
+            checksum = (((checksum & 1) << 7) | (checksum >> 1)) + byte
+            checksum &= 0xFF
+        return checksum
+
+    @classmethod
+    def _lfn_entries(cls, name: str, short_name: bytes) -> tuple[bytes, ...]:
+        encoded = name.encode("utf-16le")
+        units = list(struct.unpack(f"<{len(encoded) // 2}H", encoded))
+        units.append(0)
+        while len(units) % 13:
+            units.append(0xFFFF)
+        chunks = [
+            units[index:index + 13] for index in range(0, len(units), 13)
+        ]
+        checksum = cls._lfn_checksum(short_name)
+        positions = (1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30)
+        entries: list[bytes] = []
+        for ordinal in range(len(chunks), 0, -1):
+            entry = bytearray(32)
+            entry[0] = ordinal | (0x40 if ordinal == len(chunks) else 0)
+            entry[11] = 0x0F
+            entry[13] = checksum
+            for position, unit in zip(positions, chunks[ordinal - 1]):
+                struct.pack_into("<H", entry, position, unit)
+            entries.append(bytes(entry))
+        return tuple(entries)
+
+    @classmethod
+    def _root_directory_bytes(
+        cls,
+        entries: tuple[tuple[str, bytes, int, int], ...],
+        overlay_directory_cluster: int,
+    ) -> bytes:
+        root = bytearray(cls.root_directory_sectors * SECTOR_SIZE)
+        offset = 0
+        for name, short_name, byte_count, first_cluster in entries:
+            for lfn in cls._lfn_entries(name, short_name):
+                root[offset:offset + 32] = lfn
+                offset += 32
+            root[offset:offset + 32] = cls._directory_entry(
+                short_name,
+                first_cluster,
+                byte_count,
+            )
+            offset += 32
+        name, short_name = cls.overlay_directory
+        for lfn in cls._lfn_entries(name, short_name):
+            root[offset:offset + 32] = lfn
+            offset += 32
+        root[offset:offset + 32] = cls._directory_entry(
+            short_name,
+            overlay_directory_cluster,
+            0,
+            attributes=0x10,
+        )
+        return bytes(root)
+
+    @classmethod
+    def _overlay_directory_bytes(
+        cls,
+        directory_cluster: int,
+        overlay_first_cluster: int,
+        overlay_byte_count: int,
+    ) -> bytes:
+        directory = bytearray(SECTOR_SIZE)
+        directory[0:32] = cls._directory_entry(
+            b".          ",
+            directory_cluster,
+            0,
+            attributes=0x10,
+        )
+        directory[32:64] = cls._directory_entry(
+            b"..         ",
+            0,
+            0,
+            attributes=0x10,
+        )
+        name, short_name = cls.overlay_file_layout
+        offset = 64
+        for lfn in cls._lfn_entries(name, short_name):
+            directory[offset:offset + 32] = lfn
+            offset += 32
+        directory[offset:offset + 32] = cls._directory_entry(
+            short_name,
+            overlay_first_cluster,
+            overlay_byte_count,
+        )
+        return bytes(directory)
 
     @staticmethod
     def _set_fat12_entry(fat: bytearray, cluster: int, value: int) -> None:
@@ -337,19 +482,35 @@ class FAT12SelectorVolume:
             fat[offset + 1] = (fat[offset + 1] & 0xF0) | ((value >> 8) & 0x0F)
 
     def write(self) -> None:
+        root_allocations = self._allocations(self.root_files)
+        overlay_directory_cluster = root_allocations[-1][3][-1] + 1
+        overlay_allocations = self._allocations(
+            (self.overlay_file,),
+            first_cluster=overlay_directory_cluster + 1,
+        )
+        all_allocations = (
+            root_allocations
+            + ((
+                self.overlay_directory[0],
+                self.overlay_directory[1],
+                b"",
+                (overlay_directory_cluster,),
+            ),)
+            + overlay_allocations
+        )
         base = self.partition_start * SECTOR_SIZE
         self.image.seek(base)
         self.image.write(self._boot_sector(
             self.partition_start,
             self.partition_sectors,
-            tuple(contents for _, _, contents in self.files[1:]),
+            tuple(contents for _, _, contents, _ in root_allocations[1:])
+            + (overlay_allocations[0][2],),
         ))
 
         fat = bytearray(self.fat_sectors * SECTOR_SIZE)
         self._set_fat12_entry(fat, 0, 0xFF8)
         self._set_fat12_entry(fat, 1, 0xFFF)
-        allocations = self._allocations(self.files)
-        for _, _, _, clusters in allocations:
+        for _, _, _, clusters in all_allocations:
             for index, cluster in enumerate(clusters):
                 next_cluster = (
                     clusters[index + 1] if index + 1 < len(clusters) else 0xFFF
@@ -364,14 +525,13 @@ class FAT12SelectorVolume:
             self.image.seek(offset)
             self.image.write(fat)
 
-        root = bytearray(self.root_directory_sectors * SECTOR_SIZE)
-        for index, (_, short_name, contents, clusters) in enumerate(allocations):
-            entry = self._directory_entry(
-                short_name,
-                clusters[0],
-                len(contents),
-            )
-            root[index * 32:(index + 1) * 32] = entry
+        root = self._root_directory_bytes(
+            tuple(
+                (name, short_name, len(contents), clusters[0])
+                for name, short_name, contents, clusters in root_allocations
+            ),
+            overlay_directory_cluster,
+        )
         root_start = (
             self.partition_start
             + self.reserved_sectors
@@ -380,12 +540,24 @@ class FAT12SelectorVolume:
         self.image.seek(root_start * SECTOR_SIZE)
         self.image.write(root)
 
-        for _, _, contents, clusters in allocations:
+        for _, _, contents, clusters in root_allocations + overlay_allocations:
             for index, cluster in enumerate(clusters):
                 chunk = contents[index * SECTOR_SIZE:(index + 1) * SECTOR_SIZE]
                 sector = self.data_start + cluster - self.first_file_cluster
                 self.image.seek(sector * SECTOR_SIZE)
                 self.image.write(chunk.ljust(SECTOR_SIZE, b"\0"))
+        self.image.seek(
+            (
+                self.data_start
+                + overlay_directory_cluster
+                - self.first_file_cluster
+            ) * SECTOR_SIZE
+        )
+        self.image.write(self._overlay_directory_bytes(
+            overlay_directory_cluster,
+            overlay_allocations[0][3][0],
+            len(overlay_allocations[0][2]),
+        ))
 
     @classmethod
     def read_files(
@@ -419,9 +591,15 @@ class FAT12SelectorVolume:
         if (
             manifest[0:8] != cls.rescue_manifest_magic
             or struct.unpack_from("<HHHH", manifest, 8)
-                != (1, cls.rescue_manifest_bytes, 3, 0)
-            or struct.unpack_from("<I", manifest, 124)[0]
-                != crc32(manifest[:124])
+                != (
+                    cls.rescue_manifest_version,
+                    cls.rescue_manifest_bytes,
+                    len(cls.rescue_file_names),
+                    0,
+                )
+            or any(manifest[160:188])
+            or struct.unpack_from("<I", manifest, 188)[0]
+                != crc32(manifest[:188])
         ):
             raise MediaError("selector rescue manifest is invalid")
         root_start = start + cls.reserved_sectors + cls.fat_count * cls.fat_sectors
@@ -431,24 +609,56 @@ class FAT12SelectorVolume:
             cls.root_directory_sectors * SECTOR_SIZE,
             "FAT12 selector root directory",
         )
-        declared: list[tuple[str, bytes, bytes, tuple[int, ...]]] = []
+        declared: list[tuple[str, bytes, int, tuple[int, ...]]] = []
         next_cluster = cls.first_file_cluster
-        for index, (name, short_name) in enumerate(cls.file_layout):
-            entry = root[index * 32:(index + 1) * 32]
+        available_clusters = count - (
+            cls.reserved_sectors
+            + cls.fat_count * cls.fat_sectors
+            + cls.root_directory_sectors
+        )
+        root_offset = 0
+        for index, (name, short_name) in enumerate(cls.root_file_layout):
+            root_offset += len(cls._lfn_entries(name, short_name)) * 32
+            entry = root[root_offset:root_offset + 32]
             byte_count = struct.unpack_from("<I", entry, 28)[0]
             if byte_count == 0 or (index == 0 and byte_count > SECTOR_SIZE):
                 raise MediaError("selector rescue directory entries are invalid")
             cluster_count = max(1, math.ceil(byte_count / SECTOR_SIZE))
-            clusters = tuple(range(next_cluster, next_cluster + cluster_count))
-            expected_entry = cls._directory_entry(
-                short_name,
-                next_cluster,
-                byte_count,
-            )
-            if entry != expected_entry:
+            if (
+                next_cluster - cls.first_file_cluster + cluster_count
+                    > available_clusters
+            ):
                 raise MediaError("selector rescue directory entries are invalid")
-            declared.append((name, short_name, b"", clusters))
+            clusters = tuple(range(next_cluster, next_cluster + cluster_count))
+            declared.append((name, short_name, byte_count, clusters))
             next_cluster += cluster_count
+            root_offset += 32
+
+        overlay_directory_cluster = next_cluster
+        overlay_byte_count = struct.unpack_from("<I", manifest, 28)[0]
+        if overlay_byte_count == 0:
+            raise MediaError("selector rescue manifest is invalid")
+        overlay_cluster_count = math.ceil(overlay_byte_count / SECTOR_SIZE)
+        overlay_first_cluster = overlay_directory_cluster + 1
+        if (
+            overlay_first_cluster
+            - cls.first_file_cluster
+            + overlay_cluster_count
+            > available_clusters
+        ):
+            raise MediaError("selector rescue directory entries are invalid")
+        overlay_clusters = tuple(range(
+            overlay_first_cluster,
+            overlay_first_cluster + overlay_cluster_count,
+        ))
+        next_cluster = overlay_first_cluster + overlay_cluster_count
+        expected_root = cls._root_directory_bytes(
+            tuple(
+                (name, short_name, byte_count, clusters[0])
+                for name, short_name, byte_count, clusters in declared
+            ),
+            overlay_directory_cluster,
+        )
         if (
             next_cluster - cls.first_file_cluster
                 > count - (
@@ -456,10 +666,32 @@ class FAT12SelectorVolume:
                     + cls.fat_count * cls.fat_sectors
                     + cls.root_directory_sectors
                 )
-            or any(root[index] != 0
-                   for index in range(len(cls.file_layout) * 32, len(root)))
+            or root != expected_root
         ):
             raise MediaError("selector rescue directory entries are invalid")
+
+        data_start = (
+            start
+            + cls.reserved_sectors
+            + cls.fat_count * cls.fat_sectors
+            + cls.root_directory_sectors
+        )
+        overlay_directory = read_exact(
+            image,
+            (
+                data_start
+                + overlay_directory_cluster
+                - cls.first_file_cluster
+            ) * SECTOR_SIZE,
+            SECTOR_SIZE,
+            "FAT12 selector overlay directory",
+        )
+        if overlay_directory != cls._overlay_directory_bytes(
+            overlay_directory_cluster,
+            overlay_first_cluster,
+            overlay_byte_count,
+        ):
+            raise MediaError("selector rescue overlay directory is invalid")
 
         fat_start = start + cls.reserved_sectors
         primary_fat = read_exact(
@@ -477,21 +709,18 @@ class FAT12SelectorVolume:
         expected_fat = bytearray(cls.fat_sectors * SECTOR_SIZE)
         cls._set_fat12_entry(expected_fat, 0, 0xFF8)
         cls._set_fat12_entry(expected_fat, 1, 0xFFF)
-        for _, _, _, clusters in declared:
+        allocation_chains = (
+            tuple(clusters for _, _, _, clusters in declared)
+            + ((overlay_directory_cluster,), overlay_clusters)
+        )
+        for clusters in allocation_chains:
             for index, cluster in enumerate(clusters):
                 value = clusters[index + 1] if index + 1 < len(clusters) else 0xFFF
                 cls._set_fat12_entry(expected_fat, cluster, value)
         if primary_fat != backup_fat or primary_fat != bytes(expected_fat):
             raise MediaError("selector FAT12 allocation tables are invalid")
-        data_start = (
-            start
-            + cls.reserved_sectors
-            + cls.fat_count * cls.fat_sectors
-            + cls.root_directory_sectors
-        )
         result: dict[str, bytes] = {}
-        for index, (name, _, _, clusters) in enumerate(declared):
-            byte_count = struct.unpack_from("<I", root, index * 32 + 28)[0]
+        for name, _, byte_count, clusters in declared:
             raw = read_exact(
                 image,
                 (data_start + clusters[0] - cls.first_file_cluster) * SECTOR_SIZE,
@@ -501,6 +730,21 @@ class FAT12SelectorVolume:
             if any(raw[offset] != 0 for offset in range(byte_count, len(raw))):
                 raise MediaError(f"selector {name} has unexpected trailing data")
             result[name] = raw[:byte_count]
+        overlay_raw = read_exact(
+            image,
+            (
+                data_start
+                + overlay_first_cluster
+                - cls.first_file_cluster
+            ) * SECTOR_SIZE,
+            len(overlay_clusters) * SECTOR_SIZE,
+            "selector overlays/dwc2.dtbo",
+        )
+        if any(overlay_raw[overlay_byte_count:]):
+            raise MediaError(
+                "selector overlays/dwc2.dtbo has unexpected trailing data"
+            )
+        result["overlays/dwc2.dtbo"] = overlay_raw[:overlay_byte_count]
         used_clusters = next_cluster - cls.first_file_cluster
         free = read_exact(
             image,
@@ -522,16 +766,16 @@ class FAT12SelectorVolume:
             and autoboot not in (SELECTOR_AUTOBOOT_A, SELECTOR_AUTOBOOT_B)
         ):
             raise MediaError("selector autoboot.txt policy is invalid")
-        for index, (name, _) in enumerate(cls.file_layout[1:]):
+        for index, name in enumerate(cls.rescue_file_names):
             expected_size = struct.unpack_from("<I", manifest, 16 + index * 4)[0]
-            expected_digest = manifest[28 + index * 32:60 + index * 32]
+            expected_digest = manifest[32 + index * 32:64 + index * 32]
             if (
                 len(result[name]) != expected_size
                 or hashlib.sha256(result[name]).digest() != expected_digest
             ):
                 raise MediaError(f"selector rescue {name} digest is invalid")
         if expected_rescue_files is not None:
-            expected_names = {name for name, _ in cls.file_layout[1:]}
+            expected_names = set(cls.rescue_file_names)
             if set(expected_rescue_files) != expected_names:
                 raise MediaError("selector rescue expectation is incomplete")
             for name in sorted(expected_names):
@@ -963,7 +1207,8 @@ def selector_rescue_files(package: dict[str, bytes]) -> dict[str, bytes]:
     sources = {
         "config.txt": "RESCUE-CONFIG.txt",
         "kernel8.img": "kernel8.img",
-        "rescue.dtb": "bcm2712-rpi-5-b.dtb",
+        "bcm2712-rpi-5-b.dtb": "bcm2712-rpi-5-b.dtb",
+        "overlays/dwc2.dtbo": "overlays/dwc2.dtbo",
     }
     missing = sorted(source for source in sources.values() if source not in package)
     if missing:
@@ -1019,6 +1264,50 @@ def sha256_extent(image, start_block: int, block_count: int) -> bytes:
         if not chunk:
             raise MediaError("truncated SHA-256 extent")
         digest.update(chunk)
+        remaining -= len(chunk)
+    return digest.digest()
+
+
+def sha256_ab_slot_content(image, start_block: int, block_count: int) -> bytes:
+    """Hash a FAT32 slot independent of its physical A/B location.
+
+    BPB_HiddSec is the one intentionally location-specific field in the two
+    otherwise equivalent payload slots. Both boot-sector replicas must carry
+    the actual partition start; the four bytes are normalized to zero only in
+    the hashing stream. The on-media bytes are never changed by this helper.
+    """
+
+    if (
+        not 0 < start_block <= 0xFFFF_FFFF
+        or block_count <= max(AB_SLOT_BOOT_SECTORS)
+    ):
+        raise MediaError("invalid A/B slot content extent")
+    digest = hashlib.sha256()
+    image.seek(start_block * SECTOR_SIZE)
+    remaining = block_count * SECTOR_SIZE
+    relative_offset = 0
+    while remaining:
+        chunk = image.read(min(remaining, 1 * 1_024 * 1_024))
+        if not chunk:
+            raise MediaError("truncated A/B slot content extent")
+        normalized = bytearray(chunk)
+        chunk_end = relative_offset + len(normalized)
+        for boot_sector in AB_SLOT_BOOT_SECTORS:
+            field_offset = (
+                boot_sector * SECTOR_SIZE + FAT32_HIDDEN_SECTORS_OFFSET
+            )
+            if relative_offset <= field_offset < chunk_end:
+                local_offset = field_offset - relative_offset
+                if local_offset + 4 > len(normalized):
+                    raise MediaError("split FAT32 hidden-sector field")
+                if struct.unpack_from("<I", normalized, local_offset)[0] \
+                        != start_block:
+                    raise MediaError(
+                        "A/B FAT32 hidden sectors disagree with partition start"
+                    )
+                normalized[local_offset:local_offset + 4] = bytes(4)
+        digest.update(normalized)
+        relative_offset = chunk_end
         remaining -= len(chunk)
     return digest.digest()
 
@@ -1121,7 +1410,8 @@ def build_image(
                 autoboot=SELECTOR_AUTOBOOT_A,
                 rescue_config=rescue_files["config.txt"],
                 kernel=rescue_files["kernel8.img"],
-                device_tree=rescue_files["rescue.dtb"],
+                device_tree=rescue_files["bcm2712-rpi-5-b.dtb"],
+                dwc2_overlay=rescue_files["overlays/dwc2.dtbo"],
             ).write()
             FAT32Volume(
                 image,
@@ -1130,7 +1420,6 @@ def build_image(
                 files=files,
                 volume_id=AB_SLOT_VOLUME_ID,
                 volume_label=AB_SLOT_VOLUME_LABEL,
-                hidden_sectors=0,
             ).write()
             FAT32Volume(
                 image,
@@ -1139,21 +1428,30 @@ def build_image(
                 files=files,
                 volume_id=AB_SLOT_VOLUME_ID,
                 volume_label=AB_SLOT_VOLUME_LABEL,
-                hidden_sectors=0,
             ).write()
 
-            slot_a_digest = sha256_extent(
+            slot_a_raw_digest = sha256_extent(
                 image,
                 slot_a_start,
                 slot_sectors,
             )
-            slot_b_digest = sha256_extent(
+            slot_b_raw_digest = sha256_extent(
+                image,
+                slot_b_start,
+                slot_sectors,
+            )
+            slot_a_digest = sha256_ab_slot_content(
+                image,
+                slot_a_start,
+                slot_sectors,
+            )
+            slot_b_digest = sha256_ab_slot_content(
                 image,
                 slot_b_start,
                 slot_sectors,
             )
             if slot_a_digest != slot_b_digest:
-                raise MediaError("fresh A/B slots are not byte-identical")
+                raise MediaError("fresh A/B slots are not semantically identical")
             boot_control = initial_boot_control_record(
                 slot_digest=slot_a_digest,
                 slot_block_count=slot_sectors,
@@ -1211,14 +1509,16 @@ def build_image(
                 "type": FAT32_LBA_TYPE,
                 "start_block": slot_a_start,
                 "block_count": slot_sectors,
-                "image_sha256": slot_a_digest.hex(),
+                "image_sha256": slot_a_raw_digest.hex(),
+                "content_sha256": slot_a_digest.hex(),
             },
             "B": {
                 "index": 3,
                 "type": FAT32_LBA_TYPE,
                 "start_block": slot_b_start,
                 "block_count": slot_sectors,
-                "image_sha256": slot_b_digest.hex(),
+                "image_sha256": slot_b_raw_digest.hex(),
+                "content_sha256": slot_b_digest.hex(),
             },
         },
         "data": {
@@ -1327,7 +1627,7 @@ class FAT32Reader:
             or (
                 validate_hidden_sectors
                 and hidden_sectors
-                    != (0 if canonical_hidden_sectors else self.start)
+                    != self.start
             )
             or total_sectors != self.count
             or boot[82:90] != b"FAT32   "
@@ -2477,6 +2777,11 @@ def inspect_ab_boot_slot(
             partition,
             canonical_hidden_sectors=True,
         )
+        report["content_sha256"] = sha256_ab_slot_content(
+            image,
+            int(partition["start_block"]),
+            int(partition["block_count"]),
+        ).hex()
     except MediaError as error:
         report["valid"] = False
         report["validation_error"] = str(error)
@@ -2521,8 +2826,10 @@ def reconcile_ab_transaction(
         raise MediaError(
             f"A/B confirmed boot slot is not a valid payload: {detail}"
         )
-    if confirmed_report["image_sha256"] != newest.get("confirmed_digest"):
-        raise MediaError("A/B confirmed boot slot digest disagrees with journal")
+    if confirmed_report["content_sha256"] != newest.get("confirmed_digest"):
+        raise MediaError(
+            "A/B confirmed boot-slot content digest disagrees with journal"
+        )
 
     repair_target = confirmed
     allowed_defaults = {confirmed}
@@ -2551,8 +2858,10 @@ def reconcile_ab_transaction(
             raise MediaError(
                 f"A/B completed candidate slot is not a valid payload: {detail}"
             )
-        if candidate_report["image_sha256"] != newest.get("candidate_digest"):
-            raise MediaError("A/B completed candidate digest disagrees with journal")
+        if candidate_report["content_sha256"] != newest.get("candidate_digest"):
+            raise MediaError(
+                "A/B completed candidate content digest disagrees with journal"
+            )
     elif phase == "stable":
         # A failed trial may leave a different but complete release in the
         # peer. Stable state still requires both partitions to be parseable.
@@ -2572,6 +2881,11 @@ def reconcile_ab_transaction(
         and slot_reports["A"]["image_sha256"]
             == slot_reports["B"]["image_sha256"]
     )
+    semantic_converged = (
+        both_valid
+        and slot_reports["A"].get("content_sha256")
+            == slot_reports["B"].get("content_sha256")
+    )
     manifest_converged = False
     if both_valid:
         files_a = slot_reports["A"].get("files")
@@ -2590,6 +2904,7 @@ def reconcile_ab_transaction(
         "transaction_consistent": selector_default in allowed_defaults,
         "both_slots_valid": both_valid,
         "manifest_converged": manifest_converged,
+        "semantic_slots_converged": semantic_converged,
         "raw_slots_converged": raw_converged,
     }
 

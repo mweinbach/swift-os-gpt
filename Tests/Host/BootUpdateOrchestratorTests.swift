@@ -509,11 +509,42 @@ struct BootUpdateOrchestratorTests {
                     digest: newDigest,
                     trialToken: 99,
                     writePolicy: .direct,
+                    metadataPolicy: .none,
                     nextBlock: 0,
                     blockCount: 1
                 )
             ) == .failure(.invalidVerifiedProgress),
             "confirmed slot was writable as candidate"
+        )
+        guard case .stageCandidate(let authorizedStage) = takeAction(
+            BootUpdateOrchestrator.nextAction(
+                for: writing,
+                observation: normal(.a),
+                layout: layout,
+                maximumBlockCount: 1
+            )
+        ) else { fail("candidate staging fixture") }
+        expect(
+            BootUpdateOrchestrator.recordVerifiedCandidateProgress(
+                in: writing,
+                observation: normal(.a),
+                layout: layout,
+                completed: BootCandidateStageAction(
+                    slot: authorizedStage.slot,
+                    destination: authorizedStage.destination,
+                    generation: authorizedStage.generation,
+                    digest: authorizedStage.digest,
+                    trialToken: authorizedStage.trialToken,
+                    writePolicy: authorizedStage.writePolicy,
+                    metadataPolicy: .fat32HiddenSectors(
+                        primaryBootBlock: 0,
+                        backupBootBlock: 1
+                    ),
+                    nextBlock: authorizedStage.nextBlock,
+                    blockCount: authorizedStage.blockCount
+                )
+            ) == .failure(.invalidVerifiedProgress),
+            "staging progress forged a different metadata normalization"
         )
 
         let exhausted = BootControlRecord(
@@ -669,6 +700,11 @@ struct BootUpdateOrchestratorTests {
                 == RaspberryPiABUpdateLayout.mediaLayoutFingerprint,
             "Pi media fingerprint was not attached to the shared layout"
         )
+        expect(
+            layout.metadataPolicy
+                == RaspberryPiABUpdateLayout.metadataPolicy,
+            "Pi location-specific FAT32 metadata policy was not attached"
+        )
         var record = BootControlRecord.initial(
             confirmedSlot: .a,
             generation: 1,
@@ -697,6 +733,8 @@ struct BootUpdateOrchestratorTests {
         )
         expect(
             payload.writePolicy == RaspberryPiABUpdateLayout.writePolicy
+                && payload.metadataPolicy
+                    == RaspberryPiABUpdateLayout.metadataPolicy
                 && payload.nextBlock == 0 && payload.blockCount == 8,
             "Pi payload action crossed into FAT activation blocks"
         )
@@ -734,6 +772,7 @@ struct BootUpdateOrchestratorTests {
                     digest: backupBoot.digest,
                     trialToken: backupBoot.trialToken,
                     writePolicy: backupBoot.writePolicy,
+                    metadataPolicy: backupBoot.metadataPolicy,
                     nextBlock: backupBoot.nextBlock,
                     blockCount: 2
                 )

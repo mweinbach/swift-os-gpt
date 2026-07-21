@@ -178,7 +178,10 @@ struct RaspberryPi5ABUpdatePortTests {
                     expect(port.mirrorPeer(action), "verified mirror chunk")
                     progress += count
                 }
-                expectSlotsEqual(on: pointer.pointee, media: media)
+                expectSlotsSemanticallyEqual(
+                    on: pointer.pointee,
+                    media: media
+                )
 
                 let mirrorVerification = BootPeerMirrorVerificationAction(
                     sourceSlot: .a,
@@ -235,6 +238,7 @@ struct RaspberryPi5ABUpdatePortTests {
                     ),
                     trialToken: 9,
                     writePolicy: RaspberryPiABUpdateLayout.writePolicy,
+                    metadataPolicy: RaspberryPiABUpdateLayout.metadataPolicy,
                     nextBlock: 0,
                     blockCount: 1
                 )
@@ -596,6 +600,13 @@ struct RaspberryPi5ABUpdatePortTests {
             )
             index += 1
         }
+        for relativeBlock: UInt64 in [0, 6] {
+            writeLE32(
+                UInt32(media.slotA.range.startBlock),
+                on: device,
+                at: start + Int(relativeBlock) * 512 + 28
+            )
+        }
     }
 
     private static func digestOfSlotA(
@@ -603,21 +614,40 @@ struct RaspberryPi5ABUpdatePortTests {
         media: SwiftOSABMediaPartitions
     ) -> BootImageDigest {
         let start = Int(media.slotA.range.startBlock) * 512
-        let count = Int(media.slotA.range.blockCount) * 512
         var hash = USBKernelUpdateSHA256()
-        let updated = device.bytes.withUnsafeBytes { bytes in
-            hash.update(UnsafeRawBufferPointer(
-                start: bytes.baseAddress!.advanced(by: start),
-                count: count
-            ))
-        }
-        expect(updated, "slot digest input")
+        var relativeBlock: UInt64 = 0
         let pointer = UnsafeMutableRawPointer.allocate(
-            byteCount: 32,
+            byteCount: 512,
             alignment: 8
         )
         defer { pointer.deallocate() }
-        let bytes = UnsafeMutableRawBufferPointer(start: pointer, count: 32)
+        let block = UnsafeMutableRawBufferPointer(start: pointer, count: 512)
+        var updated = true
+        while relativeBlock < slotBlockCount && updated {
+            var byte = 0
+            let source = start + Int(relativeBlock) * 512
+            while byte < 512 {
+                block[byte] = device.bytes[source + byte]
+                byte += 1
+            }
+            updated = RaspberryPiABUpdateLayout.metadataPolicy
+                .normalizeForContentDigest(
+                    relativeBlock: relativeBlock,
+                    slotStartBlock: media.slotA.range.startBlock,
+                    bytes: block
+                ) && hash.update(UnsafeRawBufferPointer(block))
+            relativeBlock += 1
+        }
+        expect(updated, "slot digest input")
+        let digestPointer = UnsafeMutableRawPointer.allocate(
+            byteCount: 32,
+            alignment: 8
+        )
+        defer { digestPointer.deallocate() }
+        let bytes = UnsafeMutableRawBufferPointer(
+            start: digestPointer,
+            count: 32
+        )
         expect(
             hash.finalizedDigest().write(to: bytes),
             "slot digest encoding"
@@ -625,7 +655,7 @@ struct RaspberryPi5ABUpdatePortTests {
         return BootImageDigest(bytes: UnsafeRawBufferPointer(bytes))!
     }
 
-    private static func expectSlotsEqual(
+    private static func expectSlotsSemanticallyEqual(
         on device: MemoryBlockDevice,
         media: SwiftOSABMediaPartitions
     ) {
@@ -634,12 +664,40 @@ struct RaspberryPi5ABUpdatePortTests {
         let count = Int(media.slotA.range.blockCount) * 512
         var index = 0
         while index < count {
+            let relativeBlock = index / 512
+            let byteInBlock = index % 512
+            let isHiddenSectorByte = (relativeBlock == 0 || relativeBlock == 6)
+                && byteInBlock >= 28
+                && byteInBlock < 32
+            if isHiddenSectorByte {
+                index += 1
+                continue
+            }
             expect(
                 device.bytes[a + index] == device.bytes[b + index],
-                "activation-last mirror did not converge"
+                "activation-last mirror did not semantically converge"
             )
             index += 1
         }
+        for relativeBlock in [0, 6] {
+            expect(
+                readLE32(device.bytes, at: a + relativeBlock * 512 + 28)
+                    == UInt32(media.slotA.range.startBlock),
+                "source FAT32 hidden sectors do not name slot A"
+            )
+            expect(
+                readLE32(device.bytes, at: b + relativeBlock * 512 + 28)
+                    == UInt32(media.slotB.range.startBlock),
+                "destination FAT32 hidden sectors do not name slot B"
+            )
+        }
+    }
+
+    private static func readLE32(_ bytes: [UInt8], at offset: Int) -> UInt32 {
+        UInt32(bytes[offset])
+            | UInt32(bytes[offset + 1]) << 8
+            | UInt32(bytes[offset + 2]) << 16
+            | UInt32(bytes[offset + 3]) << 24
     }
 
     private static func withScratch(

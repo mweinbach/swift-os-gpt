@@ -73,19 +73,25 @@ must both match that recorded revision.
 tools/build_rpi5_media.py converts this validated directory into a sparse,
 deterministic MBR image with a FAT12 selector/rescue partition, complete 128 MiB
 FAT32 A and B payload slots, and a type-0xda SwiftOS data partition. Fresh A/B
-slots share the canonical SWIFTOS-AB volume identity and are byte-identical so
-they can be copied and verified as raw extents. The data partition retains
+slots share the canonical SWIFTOS-AB volume identity and equivalent content,
+but each primary and backup FAT32 boot sector records its actual partition LBA
+in BPB_HiddSec. The update journal identifies the release with a content digest
+that validates and normalizes only those location-specific fields; exact raw
+slot hashes remain distinct. The data partition retains
 duplicate signed volume headers, an initially seeded redundant A/B journal, the
 bounded kernel log, and SwiftFS user data.
 
 Partition one contains autoboot.txt plus a factory rescue config.txt,
-kernel8.img, and rescue.dtb. A CRC-protected manifest integrity-checks the rescue
-file sizes and SHA-256 values. Transactional selector code validates the entire
-fixed FAT12 structure and rescue payload before it may rewrite only
-autoboot.txt's partition-relative sector 15. The rescue currently reuses this
-release's full kernel and DTB under a no-overlay recovery config; it is a
-capacity-constrained, hardware-unverified factory snapshot, not yet a separately
-pinned minimal rescue image.
+kernel8.img, the canonical bcm2712-rpi-5-b.dtb, and overlays/dwc2.dtbo. Valid
+VFAT long-name entries accompany every visible lowercase name so factory Pi 5
+EEPROM firmware does not depend on later fixes for short-name-only FAT files. A
+CRC-protected manifest integrity-checks all four rescue-file sizes and SHA-256
+values. Transactional selector code validates the entire fixed FAT12 structure
+and rescue payload before it may rewrite only autoboot.txt's partition-relative
+sector 15. The rescue currently reuses this release's full kernel, DTB, and
+pinned USB-C peripheral overlay; it is a capacity-constrained,
+hardware-unverified factory snapshot, not yet a separately pinned minimal
+rescue image.
 
 Rescue fallback depends on the installed EEPROM bootloader configuration, not
 only these SD bytes. Physical acceptance must retain the exact EEPROM build,

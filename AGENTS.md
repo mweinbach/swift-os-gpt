@@ -34,7 +34,10 @@ link against Darwin or any Apple framework.
   canonical FAT32 `SWIFTOS-AB` payload slots at MBR entries two and three, and
   type-`0xda` data partition four. The payload slots deliberately share their
   FAT32 identity and must be distinguished by verified partition geometry and
-  firmware boot identity, never by volume label. New media images use v2.
+  firmware boot identity, never by volume label. Each slot's primary and backup
+  FAT32 boot sectors must record that slot's actual partition start in
+  `BPB_HiddSec`; those four-byte fields are the intentional raw-byte difference
+  between otherwise equivalent fresh slots. New media images use v2.
   Copying files cannot turn a v1 card into v2.
 - Treat first-time media initialization, v1-to-v2 migration, and routine v2
   slot updates as three different operations. Writing
@@ -52,9 +55,12 @@ link against Darwin or any Apple framework.
   arena, or SwiftFS data; only the reserved redundant boot-control journal
   bytes may change. Before staging, invalidate and read back the inactive
   FAT32 backup boot sector 6 and primary boot sector 0. Copy and verify every
-  other sector, then commit sector 6 and sector 0 separately in that order;
-  hash, synchronize, and read back the complete raw slot before a one-shot
-  trial boot. The selector/rescue partition is immutable during staging and
+  other sector, then commit sector 6 and sector 0 separately in that order,
+  encoding and verifying the inactive slot's actual start LBA in both
+  `BPB_HiddSec` fields. Synchronize and read back the complete raw destination,
+  and verify its location-neutral content digest after validating and
+  normalizing only those two fields, before a one-shot trial boot. The
+  selector/rescue partition is immutable during staging and
   trial. Only the transactional update service may rewrite its sole mutable
   partition-relative sector 15 after validating both FAT copies, the root
   directory, rescue manifest, and every rescue-file digest and after the
@@ -65,9 +71,10 @@ link against Darwin or any Apple framework.
   it back into the peer with the same activation-last policy. A failed or hung
   one-shot trial is intended to return through partition zero and the unchanged
   selector to the prior confirmed slot. Preserve the partition-one factory
-  rescue (`config.txt`, `kernel8.img`, and `rescue.dtb`) throughout routine
-  updates. It currently reuses the full release kernel and DTB; a future media
-  revision should pin a smaller rescue-specific build. Physical Pi tryboot,
+  rescue (`config.txt`, `kernel8.img`, canonical `bcm2712-rpi-5-b.dtb`, and
+  `overlays/dwc2.dtbo`) throughout routine updates. It currently reuses the
+  full release kernel, DTB, and pinned USB-C overlay; a future media revision
+  should pin a smaller rescue-specific build. Physical Pi tryboot,
   watchdog rollback, rescue fallback, and microSD power-cut behavior remain
   unverified, so never describe this design as unbrickable.
   Tryboot watchdog probation begins after the required initial adoption/service

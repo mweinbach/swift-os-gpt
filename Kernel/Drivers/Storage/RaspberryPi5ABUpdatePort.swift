@@ -307,6 +307,11 @@ struct RaspberryPi5ABUpdatePort<Device: BlockDevice>:
                 into: block
             )
             guard result == .success,
+                  layout.metadataPolicy.normalizeForContentDigest(
+                      relativeBlock: state.nextBlock,
+                      slotStartBlock: range.startBlock,
+                      bytes: block
+                  ),
                   let address = block.baseAddress,
                   state.hash.update(UnsafeRawBufferPointer(
                       start: address,

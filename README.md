@@ -234,8 +234,11 @@ adds the DTB and official `dwc2.dtbo` from that revision with byte hashes. It al
 produces a sparse format-v2 MBR media image with a small invariant FAT12
 selector/rescue environment, complete 128 MiB FAT32 A and B payload slots, and
 a type-`0xda` data partition with duplicate magic- and CRC-validated
-superblocks. Fresh slots have one canonical
-`SWIFTOS-AB` FAT32 identity and byte-identical raw contents; logical A/B
+superblocks. Fresh slots have one canonical `SWIFTOS-AB` FAT32 identity and
+equivalent content, while each primary and backup boot sector records its own
+partition start in `BPB_HiddSec`. The journal uses a location-neutral content
+digest that first validates those fields and then normalizes only their four
+bytes; separate raw hashes preserve exact on-media evidence. Logical A/B
 identity comes from verified partition geometry and the firmware-reported boot
 partition. The data superblocks seed two CRC-protected replicas of the initial
 stable-A boot-control record. Set `RPI5_MEDIA_BLOCK_COUNT` to the exact target-
@@ -288,9 +291,12 @@ whole disk; never reuse an earlier `/dev/diskN` or touch an unrelated disk. On
 v2, the selector is immutable during candidate staging and trial; do not edit
 its `autoboot.txt` or use a manual file copy as a substitute for the
 transaction. Partition one also holds a digest-checked rescue `config.txt`,
-`kernel8.img`, and `rescue.dtb`; only the 512-byte `autoboot.txt` data sector is
-writable through the strict selector service. The rescue is currently a
-capacity-constrained snapshot of the full release kernel and DTB, not a
+`kernel8.img`, canonical `bcm2712-rpi-5-b.dtb`, and
+`overlays/dwc2.dtbo`; only the 512-byte `autoboot.txt` data sector is writable
+through the strict selector service. Valid VFAT long names accompany their
+deterministic short aliases so the fallback does not rely on newer EEPROM fixes
+for short-name-only FAT files. The rescue is currently a capacity-constrained
+snapshot of the full release kernel, DTB, and USB-C diagnostic overlay, not a
 separately pinned minimal recovery image. The production Pi SD owner now gives
 boot-control reconciliation priority before publishing SwiftFS or persistent-log
 aliases. It can recover the current boot, cooperatively hash slots, repair an

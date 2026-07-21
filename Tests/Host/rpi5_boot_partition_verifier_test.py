@@ -236,6 +236,14 @@ def main() -> int:
             and report["boot_slots"]["B"]["manifest"]["matched_expected_copy"],
             "trusted manifest was not checked against both slots",
         )
+        slot_b_start, _ = boot_extent(pristine, "b")
+        require(
+            report["boot_slots"]["A"]["fat32"]["hidden_sectors"]
+                == boot_start
+            and report["boot_slots"]["B"]["fat32"]["hidden_sectors"]
+                == slot_b_start,
+            "whole-media verifier lost location-specific BPB_HiddSec",
+        )
 
         metadata = root / "host-metadata.img"
         shutil.copyfile(pristine, metadata)
@@ -260,8 +268,8 @@ def main() -> int:
         )
         require(partition_report["source"]["layout"] == "fat32-partition-image",
                 "partition-image mode was not reported")
-        require(partition_report["fat32"]["hidden_sectors"] == 0,
-                "canonical A/B slot gained partition-specific metadata")
+        require(partition_report["fat32"]["hidden_sectors"] == boot_start,
+                "partition capture lost its physical BPB_HiddSec evidence")
 
         corrupt = root / "corrupt-required-file.img"
         shutil.copyfile(pristine, corrupt)

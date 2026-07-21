@@ -263,6 +263,9 @@ private func serviceRaspberryPi5Watchdog(
     platform: Platform
 ) {
     guard platform.kind == .raspberryPi5 else { return }
+    // Ordinary payload, rescue, unsupported, and unidentified boots do not
+    // adopt a watchdog, so their early checkpoints are deliberate no-ops.
+    guard RaspberryPi5WatchdogRuntime.isActive else { return }
     guard RaspberryPi5WatchdogRuntime.serviceNow() else {
         console.write("SWIFTOS:PANIC:WATCHDOG_CHECKPOINT\n")
         park()

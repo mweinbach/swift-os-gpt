@@ -391,15 +391,24 @@ mapping is exposed directly to EL0.
 
 Format-v2 media additionally gives a boot-time A/B reconciliation phase priority
 before either SD alias is published. The same controller record opens the
-redundant journal, hashes at most 64 KiB per cooperative verification pass,
-repairs only the selector's authorized sector from rescue, and resumes
-activation-last peer mirroring. A safe candidate or peer failure can suspend the
+redundant journal, hashes at most 64 KiB per cooperative verification pass, and
+uses a location-neutral content identity that validates each slot's actual
+`BPB_HiddSec` values before normalizing them. Peer mirroring rewrites those
+fields for the destination while retaining backup-sector-then-primary
+activation order. Reconciliation repairs only the selector's authorized sector
+from rescue. A safe candidate or peer failure can suspend the
 transaction for a later boot and then permit confirmed-data aliases; journal or
 selector durability ambiguity instead quarantines later SD work before reset.
-Watchdog adoption
-performs one initial service kick, after which tryboot probation suppresses all
-later kicks until the three-interrupt timer proof and exact journal health
-transition both succeed. Persistent release ingress and authenticity are still
+The firmware and kernel watchdog are enabled only by the `[tryboot]` config
+filter. An exact firmware-observed tryboot payload must adopt the watchdog and
+perform one initial service kick, after which probation suppresses all later
+kicks until the three-interrupt timer proof and exact journal health transition
+both succeed. Stable payload, rescue, unsupported-partition, and missing boot
+identity contexts do not access PM watchdog MMIO during early boot. The
+DT-validated aperture remains mapped solely so an explicit no-return update or
+recovery reset can program it after quiescence; an unavailable reset resource
+parks the kernel instead of resuming. Persistent release ingress and
+authenticity are still
 absent: the port rejects candidate staging, no trusted capsule signature,
 signing-key policy, or authenticated-host policy exists, and hashes/CRCs provide
 integrity only. `SUPD` remains volatile RAM chainload. The production wiring

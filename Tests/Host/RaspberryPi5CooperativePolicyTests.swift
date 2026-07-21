@@ -3,17 +3,39 @@ struct RaspberryPi5CooperativePolicyTests {
     static func main() {
         selectsExactlyOneBlockingBootstrapPerPass()
         permitsSteadyNetworkAndOneStorageStepTogether()
+        adoptsWatchdogOnlyForObservedTryBootPayload()
         suppressesWatchdogServiceUntilDurableTrialHealth()
         reportsFlushAndLossMarkersExactlyOnce()
-        print("Raspberry Pi 5 cooperative policy: 4 groups passed")
+        print("Raspberry Pi 5 cooperative policy: 5 groups passed")
+    }
+
+    private static func adoptsWatchdogOnlyForObservedTryBootPayload() {
+        expect(
+            RaspberryPi5WatchdogBootPolicy.requiresAdoption(
+                payloadWasTryBoot: true
+            ),
+            "firmware-observed tryboot payload did not require adoption"
+        )
+        expect(
+            !RaspberryPi5WatchdogBootPolicy.requiresAdoption(
+                payloadWasTryBoot: false
+            ),
+            "stable payload was allowed to touch watchdog MMIO"
+        )
+        expect(
+            !RaspberryPi5WatchdogBootPolicy.requiresAdoption(
+                payloadWasTryBoot: nil
+            ),
+            "non-payload or missing firmware identity required adoption"
+        )
     }
 
     private static func suppressesWatchdogServiceUntilDurableTrialHealth() {
         var normal = RaspberryPi5WatchdogProbationPolicy(
             isTryBootCandidate: false
         )
-        expect(normal.serviceAction == .programService,
-               "normal boot entered watchdog probation")
+        expect(normal.serviceAction == .inactive,
+               "normal boot gained watchdog service authority")
         expect(!normal.releaseAfterDurableCandidateHealth(),
                "normal boot manufactured a trial-health release")
 

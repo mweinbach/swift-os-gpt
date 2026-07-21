@@ -109,10 +109,17 @@ def validate_successful_package(
             "config does not disable Linux-specific firmware image checks")
     require("bootloader_update=0\n" in config,
             "config does not isolate EEPROM updates from SD slot updates")
-    require("kernel_watchdog_timeout=15\n" in config,
-            "config does not arm the kernel rollback watchdog")
-    require("kernel_watchdog_partition=0\n" in config,
-            "watchdog reset does not return through the A/B selector")
+    tryboot_start = config.index("[tryboot]\n")
+    tryboot_end = config.index("[all]\n", tryboot_start)
+    tryboot_config = config[tryboot_start:tryboot_end]
+    require(config.count("kernel_watchdog_timeout=15\n") == 1,
+            "config must define exactly one kernel rollback timeout")
+    require("kernel_watchdog_timeout=15\n" in tryboot_config,
+            "kernel rollback watchdog is not scoped to tryboot")
+    require(config.count("kernel_watchdog_partition=0\n") == 1,
+            "config must define exactly one watchdog reset partition")
+    require("kernel_watchdog_partition=0\n" in tryboot_config,
+            "tryboot watchdog reset does not return through the A/B selector")
     require("enable_uart=1\n" in config,
             "config does not retain the UART10 early console")
     require("uart_2ndstage=1\n" in config,
@@ -132,12 +139,14 @@ def validate_successful_package(
     rescue_config = (output / "RESCUE-CONFIG.txt").read_text()
     require("kernel=kernel8.img\n" in rescue_config,
             "rescue config does not select the invariant kernel name")
-    require("device_tree=rescue.dtb\n" in rescue_config,
-            "rescue config does not select the invariant DTB name")
+    require("device_tree=bcm2712-rpi-5-b.dtb\n" in rescue_config,
+            "rescue config does not select the canonical Pi 5 DTB name")
     require("bootloader_update=0\n" in rescue_config,
             "rescue config does not isolate EEPROM updates")
-    require("dtoverlay=" not in rescue_config,
-            "rescue config unexpectedly depends on an overlay directory")
+    require("kernel_watchdog_" not in rescue_config,
+            "rescue config unexpectedly arms the candidate watchdog")
+    require("dtoverlay=dwc2,dr_mode=peripheral\n" in rescue_config,
+            "rescue config does not retain USB-C diagnostics")
 
     metadata = dict(
         line.split("=", 1)

@@ -1,3 +1,6 @@
+/// Board-neutral full-slot content identity. A layout with physical metadata
+/// differences normalizes only those validated bytes before hashing, so the
+/// same release has one journal identity in either slot.
 struct BootImageDigest: Equatable {
     let word0: UInt64
     let word1: UInt64

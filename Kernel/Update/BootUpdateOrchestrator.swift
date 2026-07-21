@@ -6,22 +6,26 @@ struct BootSlotLayout: Equatable {
     let slotB: BlockDeviceRange
     let mediaLayoutFingerprint: UInt64
     let writePolicy: BootSlotWritePolicy
+    let metadataPolicy: BootSlotMetadataPolicy
 
     init?(
         slotA: BlockDeviceRange,
         slotB: BlockDeviceRange,
         mediaLayoutFingerprint: UInt64,
-        writePolicy: BootSlotWritePolicy = .direct
+        writePolicy: BootSlotWritePolicy = .direct,
+        metadataPolicy: BootSlotMetadataPolicy = .none
     ) {
         guard slotA.blockCount == slotB.blockCount,
               !slotA.overlaps(slotB),
               mediaLayoutFingerprint != 0,
-              writePolicy.isValid(blockCount: slotA.blockCount)
+              writePolicy.isValid(blockCount: slotA.blockCount),
+              metadataPolicy.isValid(blockCount: slotA.blockCount)
         else { return nil }
         self.slotA = slotA
         self.slotB = slotB
         self.mediaLayoutFingerprint = mediaLayoutFingerprint
         self.writePolicy = writePolicy
+        self.metadataPolicy = metadataPolicy
     }
 
     var slotBlockCount: UInt64 { slotA.blockCount }
@@ -38,15 +42,17 @@ struct BootSlotLayout: Equatable {
         return VerifiedSlotCopyPlan(
             source: range(for: source),
             destination: range(for: destination),
-            writePolicy: writePolicy
+            writePolicy: writePolicy,
+            metadataPolicy: metadataPolicy
         )
     }
 }
 
-/// Identity carried by a complete, integrity-validated release capsule. The
-/// transport owns stream verification; a future signature policy remains a
-/// separate trust gate. This immutable identity is journaled before any
-/// inactive-slot write begins.
+/// Location-neutral identity carried by a complete, integrity-validated
+/// release capsule. The transport owns stream verification and applies the
+/// layout's metadata policy before hashing or writing location-specific bytes;
+/// a future signature policy remains a separate trust gate. This immutable
+/// identity is journaled before any inactive-slot write begins.
 struct BootReleaseDescriptor: Equatable {
     let generation: UInt64
     let digest: BootImageDigest
@@ -78,6 +84,7 @@ struct BootCandidateStageAction: Equatable {
     let digest: BootImageDigest
     let trialToken: UInt64
     let writePolicy: BootSlotWritePolicy
+    let metadataPolicy: BootSlotMetadataPolicy
     let nextBlock: UInt64
     let blockCount: UInt64
 }
@@ -108,8 +115,9 @@ struct BootSelectorCommitAction: Equatable {
 
 /// Narrow recovery-environment authority for repairing a torn selector after
 /// candidate health was already durably recorded. A platform port must hash
-/// both complete raw slots against these identities and revalidate immutable
-/// recovery media before it writes the selector. The journal is deliberately
+/// both complete slots under the layout's content-identity policy and
+/// revalidate immutable recovery media before it writes the selector. The
+/// journal is deliberately
 /// left in `selectorCommitPending`; a subsequent normal payload boot is the
 /// evidence that confirms the candidate and starts peer convergence.
 struct BootRecoverySelectorRepairAction: Equatable {
@@ -333,6 +341,7 @@ enum BootUpdateOrchestrator {
                 digest: record.candidateDigest,
                 trialToken: record.trialToken,
                 writePolicy: layout.writePolicy,
+                metadataPolicy: layout.metadataPolicy,
                 nextBlock: record.nextCandidateBlock,
                 blockCount: count
             )))
@@ -451,6 +460,7 @@ enum BootUpdateOrchestrator {
               action.digest == record.candidateDigest,
               action.trialToken == record.trialToken,
               action.writePolicy == layout.writePolicy,
+              action.metadataPolicy == layout.metadataPolicy,
               action.nextBlock == record.nextCandidateBlock,
               validPolicyProgress(
                 from: action.nextBlock,
