@@ -542,6 +542,21 @@ struct FlattenedDeviceTree {
         ) != nil
     }
 
+    /// Whether the selected enabled compatible node exists, independent of
+    /// whether its register resource can be decoded. This lets write-capable
+    /// drivers reject duplicate compatible owners even when a duplicate has
+    /// malformed or missing `reg` data.
+    func hasCompatibleNode(
+        _ compatibility: StaticString,
+        nodeIndex: Int
+    ) -> Bool {
+        guard nodeIndex >= 0 else { return false }
+        return compatibleNodeOffset(
+            compatibility,
+            nodeIndex: nodeIndex
+        ) != nil
+    }
+
     func contains(
         compatibleWith compatibility: StaticString,
         cStringProperty property: StaticString,
@@ -601,6 +616,27 @@ struct FlattenedDeviceTree {
               )
         else { return nil }
         return propertyBytes(atNode: nodeOffset, property: property)
+    }
+
+    /// Reads one property from an exact two-component node hierarchy rooted
+    /// directly below `/`. This is intentionally different from compatible
+    /// search: firmware-owned policy such as `/chosen/bootloader` must never
+    /// be taken from a same-named descendant or a merely compatible device.
+    /// Duplicate sibling names fail closed.
+    func propertyCells(
+        rootChildNamed rootChild: StaticString,
+        childNamed child: StaticString,
+        property: StaticString
+    ) -> DeviceTreePropertyCells? {
+        guard let rootChildOffset = uniqueDirectChildNodeOffset(
+                  atNode: structureStart,
+                  named: rootChild
+              ), let childOffset = uniqueDirectChildNodeOffset(
+                  atNode: rootChildOffset,
+                  named: child
+              )
+        else { return nil }
+        return propertyCells(atNode: childOffset, property: property)
     }
 
     /// Resolves one Arm GIC interrupt from a compatible node. Tuple width is
@@ -1678,6 +1714,102 @@ struct FlattenedDeviceTree {
         )
     }
 
+    /// Finds exactly one immediate child without allocating or broadening a
+    /// hierarchical lookup into a tree-wide name search.
+    private func uniqueDirectChildNodeOffset(
+        atNode parentOffset: UInt,
+        named expected: StaticString
+    ) -> UInt? {
+        guard readStructureWord(at: parentOffset) == Self.beginNode else {
+            return nil
+        }
+        var cursor = parentOffset + 4
+        guard skipNodeName(cursor: &cursor) else { return nil }
+        var match: UInt?
+        var sawChild = false
+
+        while cursor < structureEnd {
+            guard let token = readStructureWord(at: cursor) else { return nil }
+            switch token {
+            case Self.property:
+                guard !sawChild,
+                      let rawLength = readStructureWord(at: cursor + 4),
+                      readStructureWord(at: cursor + 8) != nil
+                else { return nil }
+                let valueOffset = cursor + 12
+                guard Self.range(
+                          offset: valueOffset,
+                          length: UInt(rawLength),
+                          fits: structureEnd
+                      ), let next = Self.align4(valueOffset + UInt(rawLength)),
+                      next <= structureEnd
+                else { return nil }
+                cursor = next
+            case Self.noOperation:
+                cursor += 4
+            case Self.beginNode:
+                sawChild = true
+                let childOffset = cursor
+                let nameOffset = cursor + 4
+                let matches = nodeNameExactly(
+                    at: nameOffset,
+                    equals: expected
+                )
+                guard skipNode(cursor: &cursor) else { return nil }
+                if matches {
+                    guard match == nil else { return nil }
+                    match = childOffset
+                }
+            case Self.endNode:
+                return match
+            default:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    /// Advances from a BEGIN_NODE token through its matching END_NODE token.
+    private func skipNode(cursor: inout UInt) -> Bool {
+        guard readStructureWord(at: cursor) == Self.beginNode else {
+            return false
+        }
+        cursor += 4
+        guard skipNodeName(cursor: &cursor) else { return false }
+        var depth = 1
+        while cursor < structureEnd {
+            guard let token = readStructureWord(at: cursor) else { return false }
+            switch token {
+            case Self.property:
+                guard let rawLength = readStructureWord(at: cursor + 4),
+                      readStructureWord(at: cursor + 8) != nil
+                else { return false }
+                let valueOffset = cursor + 12
+                guard Self.range(
+                          offset: valueOffset,
+                          length: UInt(rawLength),
+                          fits: structureEnd
+                      ), let next = Self.align4(valueOffset + UInt(rawLength)),
+                      next <= structureEnd
+                else { return false }
+                cursor = next
+            case Self.noOperation:
+                cursor += 4
+            case Self.beginNode:
+                depth += 1
+                cursor += 4
+                guard skipNodeName(cursor: &cursor) else { return false }
+            case Self.endNode:
+                cursor += 4
+                depth -= 1
+                if depth == 0 { return true }
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
     /// Finds a property on exactly one node without descending into children.
     /// Duplicate properties are malformed under DTSpec and are rejected.
     private func propertyLocation(
@@ -2370,6 +2502,21 @@ struct FlattenedDeviceTree {
             }
             let terminator = readByte(at: offset + UInt(expectedBytes.count))
             return terminator == 0 || terminator == UInt8(ascii: "@")
+        }
+    }
+
+    private func nodeNameExactly(
+        at offset: UInt,
+        equals expected: StaticString
+    ) -> Bool {
+        expected.withUTF8Buffer { expectedBytes in
+            var index = 0
+            while index < expectedBytes.count {
+                guard readByte(at: offset + UInt(index)) == expectedBytes[index]
+                else { return false }
+                index += 1
+            }
+            return readByte(at: offset + UInt(expectedBytes.count)) == 0
         }
     }
 

@@ -634,11 +634,13 @@ enum RaspberryPi5CooperativeRuntime {
         guard case .raspberryPi5 = board,
               RaspberryPi5StorageRuntime.hasCooperativeWork
                 || RP1GEMNetworkRuntime.hasCooperativeWork
+                || RaspberryPi5WatchdogRuntime.isActive
         else { return nil }
         return swiftOSServiceRaspberryPi5DeferredWork
     }
 
     static func serviceOnce() {
+        RaspberryPi5WatchdogRuntime.serviceIfDue()
         // Storage and Ethernet share the first USB-serviced pass as the origin
         // of their observation windows even though policy serializes their
         // later blocking bootstrap work.

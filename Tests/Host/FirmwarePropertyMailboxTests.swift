@@ -37,8 +37,10 @@ private final class MailboxRegisterBank {
 
     func respond() {
         requestWords.removeAll(keepingCapacity: true)
+        let byteCount = PhysicalBytes.readLE32(at: bufferCPUAddress)
+        let wordCount = Int(byteCount / 4)
         var index = 0
-        while index < 8 {
+        while index < wordCount {
             requestWords.append(
                 PhysicalBytes.readLE32(
                     at: bufferCPUAddress + UInt64(index * 4)
@@ -46,12 +48,19 @@ private final class MailboxRegisterBank {
             )
             index += 1
         }
+        let tag = PhysicalBytes.readLE32(at: bufferCPUAddress + 8)
         PhysicalBytes.writeLE32(0x8000_0000, at: bufferCPUAddress + 4)
-        PhysicalBytes.writeLE32(0x8000_0008, at: bufferCPUAddress + 16)
-        PhysicalBytes.writeLE32(
-            responsePowerState,
-            at: bufferCPUAddress + 24
-        )
+        if tag == 0x0002_8001 {
+            PhysicalBytes.writeLE32(0x8000_0008, at: bufferCPUAddress + 16)
+            PhysicalBytes.writeLE32(
+                responsePowerState,
+                at: bufferCPUAddress + 24
+            )
+        } else if tag == 0x0003_8064 {
+            PhysicalBytes.writeLE32(0x8000_0004, at: bufferCPUAddress + 16)
+        } else if tag == 0x0003_0048 {
+            PhysicalBytes.writeLE32(0x8000_0000, at: bufferCPUAddress + 16)
+        }
         switch responseMutation {
         case .none:
             break
@@ -136,6 +145,30 @@ private final class TestMailboxCache: FirmwareMailboxCacheMaintenance {
     }
 }
 
+private struct TestTryBootFirmware: RaspberryPiTryBootFirmwareInterface {
+    var armResult: FirmwareMailboxRebootResult
+    var notificationResult: FirmwareMailboxRebootResult
+    var armCallCount = 0
+    var notificationCallCount = 0
+
+    mutating func setRebootFlags(
+        _ flags: UInt32,
+        maximumPollCount: Int
+    ) -> FirmwareMailboxRebootResult {
+        guard flags == 1, maximumPollCount > 0 else { return .invalidFlags }
+        armCallCount += 1
+        return armResult
+    }
+
+    mutating func notifyReboot(
+        maximumPollCount: Int
+    ) -> FirmwareMailboxRebootResult {
+        guard maximumPollCount > 0 else { return .invalidPollLimit }
+        notificationCallCount += 1
+        return notificationResult
+    }
+}
+
 @main
 struct FirmwarePropertyMailboxTests {
     private static let bufferPhysicalAddress: UInt64 = 0x0010_0000
@@ -143,6 +176,8 @@ struct FirmwarePropertyMailboxTests {
 
     static func main() {
         validatesPowerOnRequestAndResponse()
+        validatesTryBootRebootRequestsAndResponses()
+        enforcesTryBootPreparationOrdering()
         pollsFullAndEmptyFIFOsWithinBounds()
         skipsUnrelatedMailboxMessages()
         classifiesPowerStateResponseSemantics()
@@ -150,7 +185,165 @@ struct FirmwarePropertyMailboxTests {
         rejectsMalformedResponses()
         reportsBoundedTimeouts()
         validatesBuffersPollLimitsAndCacheOwnership()
-        print("firmware property mailbox: 8 groups passed")
+        print("firmware property mailbox: 10 groups passed")
+    }
+
+    private static func enforcesTryBootPreparationOrdering() {
+        var rejected = TestTryBootFirmware(
+            armResult: .writeTimedOut,
+            notificationResult: .completed
+        )
+        expect(
+            RaspberryPiTryBootFirmwareCoordinator.prepareForReset(
+                firmware: &rejected,
+                maximumPollCount: 10
+            ) == .armRejected(.writeTimedOut),
+            "pre-send SET_REBOOT_FLAGS failure did not reject trial reset"
+        )
+        expect(
+            rejected.armCallCount == 1
+                && rejected.notificationCallCount == 0,
+            "NOTIFY_REBOOT ran after tryboot arming failed"
+        )
+
+        var indeterminate = TestTryBootFirmware(
+            armResult: .responseTimedOut,
+            notificationResult: .completed
+        )
+        expect(
+            RaspberryPiTryBootFirmwareCoordinator.prepareForReset(
+                firmware: &indeterminate,
+                maximumPollCount: 10
+            ) == .readyToReset(
+                arm: .responseTimedOut,
+                notification: nil
+            ),
+            "post-send tryboot timeout was treated as safely unarmed"
+        )
+        expect(
+            indeterminate.armCallCount == 1
+                && indeterminate.notificationCallCount == 0,
+            "indeterminate request reused the shared mailbox buffer"
+        )
+
+        var notifyFailed = TestTryBootFirmware(
+            armResult: .completed,
+            notificationResult: .cacheInvalidationFailed
+        )
+        expect(
+            RaspberryPiTryBootFirmwareCoordinator.prepareForReset(
+                firmware: &notifyFailed,
+                maximumPollCount: 10
+            ) == .readyToReset(
+                arm: .completed,
+                notification: .cacheInvalidationFailed
+            ),
+            "armed tryboot did not remain reset-bound after notify failure"
+        )
+        expect(
+            notifyFailed.armCallCount == 1
+                && notifyFailed.notificationCallCount == 1,
+            "tryboot preparation calls were not strictly ordered"
+        )
+    }
+
+    private static func validatesTryBootRebootRequestsAndResponses() {
+        withAlignedBuffer { address in
+            expect(
+                RaspberryPi5DMAScratchLayout.firmwareMailboxAddress(
+                    pageBaseAddress: 0x20_0000
+                ) == 0x20_0fc0,
+                "Pi DMA scratch mailbox tail is not 64-byte aligned"
+            )
+            expect(
+                RaspberryPi5DMAScratchLayout.gadgetByteCount
+                    + RaspberryPi5DMAScratchLayout.firmwareMailboxByteCount
+                    == RaspberryPi5DMAScratchLayout.pageByteCount,
+                "Pi DMA scratch ownership leaves a gap or overlap"
+            )
+            let flagsBank = MailboxRegisterBank()
+            flagsBank.bufferCPUAddress = address
+            flagsBank.incomingMessages = [messageWord]
+            let flagsCache = TestMailboxCache()
+            var flagsMailbox = requireMailbox(
+                address: address,
+                bank: flagsBank,
+                cache: flagsCache
+            )
+            expect(
+                flagsMailbox.setRebootFlags(
+                    1,
+                    maximumPollCount: 1
+                ) == .completed,
+                "SET_REBOOT_FLAGS tryboot transaction failed"
+            )
+            expect(
+                flagsBank.requestWords == [
+                    28, 0, 0x0003_8064, 4, 0, 1, 0,
+                ],
+                "SET_REBOOT_FLAGS request encoding mismatch"
+            )
+            expect(
+                flagsCache.cleanCalls.count == 1
+                    && flagsCache.cleanCalls[0].0 == address
+                    && flagsCache.cleanCalls[0].1 == 28
+                    && flagsCache.invalidateCalls.count == 1
+                    && flagsCache.invalidateCalls[0].0 == address
+                    && flagsCache.invalidateCalls[0].1 == 28,
+                "reboot-flags cache ownership used the wrong extent"
+            )
+
+            let notifyBank = MailboxRegisterBank()
+            notifyBank.bufferCPUAddress = address
+            notifyBank.incomingMessages = [messageWord]
+            let notifyCache = TestMailboxCache()
+            var notifyMailbox = requireMailbox(
+                address: address,
+                bank: notifyBank,
+                cache: notifyCache
+            )
+            expect(
+                notifyMailbox.notifyReboot(maximumPollCount: 1)
+                    == .completed,
+                "NOTIFY_REBOOT transaction failed"
+            )
+            expect(
+                notifyBank.requestWords == [
+                    24, 0, 0x0003_0048, 0, 0, 0,
+                ],
+                "NOTIFY_REBOOT request encoding mismatch"
+            )
+            expect(
+                notifyCache.cleanCalls.count == 1
+                    && notifyCache.cleanCalls[0].0 == address
+                    && notifyCache.cleanCalls[0].1 == 24
+                    && notifyCache.invalidateCalls.count == 1
+                    && notifyCache.invalidateCalls[0].0 == address
+                    && notifyCache.invalidateCalls[0].1 == 24,
+                "reboot-notify cache ownership used the wrong extent"
+            )
+
+            let rejectedBank = MailboxRegisterBank()
+            rejectedBank.bufferCPUAddress = address
+            let rejectedCache = TestMailboxCache()
+            var rejectedMailbox = requireMailbox(
+                address: address,
+                bank: rejectedBank,
+                cache: rejectedCache
+            )
+            expect(
+                rejectedMailbox.setRebootFlags(
+                    2,
+                    maximumPollCount: 1
+                ) == .invalidFlags,
+                "unknown firmware reboot flags were accepted"
+            )
+            expect(
+                rejectedBank.writes.isEmpty
+                    && rejectedCache.cleanCalls.isEmpty,
+                "invalid reboot flags reached firmware"
+            )
+        }
     }
 
     private static func validatesPowerOnRequestAndResponse() {

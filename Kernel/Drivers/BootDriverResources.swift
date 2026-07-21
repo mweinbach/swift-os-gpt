@@ -43,8 +43,9 @@ struct DriverMemoryResource: Equatable {
 struct BootDriverResourceSet {
     static let maximumMemoryResourceCount = 8
     // Pi 5 currently retains six base display/USB/mailbox apertures, six RP1
-    // Ethernet apertures, and two storage apertures. Leave two explicit slots
-    // for the next independently discovered driver without heap growth.
+    // Ethernet apertures, two storage apertures, and one PM-watchdog aperture.
+    // One explicit slot remains; the next multi-aperture driver must grow this
+    // bounded contract deliberately rather than overflowing it implicitly.
     static let maximumMMIOResourceCount = 16
 
     private var memory0: DriverMemoryResource?

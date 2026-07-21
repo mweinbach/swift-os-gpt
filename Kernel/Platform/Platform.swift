@@ -145,6 +145,38 @@ enum GraphicsScanoutResourceDescription: Equatable {
     case hvs(HVSRegisterResources)
 }
 
+/// Individual bootloader features published in the firmware-owned Device Tree
+/// node. These values are capability evidence, not board or update policy.
+enum FirmwareBootCapability: UInt32, Equatable {
+    /// Firmware can apply the `[tryboot]` A/B partition mapping (bit 2).
+    case tryBootAB = 4
+    /// Firmware accepts a one-shot tryboot reboot request (bit 3).
+    case tryBoot = 8
+}
+
+/// Lossless view of `/chosen/bootloader/capabilities`. Unknown bits remain in
+/// `rawValue` so discovery never accidentally treats a newer firmware feature
+/// set as an older exact-value enum.
+struct FirmwareBootCapabilities: Equatable {
+    let rawValue: UInt32
+
+    func contains(_ capability: FirmwareBootCapability) -> Bool {
+        rawValue & capability.rawValue == capability.rawValue
+    }
+}
+
+/// Firmware-reported origin of the currently executing payload and the feature
+/// evidence published alongside it. The raw MBR partition number stays
+/// platform metadata; A/B update policy maps it to a logical slot only after
+/// validating the media layout it is operating on. Capabilities are optional
+/// so an older or malformed firmware property cannot suppress ordinary boot
+/// identity; it only removes authority for capability-dependent operations.
+struct FirmwareBootSelection: Equatable {
+    let partitionNumber: UInt32
+    let wasTryBoot: Bool
+    let capabilities: FirmwareBootCapabilities?
+}
+
 /// Backend-neutral hardware discovery result. Drivers consume this contract
 /// instead of reaching back into a board-specific Device Tree or assuming that
 /// renderer and scanout share one DMA address.
@@ -193,6 +225,7 @@ struct Platform {
     /// fixtures may omit it, but `discover` never returns a boot platform
     /// without a validated GIC PPI from timer tuple index one.
     var nonSecurePhysicalTimerInterrupt: PlatformGICInterrupt? = nil
+    var firmwareBootSelection: FirmwareBootSelection? = nil
 
     static func discover(deviceTreeAddress: UInt64) -> Platform? {
         guard let tree = FlattenedDeviceTree(address: deviceTreeAddress) else {
@@ -296,7 +329,46 @@ struct Platform {
             deviceTreeAddress: deviceTreeAddress,
             deviceTreeSize: tree.blobSize,
             deviceTree: tree,
-            nonSecurePhysicalTimerInterrupt: timerInterrupt
+            nonSecurePhysicalTimerInterrupt: timerInterrupt,
+            firmwareBootSelection: kind == .raspberryPi5
+                ? raspberryPiFirmwareBootSelection(in: tree)
+                : nil
+        )
+    }
+
+    private static func raspberryPiFirmwareBootSelection(
+        in tree: FlattenedDeviceTree
+    ) -> FirmwareBootSelection? {
+        guard let partition = tree.propertyCells(
+                  rootChildNamed: "chosen",
+                  childNamed: "bootloader",
+                  property: "partition"
+              ), partition.count == 1,
+              let partitionNumber = partition.cell(at: 0),
+              partitionNumber != 0,
+              let tryBoot = tree.propertyCells(
+                  rootChildNamed: "chosen",
+                  childNamed: "bootloader",
+                  property: "tryboot"
+              ), tryBoot.count == 1,
+              let rawTryBoot = tryBoot.cell(at: 0),
+              rawTryBoot <= 1
+        else { return nil }
+
+        let capabilities: FirmwareBootCapabilities?
+        if let cells = tree.propertyCells(
+            rootChildNamed: "chosen",
+            childNamed: "bootloader",
+            property: "capabilities"
+        ), cells.count == 1, let rawValue = cells.cell(at: 0) {
+            capabilities = FirmwareBootCapabilities(rawValue: rawValue)
+        } else {
+            capabilities = nil
+        }
+        return FirmwareBootSelection(
+            partitionNumber: partitionNumber,
+            wasTryBoot: rawTryBoot == 1,
+            capabilities: capabilities
         )
     }
 

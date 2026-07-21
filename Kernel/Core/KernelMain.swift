@@ -84,6 +84,26 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
         }
     }
     console.write("SWIFTOS:FDT_OK\n")
+    if platform.kind == .raspberryPi5 {
+        switch platform.firmwareBootContext {
+        case .payload(let observation):
+            console.write("SWIFTOS:BOOT_SLOT=")
+            switch observation.slot {
+            case .a: console.write("A\n")
+            case .b: console.write("B\n")
+            }
+            console.write("SWIFTOS:BOOT_TRY=")
+            console.write(observation.wasTryBoot ? "1\n" : "0\n")
+        case .rescue:
+            console.write("SWIFTOS:BOOT_RESCUE\n")
+        case .unsupportedPartition(let partitionNumber):
+            console.write("SWIFTOS:BOOT_PARTITION_UNSUPPORTED=")
+            console.writeHex(UInt64(partitionNumber))
+            console.write("\n")
+        case nil:
+            console.write("SWIFTOS:BOOT_SLOT_UNAVAILABLE\n")
+        }
+    }
 
     guard let drivers = PlatformDriverBootstrap.discover(
               platform: platform
@@ -112,12 +132,29 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
         park()
     }
 
+    guard PlatformWatchdogBootResources.appendDiscoveredResources(
+              platform: platform,
+              to: &retainedDriverResources
+          )
+    else {
+        console.write("SWIFTOS:PANIC:WATCHDOG_RESOURCES\n")
+        park()
+    }
+
     guard let memory = KernelMemoryRuntime.activate(
         platform: platform,
         console: console,
         driverResources: retainedDriverResources
     ) else {
         console.write("SWIFTOS:PANIC:MEMORY\n")
+        park()
+    }
+    guard RaspberryPi5WatchdogRuntime.activate(
+              console: console,
+              platform: platform
+          )
+    else {
+        console.write("SWIFTOS:PANIC:WATCHDOG_ADOPTION\n")
         park()
     }
 
@@ -146,6 +183,7 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
         park()
     }
     console.write(InterruptSubsystem.controllerReadyMarker)
+    serviceRaspberryPi5Watchdog(console: console, platform: platform)
 
     switch platform.kind {
     case .qemuVirt:
@@ -155,6 +193,7 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             memory: memory
         )
     case .raspberryPi5:
+        serviceRaspberryPi5Watchdog(console: console, platform: platform)
         reportRaspberryPi5DebugResources(
             console: console,
             platform: platform,
@@ -174,10 +213,12 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
                 console.write("SWIFTOS:SMP_DEFERRED\n")
             }
         }
+        serviceRaspberryPi5Watchdog(console: console, platform: platform)
         RaspberryPi5CooperativeRuntime.scheduleActivation(
             console: console,
             platform: platform
         )
+        serviceRaspberryPi5Watchdog(console: console, platform: platform)
         if let display = drivers.display {
             console.write(SimpleFramebufferDisplayDriver.readyMarker)
             runPlatformDesktop(
@@ -212,6 +253,17 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
             smpStartupHandled: raspberryPiSMPStartupHandled,
             provenSMPProcessorCount: raspberryPiProvenProcessorCount
         )
+    }
+}
+
+private func serviceRaspberryPi5Watchdog(
+    console: EarlyConsole,
+    platform: Platform
+) {
+    guard platform.kind == .raspberryPi5 else { return }
+    guard RaspberryPi5WatchdogRuntime.serviceNow() else {
+        console.write("SWIFTOS:PANIC:WATCHDOG_CHECKPOINT\n")
+        park()
     }
 }
 
@@ -881,10 +933,18 @@ private func activateUSBDebugGadget(
     console.writeHex(resource.baseAddress)
     console.write("\n")
     let scratchAddress = AArch64.dmaScratchAddress
+    guard let mailboxScratchAddress = RaspberryPi5DMAScratchLayout
+              .firmwareMailboxAddress(pageBaseAddress: scratchAddress)
+    else {
+        console.write("SWIFTOS:USB_POWER_MAILBOX_BUFFER\n")
+        return nil
+    }
     guard powerOnRaspberryPiUSB(
               console: console,
               platform: platform,
-              scratchAddress: scratchAddress
+              scratchAddress: mailboxScratchAddress,
+              scratchByteCount: RaspberryPi5DMAScratchLayout
+                  .firmwareMailboxByteCount
           )
     else {
         return nil
@@ -931,7 +991,7 @@ private func activateUSBDebugGadget(
     let activation = RaspberryPiUSBDebugGadget.bringUp(
         registers: registers,
         scratchBaseAddress: scratchAddress,
-        scratchByteCount: 4_096,
+        scratchByteCount: RaspberryPi5DMAScratchLayout.gadgetByteCount,
         scanout: scanout,
         viewportScale: UInt16(viewport.scale),
         kernelDescription: kernelDescription,
@@ -1101,7 +1161,8 @@ private func activateKernelUpdateStaging(
 private func powerOnRaspberryPiUSB(
     console: EarlyConsole,
     platform: Platform,
-    scratchAddress: UInt64
+    scratchAddress: UInt64,
+    scratchByteCount: UInt64
 ) -> Bool {
     guard let mailboxResource = platform.firmwareMailbox else {
         console.write("SWIFTOS:USB_POWER_NO_MAILBOX\n")
@@ -1121,7 +1182,7 @@ private func powerOnRaspberryPiUSB(
               // SwiftOS keeps its kernel and DMA scratch identity-mapped.
               // Property channel 8 consumes the ARM physical address.
               bufferPhysicalAddress: scratchAddress,
-              bufferByteCount: 4_096
+              bufferByteCount: scratchByteCount
           )
     else {
         console.write("SWIFTOS:USB_POWER_MAILBOX_BUFFER\n")

@@ -45,6 +45,10 @@ public func validateRaspberryPi5DeviceTree(
         return 6
     }
     guard platform.kind == .raspberryPi5 else { return 7 }
+    // The pinned source DTB is not the runtime tree patched by firmware. It
+    // must not fabricate `/chosen/bootloader` identity or capability evidence;
+    // those values are accepted only when present in the exact runtime path.
+    guard platform.firmwareBootSelection == nil else { return 21 }
     guard platform.serial == DeviceResource(
         baseAddress: 0x10_7d00_1000,
         length: 0x200
@@ -158,6 +162,15 @@ public func validateRaspberryPi5DeviceTree(
         )
     ) else {
         return 17
+    }
+    guard platform.systemWatchdog == .bcm2712PM(
+              registers: DeviceResource(
+                  baseAddress: 0x10_7d20_0000,
+                  length: 0x308
+              )
+          )
+    else {
+        return 20
     }
     return 0
 }

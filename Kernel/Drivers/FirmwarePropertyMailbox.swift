@@ -49,6 +49,35 @@ enum FirmwareMailboxPowerStateResult: Equatable {
     case malformedResponse(FirmwareMailboxPowerResponseError)
 }
 
+enum FirmwareMailboxRebootResponseError: UInt8, Equatable {
+    case bufferSize
+    case messageResponseCode
+    case tagIdentifier
+    case tagBufferSize
+    case tagResponseLength
+    case endTag
+}
+
+enum FirmwareMailboxRebootResult: Equatable {
+    case completed
+    case invalidFlags
+    case invalidPollLimit
+    case cacheCleanFailed
+    case writeTimedOut
+    case responseTimedOut
+    case cacheInvalidationFailed
+    case malformedResponse(FirmwareMailboxRebootResponseError)
+}
+
+private enum FirmwareMailboxTransactionResult {
+    case completed
+    case invalidPollLimit
+    case cacheCleanFailed
+    case writeTimedOut
+    case responseTimedOut
+    case cacheInvalidationFailed
+}
+
 private enum FirmwareMailboxPowerResponseStateBits {
     static let poweredOn: UInt32 = 1 << 0
     static let deviceUnavailable: UInt32 = 1 << 1
@@ -65,6 +94,11 @@ struct FirmwarePropertyMailbox<
     static var propertyChannel: UInt32 { 8 }
     static var powerStateTag: UInt32 { 0x0002_8001 }
     static var messageByteCount: UInt64 { 32 }
+    static var setRebootFlagsTag: UInt32 { 0x0003_8064 }
+    static var notifyRebootTag: UInt32 { 0x0003_0048 }
+
+    private static var rebootFlagsMessageByteCount: UInt64 { 28 }
+    private static var notifyRebootMessageByteCount: UInt64 { 24 }
 
     private var registers: Registers
     private var cache: Cache
@@ -105,60 +139,21 @@ struct FirmwarePropertyMailbox<
         waitUntilStable: Bool,
         maximumPollCount: Int
     ) -> FirmwareMailboxPowerStateResult {
-        guard maximumPollCount > 0 else { return .invalidPollLimit }
         writePowerStateRequest(
             deviceID: deviceID,
             poweredOn: poweredOn,
             waitUntilStable: waitUntilStable
         )
-        guard cache.clean(
-                  address: bufferCPUAddress,
-                  byteCount: Self.messageByteCount
-              )
-        else {
-            return .cacheCleanFailed
-        }
-
-        var writePoll = 0
-        while writePoll < maximumPollCount {
-            if registers.read32(
-                at: FirmwareMailboxRegisterLayout.outgoingStatus
-            ) & FirmwareMailboxRegisterLayout.full == 0 {
-                registers.write32(
-                    messageWord,
-                    at: FirmwareMailboxRegisterLayout.outgoingWrite
-                )
-                break
-            }
-            writePoll += 1
-        }
-        guard writePoll < maximumPollCount else { return .writeTimedOut }
-
-        var readPoll = 0
-        var receivedExpectedResponse = false
-        while readPoll < maximumPollCount {
-            if registers.read32(
-                at: FirmwareMailboxRegisterLayout.incomingStatus
-            ) & FirmwareMailboxRegisterLayout.empty != 0 {
-                readPoll += 1
-                continue
-            }
-            let response = registers.read32(
-                at: FirmwareMailboxRegisterLayout.incomingRead
-            )
-            readPoll += 1
-            if response == messageWord {
-                receivedExpectedResponse = true
-                break
-            }
-        }
-        guard receivedExpectedResponse else { return .responseTimedOut }
-        guard cache.invalidate(
-                  address: bufferCPUAddress,
-                  byteCount: Self.messageByteCount
-              )
-        else {
-            return .cacheInvalidationFailed
+        switch performTransaction(
+            byteCount: Self.messageByteCount,
+            maximumPollCount: maximumPollCount
+        ) {
+        case .completed: break
+        case .invalidPollLimit: return .invalidPollLimit
+        case .cacheCleanFailed: return .cacheCleanFailed
+        case .writeTimedOut: return .writeTimedOut
+        case .responseTimedOut: return .responseTimedOut
+        case .cacheInvalidationFailed: return .cacheInvalidationFailed
         }
         if let error = validatePowerStateResponse(deviceID: deviceID) {
             return .malformedResponse(error)
@@ -181,6 +176,105 @@ struct FirmwarePropertyMailbox<
         return .completed
     }
 
+    /// Sets or clears Raspberry Pi firmware's one-shot reboot flag. Setting
+    /// bit zero arms tryboot. Failure to arm rejects the trial; after arming,
+    /// callers must reset immediately even if NOTIFY_REBOOT itself fails so a
+    /// one-shot flag cannot leak into an unrelated later reset.
+    mutating func setRebootFlags(
+        _ flags: UInt32,
+        maximumPollCount: Int
+    ) -> FirmwareMailboxRebootResult {
+        guard flags & ~UInt32(1) == 0 else { return .invalidFlags }
+        writeRebootFlagsRequest(flags)
+        switch performTransaction(
+            byteCount: Self.rebootFlagsMessageByteCount,
+            maximumPollCount: maximumPollCount
+        ) {
+        case .completed: break
+        case .invalidPollLimit: return .invalidPollLimit
+        case .cacheCleanFailed: return .cacheCleanFailed
+        case .writeTimedOut: return .writeTimedOut
+        case .responseTimedOut: return .responseTimedOut
+        case .cacheInvalidationFailed: return .cacheInvalidationFailed
+        }
+        if let error = validateRebootFlagsResponse() {
+            return .malformedResponse(error)
+        }
+        return .completed
+    }
+
+    /// Notifies firmware immediately before a watchdog reset. This remains a
+    /// separate transaction so policy can distinguish notification failure
+    /// after the one-shot flag has already become firmware-owned.
+    mutating func notifyReboot(
+        maximumPollCount: Int
+    ) -> FirmwareMailboxRebootResult {
+        writeNotifyRebootRequest()
+        switch performTransaction(
+            byteCount: Self.notifyRebootMessageByteCount,
+            maximumPollCount: maximumPollCount
+        ) {
+        case .completed: break
+        case .invalidPollLimit: return .invalidPollLimit
+        case .cacheCleanFailed: return .cacheCleanFailed
+        case .writeTimedOut: return .writeTimedOut
+        case .responseTimedOut: return .responseTimedOut
+        case .cacheInvalidationFailed: return .cacheInvalidationFailed
+        }
+        if let error = validateNotifyRebootResponse() {
+            return .malformedResponse(error)
+        }
+        return .completed
+    }
+
+    private mutating func performTransaction(
+        byteCount: UInt64,
+        maximumPollCount: Int
+    ) -> FirmwareMailboxTransactionResult {
+        guard maximumPollCount > 0 else { return .invalidPollLimit }
+        guard cache.clean(address: bufferCPUAddress, byteCount: byteCount) else {
+            return .cacheCleanFailed
+        }
+
+        var writePoll = 0
+        while writePoll < maximumPollCount {
+            if registers.read32(
+                at: FirmwareMailboxRegisterLayout.outgoingStatus
+            ) & FirmwareMailboxRegisterLayout.full == 0 {
+                registers.write32(
+                    messageWord,
+                    at: FirmwareMailboxRegisterLayout.outgoingWrite
+                )
+                break
+            }
+            writePoll += 1
+        }
+        guard writePoll < maximumPollCount else { return .writeTimedOut }
+
+        var readPoll = 0
+        while readPoll < maximumPollCount {
+            if registers.read32(
+                at: FirmwareMailboxRegisterLayout.incomingStatus
+            ) & FirmwareMailboxRegisterLayout.empty != 0 {
+                readPoll += 1
+                continue
+            }
+            let response = registers.read32(
+                at: FirmwareMailboxRegisterLayout.incomingRead
+            )
+            readPoll += 1
+            if response == messageWord {
+                guard cache.invalidate(
+                          address: bufferCPUAddress,
+                          byteCount: byteCount
+                      )
+                else { return .cacheInvalidationFailed }
+                return .completed
+            }
+        }
+        return .responseTimedOut
+    }
+
     private func writePowerStateRequest(
         deviceID: UInt32,
         poweredOn: Bool,
@@ -199,6 +293,37 @@ struct FirmwarePropertyMailbox<
         if waitUntilStable { state |= 2 }
         PhysicalBytes.writeLE32(state, at: bufferCPUAddress + 24)
         PhysicalBytes.writeLE32(0, at: bufferCPUAddress + 28)
+    }
+
+    private func writeRebootFlagsRequest(_ flags: UInt32) {
+        PhysicalBytes.writeLE32(
+            UInt32(Self.rebootFlagsMessageByteCount),
+            at: bufferCPUAddress
+        )
+        PhysicalBytes.writeLE32(0, at: bufferCPUAddress + 4)
+        PhysicalBytes.writeLE32(
+            Self.setRebootFlagsTag,
+            at: bufferCPUAddress + 8
+        )
+        PhysicalBytes.writeLE32(4, at: bufferCPUAddress + 12)
+        PhysicalBytes.writeLE32(0, at: bufferCPUAddress + 16)
+        PhysicalBytes.writeLE32(flags, at: bufferCPUAddress + 20)
+        PhysicalBytes.writeLE32(0, at: bufferCPUAddress + 24)
+    }
+
+    private func writeNotifyRebootRequest() {
+        PhysicalBytes.writeLE32(
+            UInt32(Self.notifyRebootMessageByteCount),
+            at: bufferCPUAddress
+        )
+        PhysicalBytes.writeLE32(0, at: bufferCPUAddress + 4)
+        PhysicalBytes.writeLE32(
+            Self.notifyRebootTag,
+            at: bufferCPUAddress + 8
+        )
+        PhysicalBytes.writeLE32(0, at: bufferCPUAddress + 12)
+        PhysicalBytes.writeLE32(0, at: bufferCPUAddress + 16)
+        PhysicalBytes.writeLE32(0, at: bufferCPUAddress + 20)
     }
 
     private func validatePowerStateResponse(
@@ -231,6 +356,52 @@ struct FirmwarePropertyMailbox<
             return .deviceIdentifier
         }
         guard PhysicalBytes.readLE32(at: bufferCPUAddress + 28) == 0 else {
+            return .endTag
+        }
+        return nil
+    }
+
+    private func validateRebootFlagsResponse()
+        -> FirmwareMailboxRebootResponseError? {
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress)
+                == UInt32(Self.rebootFlagsMessageByteCount)
+        else { return .bufferSize }
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress + 4)
+                == 0x8000_0000
+        else { return .messageResponseCode }
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress + 8)
+                == Self.setRebootFlagsTag
+        else { return .tagIdentifier }
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress + 12) == 4 else {
+            return .tagBufferSize
+        }
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress + 16)
+                == 0x8000_0004
+        else { return .tagResponseLength }
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress + 24) == 0 else {
+            return .endTag
+        }
+        return nil
+    }
+
+    private func validateNotifyRebootResponse()
+        -> FirmwareMailboxRebootResponseError? {
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress)
+                == UInt32(Self.notifyRebootMessageByteCount)
+        else { return .bufferSize }
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress + 4)
+                == 0x8000_0000
+        else { return .messageResponseCode }
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress + 8)
+                == Self.notifyRebootTag
+        else { return .tagIdentifier }
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress + 12) == 0 else {
+            return .tagBufferSize
+        }
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress + 16)
+                == 0x8000_0000
+        else { return .tagResponseLength }
+        guard PhysicalBytes.readLE32(at: bufferCPUAddress + 20) == 0 else {
             return .endTag
         }
         return nil

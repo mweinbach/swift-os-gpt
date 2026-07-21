@@ -5,6 +5,8 @@ struct FlattenedDeviceTreeTests {
         translatesChainedPCIRangesAndRejectsMalformedMappings()
         readsPlatformMemoryCPUAndRegisterIndexes()
         readsFirmwareSimpleFramebufferProperties()
+        readsExactFirmwareBootSelectionProperties()
+        keepsBootIdentityWithoutTrialCapabilities()
         discoversEnabledPi5GraphicsResources()
         rejectsUnavailablePi5GraphicsResources()
         discoversPi5PeripheralUSBController()
@@ -12,7 +14,113 @@ struct FlattenedDeviceTreeTests {
         rejectsNonoperationalStatusesAndUnavailableAncestors()
         resolvesInterruptParentsAndControllerCellWidths()
         rejectsBadMagicAndTruncatedStructure()
-        print("FDT host tests: 11 passed")
+        print("FDT host tests: 13 passed")
+    }
+
+    private static func readsExactFirmwareBootSelectionProperties() {
+        let bytes = makeDeviceTree()
+        bytes.withUnsafeBytes { storage in
+            let tree = FlattenedDeviceTree(
+                address: UInt64(UInt(bitPattern: storage.baseAddress!))
+            )!
+            let partition = tree.propertyCells(
+                rootChildNamed: "chosen",
+                childNamed: "bootloader",
+                property: "partition"
+            )
+            let tryBoot = tree.propertyCells(
+                rootChildNamed: "chosen",
+                childNamed: "bootloader",
+                property: "tryboot"
+            )
+            let capabilities = tree.propertyCells(
+                rootChildNamed: "chosen",
+                childNamed: "bootloader",
+                property: "capabilities"
+            )
+            expect(
+                partition?.count == 1 && partition?.cell(at: 0) == 2,
+                "exact /chosen/bootloader partition was not decoded"
+            )
+            expect(
+                tryBoot?.count == 1 && tryBoot?.cell(at: 0) == 1,
+                "exact /chosen/bootloader tryboot state was not decoded"
+            )
+            expect(
+                capabilities?.count == 1
+                    && capabilities?.cell(at: 0) == 0x0c,
+                "exact /chosen/bootloader capabilities were not decoded"
+            )
+            expect(
+                tree.propertyCells(
+                    rootChildNamed: "chosen",
+                    childNamed: "framebuffer@5e000000",
+                    property: "partition"
+                )?.cell(at: 0) == 9,
+                "hierarchical lookup escaped the requested direct child"
+            )
+        }
+    }
+
+    private static func keepsBootIdentityWithoutTrialCapabilities() {
+        let fixtures: [(UInt32?, Bool)] = [
+            (nil, false),
+            (0x0c, true),
+            (FirmwareBootCapability.tryBootAB.rawValue, false),
+            (FirmwareBootCapability.tryBoot.rawValue, false),
+        ]
+        for (rawCapabilities, malformed) in fixtures {
+            let bytes = makeRaspberryPiGraphicsDeviceTree(
+                bootloaderTryBoot: 0,
+                bootloaderCapabilities: rawCapabilities,
+                malformedBootloaderCapabilities: malformed
+            )
+            bytes.withUnsafeBytes { storage in
+                guard let platform = Platform.discover(
+                    deviceTreeAddress: UInt64(
+                        UInt(bitPattern: storage.baseAddress!)
+                    )
+                ), let selection = platform.firmwareBootSelection,
+                   let observation = platform.bootObservation
+                else {
+                    fatalError("missing capabilities rejected boot identity")
+                }
+                expect(
+                    selection.partitionNumber == 2
+                        && !selection.wasTryBoot,
+                    "capability parsing changed firmware boot identity"
+                )
+                expect(
+                    observation == PlatformBootObservation(
+                        slot: .a,
+                        wasTryBoot: false,
+                        trialCapability: .unavailable
+                    ),
+                    "incomplete firmware evidence authorized an A/B trial"
+                )
+            }
+        }
+
+        let rescueBytes = makeRaspberryPiGraphicsDeviceTree(
+            bootloaderPartition: 1,
+            bootloaderTryBoot: 0,
+            bootloaderCapabilities: 0x0c
+        )
+        rescueBytes.withUnsafeBytes { storage in
+            guard let platform = Platform.discover(
+                deviceTreeAddress: UInt64(UInt(bitPattern: storage.baseAddress!))
+            ) else {
+                fatalError("rescue boot context rejected platform discovery")
+            }
+            expect(
+                platform.firmwareBootContext == .rescue,
+                "firmware partition one was not classified as rescue"
+            )
+            expect(
+                platform.bootObservation == nil,
+                "rescue partition received A/B payload write authority"
+            )
+        }
     }
 
     private static func resolvesInterruptParentsAndControllerCellWidths() {
@@ -281,6 +389,31 @@ struct FlattenedDeviceTreeTests {
             expect(
                 platform.graphicsResources == expected,
                 "Pi graphics resources were not read from the FDT"
+            )
+            expect(
+                platform.firmwareBootSelection == FirmwareBootSelection(
+                    partitionNumber: 2,
+                    wasTryBoot: true,
+                    capabilities: FirmwareBootCapabilities(rawValue: 0x0c)
+                ),
+                "Pi firmware boot selection was not retained"
+            )
+            expect(
+                platform.bootObservation == PlatformBootObservation(
+                    slot: .a,
+                    wasTryBoot: true,
+                    trialCapability: .oneShotAlternateSlot
+                ),
+                "Pi physical partition was not mapped to logical slot A"
+            )
+            expect(
+                platform.systemWatchdog == .bcm2712PM(
+                    registers: DeviceResource(
+                        baseAddress: 0x10_7d20_0000,
+                        length: 0x308
+                    )
+                ),
+                "Pi watchdog resource was not discovered from the FDT"
             )
         }
     }
@@ -991,6 +1124,9 @@ private func makeDeviceTree(timerFlags: UInt32 = 4) -> [UInt8] {
         "interrupt-controller",
         "phandle",
         "interrupts",
+        "partition",
+        "tryboot",
+        "capabilities",
     ]
     var strings: [UInt8] = []
     var offsets: [String: UInt32] = [:]
@@ -1026,7 +1162,29 @@ private func makeDeviceTree(timerFlags: UInt32 = 4) -> [UInt8] {
         value: be32(2),
         to: &structure
     )
+    appendBeginNode("bootloader", to: &structure)
+    appendProperty(
+        nameOffset: offsets["partition"]!,
+        value: be32(2),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["tryboot"]!,
+        value: be32(1),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["capabilities"]!,
+        value: be32(0x0c),
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
     appendBeginNode("framebuffer@5e000000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["partition"]!,
+        value: be32(9),
+        to: &structure
+    )
     appendProperty(
         nameOffset: offsets["compatible"]!,
         value: Array("simple-framebuffer".utf8) + [0],
@@ -1257,7 +1415,11 @@ private func makeRaspberryPiGraphicsDeviceTree(
     usbMode: String? = "peripheral",
     usbEnabled: Bool = true,
     unalignedUSBRegisters: Bool = false,
-    usbRegisterLength: UInt64 = 0x1_0000
+    usbRegisterLength: UInt64 = 0x1_0000,
+    bootloaderPartition: UInt32 = 2,
+    bootloaderTryBoot: UInt32 = 1,
+    bootloaderCapabilities: UInt32? = 0x0c,
+    malformedBootloaderCapabilities: Bool = false
 ) -> [UInt8] {
     let names = [
         "#address-cells",
@@ -1273,6 +1435,10 @@ private func makeRaspberryPiGraphicsDeviceTree(
         "interrupt-controller",
         "phandle",
         "interrupts",
+        "partition",
+        "tryboot",
+        "capabilities",
+        "system-power-controller",
     ]
     var strings: [UInt8] = []
     var offsets: [String: UInt32] = [:]
@@ -1305,6 +1471,49 @@ private func makeRaspberryPiGraphicsDeviceTree(
         value: be32(1),
         to: &structure
     )
+
+    appendBeginNode("chosen", to: &structure)
+    appendBeginNode("bootloader", to: &structure)
+    appendProperty(
+        nameOffset: offsets["partition"]!,
+        value: be32(bootloaderPartition),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["tryboot"]!,
+        value: be32(bootloaderTryBoot),
+        to: &structure
+    )
+    if let bootloaderCapabilities {
+        let encodedCapabilities = malformedBootloaderCapabilities
+            ? be32(bootloaderCapabilities) + be32(0)
+            : be32(bootloaderCapabilities)
+        appendProperty(
+            nameOffset: offsets["capabilities"]!,
+            value: encodedCapabilities,
+            to: &structure
+        )
+    }
+    appendBE32(2, to: &structure)
+    appendBE32(2, to: &structure)
+
+    appendBeginNode("watchdog@107d200000", to: &structure)
+    appendProperty(
+        nameOffset: offsets["compatible"]!,
+        value: Array("brcm,bcm2712-pm".utf8) + [0],
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["reg"]!,
+        value: be64(0x10_7d20_0000) + be64(0x308),
+        to: &structure
+    )
+    appendProperty(
+        nameOffset: offsets["system-power-controller"]!,
+        value: [],
+        to: &structure
+    )
+    appendBE32(2, to: &structure)
 
     appendBeginNode("serial@107d001000", to: &structure)
     appendProperty(
