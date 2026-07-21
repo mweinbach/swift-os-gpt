@@ -19,7 +19,8 @@ struct BootSlotLayout: Equatable {
               !slotA.overlaps(slotB),
               mediaLayoutFingerprint != 0,
               writePolicy.isValid(blockCount: slotA.blockCount),
-              metadataPolicy.isValid(blockCount: slotA.blockCount)
+              metadataPolicy.isValid(blockCount: slotA.blockCount),
+              metadataPolicy.isCompatible(with: writePolicy)
         else { return nil }
         self.slotA = slotA
         self.slotB = slotB
@@ -147,6 +148,7 @@ struct BootPeerMirrorAction: Equatable {
     let sourceSlot: BootSlot
     let destinationSlot: BootSlot
     let plan: VerifiedSlotCopyPlan
+    let expectedDigest: BootImageDigest
     let nextBlock: UInt64
     let blockCount: UInt64
 }
@@ -429,6 +431,7 @@ enum BootUpdateOrchestrator {
                 sourceSlot: record.confirmedSlot,
                 destinationSlot: destination,
                 plan: plan,
+                expectedDigest: record.confirmedDigest,
                 nextBlock: record.nextCandidateBlock,
                 blockCount: count
             )))
@@ -639,6 +642,7 @@ enum BootUpdateOrchestrator {
         guard action.sourceSlot == record.confirmedSlot,
               action.destinationSlot == destinationSlot,
               action.plan == expectedPlan,
+              action.expectedDigest == record.confirmedDigest,
               action.nextBlock == record.nextCandidateBlock,
               validPolicyProgress(
                 from: action.nextBlock,

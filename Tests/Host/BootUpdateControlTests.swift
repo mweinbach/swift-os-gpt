@@ -6,10 +6,13 @@ struct BootUpdateControlTests {
         reestablishesUncertainJournalDurability()
         repairsOneTornJournalReplica()
         rejectsNonzeroJournalGarbage()
+        rejectsAmbiguousJournalMediaIdentity()
         copiesDisjointSlotChunksDurably()
         defersBootabilityUntilPayloadCopyCompletes()
+        rejectsUnsafeFAT32MetadataActivationPolicies()
+        preflightsFAT32ActivationMetadataBeforeInvalidation()
         relocatesFAT32SlotMetadataDuringConvergence()
-        print("boot update control host tests: 8 groups passed")
+        print("boot update control host tests: 11 groups passed")
     }
 
     private static let oldDigest = BootImageDigest(
@@ -287,6 +290,95 @@ struct BootUpdateControlTests {
         }
     }
 
+    private static func rejectsAmbiguousJournalMediaIdentity() {
+        let initial = BootControlRecord.initial(
+            confirmedSlot: .a,
+            generation: 1,
+            digest: oldDigest,
+            slotBlockCount: 8,
+            mediaLayoutFingerprint: 0x5357_4142_0000_0003
+        )!
+        let writing = take(initial.beginCandidateWrite(
+            to: .b,
+            generation: 2,
+            digest: newDigest,
+            blockCount: 8,
+            trialToken: 8
+        ))
+
+        var proposedMismatchDevice = formattedDataDevice()
+        withScratch(byteCount: 512) { scratch in
+            _ = BootControlJournal.commit(
+                initial,
+                to: &proposedMismatchDevice,
+                scratch: scratch
+            )
+            let mismatchedProposal = withMediaIdentity(
+                writing,
+                slotBlockCount: 8,
+                mediaLayoutFingerprint: 0x5357_4142_0000_0002
+            )
+            expect(
+                BootControlJournal.commit(
+                    mismatchedProposal,
+                    to: &proposedMismatchDevice,
+                    scratch: scratch
+                ) == .failure(.mediaIdentityMismatch),
+                "journal commit changed immutable media identity"
+            )
+        }
+
+        for mismatch in ["fingerprint", "slot-count"] {
+            var device = formattedDataDevice()
+            withScratch(byteCount: 512) { scratch in
+                _ = BootControlJournal.commit(
+                    initial,
+                    to: &device,
+                    scratch: scratch
+                )
+                _ = BootControlJournal.commit(
+                    writing,
+                    to: &device,
+                    scratch: scratch
+                )
+                let recordBase = 512 + BootControlJournal.recordOffset
+                if mismatch == "fingerprint" {
+                    writeLE64(
+                        0x5357_4142_0000_0002,
+                        into: &device.bytes,
+                        at: recordBase + 136
+                    )
+                } else {
+                    writeLE64(
+                        9,
+                        into: &device.bytes,
+                        at: recordBase + 64
+                    )
+                }
+                refreshJournalCRC(in: &device.bytes, block: 1)
+
+                expect(
+                    BootControlJournal.open(&device, scratch: scratch)
+                        == .failure(.conflictingMediaIdentity),
+                    "journal open accepted conflicting media identity"
+                )
+                let progressed = take(
+                    writing.recordCandidateProgress(nextBlock: 4)
+                )
+                expect(
+                    BootControlJournal.commit(
+                        progressed,
+                        to: &device,
+                        scratch: scratch
+                    ) == .failure(
+                        .existingJournal(.conflictingMediaIdentity)
+                    ),
+                    "journal commit accepted conflicting replicas"
+                )
+            }
+        }
+    }
+
     private static func copiesDisjointSlotChunksDurably() {
         var device = MemoryBlockDevice(blockCount: 32)
         let source = BlockDeviceRange(
@@ -486,6 +578,175 @@ struct BootUpdateControlTests {
         }
     }
 
+    private static func rejectsUnsafeFAT32MetadataActivationPolicies() {
+        let source = BlockDeviceRange(
+            startBlock: 2,
+            blockCount: 10,
+            within: 40
+        )!
+        let destination = BlockDeviceRange(
+            startBlock: 20,
+            blockCount: 10,
+            within: 40
+        )!
+        let metadata = BootSlotMetadataPolicy.fat32HiddenSectors(
+            primaryBootBlock: 0,
+            backupBootBlock: 6
+        )
+        expect(
+            VerifiedSlotCopyPlan(
+                source: source,
+                destination: destination,
+                writePolicy: .direct,
+                metadataPolicy: metadata
+            ) == nil,
+            "direct writes accepted FAT32 location metadata"
+        )
+        expect(
+            VerifiedSlotCopyPlan(
+                source: source,
+                destination: destination,
+                writePolicy: .deferredActivation(
+                    firstCommitBlock: 0,
+                    lastCommitBlock: 6
+                ),
+                metadataPolicy: metadata
+            ) == nil,
+            "primary-first FAT32 activation was accepted"
+        )
+        expect(
+            VerifiedSlotCopyPlan(
+                source: source,
+                destination: destination,
+                writePolicy: .deferredActivation(
+                    firstCommitBlock: 5,
+                    lastCommitBlock: 0
+                ),
+                metadataPolicy: metadata
+            ) == nil,
+            "mismatched FAT32 backup activation was accepted"
+        )
+        expect(
+            VerifiedSlotCopyPlan(
+                source: source,
+                destination: destination,
+                writePolicy: .deferredActivation(
+                    firstCommitBlock: 6,
+                    lastCommitBlock: 1
+                ),
+                metadataPolicy: metadata
+            ) == nil,
+            "mismatched FAT32 primary activation was accepted"
+        )
+        expect(
+            VerifiedSlotCopyPlan(
+                source: source,
+                destination: destination,
+                writePolicy: .deferredActivation(
+                    firstCommitBlock: 6,
+                    lastCommitBlock: 0
+                ),
+                metadataPolicy: metadata
+            ) != nil,
+            "backup-first FAT32 activation was rejected"
+        )
+        expect(
+            VerifiedSlotCopyPlan(
+                source: source,
+                destination: destination
+            ) != nil,
+            "metadata-free direct copy was rejected"
+        )
+    }
+
+    private static func preflightsFAT32ActivationMetadataBeforeInvalidation() {
+        let source = BlockDeviceRange(
+            startBlock: 2,
+            blockCount: 10,
+            within: 40
+        )!
+        let destination = BlockDeviceRange(
+            startBlock: 20,
+            blockCount: 10,
+            within: 40
+        )!
+        let plan = VerifiedSlotCopyPlan(
+            source: source,
+            destination: destination,
+            writePolicy: .deferredActivation(
+                firstCommitBlock: 6,
+                lastCommitBlock: 0
+            ),
+            metadataPolicy: .fat32HiddenSectors(
+                primaryBootBlock: 0,
+                backupBootBlock: 6
+            )
+        )!
+
+        for corruptRelativeBlock: UInt64 in [6, 0] {
+            var device = metadataPreflightDevice()
+            writeLE32(
+                0,
+                into: &device.bytes,
+                at: Int(source.startBlock + corruptRelativeBlock) * 512 + 28
+            )
+            let before = device.bytes
+            withScratch(byteCount: 1_024) { scratch in
+                expect(
+                    VerifiedSlotCopier.copyNextChunk(
+                        on: &device,
+                        plan: plan,
+                        nextBlock: 0,
+                        maximumBlockCount: 8,
+                        scratch: scratch
+                    ) == .failure(.sourceMetadataMismatch(
+                        block: source.startBlock + corruptRelativeBlock
+                    )),
+                    "invalid source activation metadata was not precise"
+                )
+            }
+            expect(
+                device.bytes == before,
+                "metadata preflight failure changed the destination"
+            )
+        }
+
+        var unreadable = metadataPreflightDevice()
+        let beforeUnreadable = unreadable.bytes
+        unreadable.failReads = true
+        withScratch(byteCount: 1_024) { scratch in
+            expect(
+                VerifiedSlotCopier.copyNextChunk(
+                    on: &unreadable,
+                    plan: plan,
+                    nextBlock: 0,
+                    maximumBlockCount: 8,
+                    scratch: scratch
+                ) == .failure(.readSource(
+                    block: source.startBlock + 6,
+                    result: .transportFailure
+                )),
+                "unreadable source activation metadata was not preflighted"
+            )
+        }
+        expect(
+            unreadable.bytes == beforeUnreadable,
+            "source preflight read failure changed the destination"
+        )
+    }
+
+    private static func metadataPreflightDevice() -> MemoryBlockDevice {
+        let device = MemoryBlockDevice(blockCount: 40)
+        var index = 0
+        while index < device.bytes.count {
+            device.bytes[index] = UInt8(truncatingIfNeeded: index &* 29 &+ 7)
+            index += 1
+        }
+        writeLE32(2, into: &device.bytes, at: 2 * 512 + 28)
+        writeLE32(2, into: &device.bytes, at: 8 * 512 + 28)
+        return device
+    }
+
     private static func relocatesFAT32SlotMetadataDuringConvergence() {
         var device = MemoryBlockDevice(blockCount: 40)
         let source = BlockDeviceRange(
@@ -594,6 +855,56 @@ struct BootUpdateControlTests {
         bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
         bytes[offset + 2] = UInt8(truncatingIfNeeded: value >> 16)
         bytes[offset + 3] = UInt8(truncatingIfNeeded: value >> 24)
+    }
+
+    private static func writeLE64(
+        _ value: UInt64,
+        into bytes: inout [UInt8],
+        at offset: Int
+    ) {
+        writeLE32(UInt32(truncatingIfNeeded: value), into: &bytes, at: offset)
+        writeLE32(
+            UInt32(truncatingIfNeeded: value >> 32),
+            into: &bytes,
+            at: offset + 4
+        )
+    }
+
+    private static func refreshJournalCRC(
+        in bytes: inout [UInt8],
+        block: Int
+    ) {
+        let base = block * 512 + BootControlJournal.recordOffset
+        let checksum = bytes.withUnsafeBytes { rawBytes in
+            StorageCRC32.checksum(UnsafeRawBufferPointer(
+                start: rawBytes.baseAddress!.advanced(by: base),
+                count: 156
+            ))
+        }
+        writeLE32(checksum, into: &bytes, at: base + 156)
+    }
+
+    private static func withMediaIdentity(
+        _ record: BootControlRecord,
+        slotBlockCount: UInt64,
+        mediaLayoutFingerprint: UInt64
+    ) -> BootControlRecord {
+        BootControlRecord(
+            sequence: record.sequence,
+            phase: record.phase,
+            confirmedSlot: record.confirmedSlot,
+            confirmedGeneration: record.confirmedGeneration,
+            confirmedDigest: record.confirmedDigest,
+            candidateSlot: record.candidateSlot,
+            candidateGeneration: record.candidateGeneration,
+            candidateDigest: record.candidateDigest,
+            updateKind: record.updateKind,
+            trialToken: record.trialToken,
+            slotBlockCount: slotBlockCount,
+            nextCandidateBlock: record.nextCandidateBlock,
+            failedTrialCount: record.failedTrialCount,
+            mediaLayoutFingerprint: mediaLayoutFingerprint
+        )
     }
 
     private static func readLE32(_ bytes: [UInt8], at offset: Int) -> UInt32 {

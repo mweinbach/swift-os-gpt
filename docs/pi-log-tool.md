@@ -26,6 +26,13 @@ snapshot. It recognizes either of these complete layouts:
   data partition. The equal payload labels are sentinels only; A/B identity is
   positional and must not be inferred from a mounted volume name.
 
+For v2 media, the boot-control journal fingerprint is resolved independently
+of the selector contents. Revision 3 is current. Superseded revision 2 is
+reported as `legacy-read-only; whole-card reflash required`, preserving access
+to its logs without implying kernel or updater compatibility. An unknown or
+replica-conflicting fingerprint is rejected even when boot-partition metadata
+is damaged; copying files is not a revision upgrade.
+
 It then selects exactly one removable, external, physical whole disk.
 `--device /dev/diskN` is only a selector: it is checked against that fresh
 snapshot and does not bypass discovery. Ambiguous candidates, incomplete A/B

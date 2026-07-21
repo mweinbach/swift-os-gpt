@@ -22,6 +22,21 @@ enum BootSlotMetadataPolicy: Equatable {
         }
     }
 
+    /// Location-specific FAT metadata is safe only when the sectors carrying
+    /// it are also the two activation commits. The backup must be published
+    /// first and the primary last; direct, reversed, or partially matching
+    /// policies could expose a bootable slot with stale physical metadata.
+    func isCompatible(with writePolicy: BootSlotWritePolicy) -> Bool {
+        switch self {
+        case .none:
+            return true
+        case .fat32HiddenSectors(let primary, let backup):
+            guard case .deferredActivation(let first, let last) = writePolicy
+            else { return false }
+            return first == backup && last == primary
+        }
+    }
+
     /// Validates the source's physical metadata and rewrites it for the
     /// destination before a copied block is written or compared.
     func relocateForCopy(
@@ -197,7 +212,8 @@ struct VerifiedSlotCopyPlan: Equatable {
         guard source.blockCount == destination.blockCount,
               !source.overlaps(destination),
               writePolicy.isValid(blockCount: source.blockCount),
-              metadataPolicy.isValid(blockCount: source.blockCount)
+              metadataPolicy.isValid(blockCount: source.blockCount),
+              metadataPolicy.isCompatible(with: writePolicy)
         else { return nil }
         self.source = source
         self.destination = destination
@@ -278,6 +294,14 @@ enum VerifiedSlotCopier {
         if let activation = plan.writePolicy.activationBlocks {
             let payloadCount = plan.blockCount - 2
             if nextBlock == 0 {
+                if let failure = preflightSourceActivationBlocks(
+                    on: &device,
+                    plan: plan,
+                    activation: activation,
+                    scratch: first
+                ) {
+                    return .failure(failure)
+                }
                 if let failure = invalidateActivationBlocks(
                     on: &device,
                     destination: plan.destination,
@@ -413,6 +437,40 @@ enum VerifiedSlotCopier {
             nextBlock: advanced,
             isComplete: advanced == plan.blockCount
         )
+    }
+
+    /// Reads and validates both source activation sectors before invalidating
+    /// either destination sector. In particular, a malformed backup or primary
+    /// BPB must leave a previously bootable destination byte-for-byte intact.
+    private static func preflightSourceActivationBlocks<Device: BlockDevice>(
+        on device: inout Device,
+        plan: VerifiedSlotCopyPlan,
+        activation: (first: UInt64, last: UInt64),
+        scratch: UnsafeMutableRawBufferPointer
+    ) -> VerifiedSlotCopyFailure? {
+        let relativeBlocks = (activation.first, activation.last)
+        var index = 0
+        while index < 2 {
+            let relative = index == 0
+                ? relativeBlocks.0
+                : relativeBlocks.1
+            let sourceBlock = plan.source.startBlock + relative
+            let read = device.readBlock(at: sourceBlock, into: scratch)
+            guard read == .success else {
+                return .readSource(block: sourceBlock, result: read)
+            }
+            guard plan.metadataPolicy.relocateForCopy(
+                      relativeBlock: relative,
+                      sourceStartBlock: plan.source.startBlock,
+                      destinationStartBlock: plan.destination.startBlock,
+                      bytes: scratch
+                  )
+            else {
+                return .sourceMetadataMismatch(block: sourceBlock)
+            }
+            index += 1
+        }
+        return nil
     }
 
     private static func invalidateActivationBlocks<Device: BlockDevice>(

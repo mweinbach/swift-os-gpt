@@ -152,6 +152,12 @@ boot-sector metadata; transaction-aware inspection reports both raw and content
 digests and accepts valid release divergence during staging, rollback, or peer
 convergence. It can still inspect legacy v1 images read-only. Flashing
 remains a separate explicitly targeted operation.
+Host inspection also recognizes the superseded format-v2 layout fingerprint
+revision 2 so a returned card's journal and logs are not stranded. That profile
+is explicitly `legacy-read-only`: its older rescue manifest, zero-valued FAT32
+`BPB_HiddSec` replicas, and raw-slot journal digest are rejected by the current
+kernel and boot verifier. Moving it to revision 3 requires a whole-card reflash,
+not a file copy or routine inactive-slot update.
 Do not add Raspberry Pi 4 firmware blobs. `sha256=1` asks the EEPROM firmware
 to log the hashes of loaded files; it does not replace checking `SHA256SUMS`
 before writing media.
@@ -165,6 +171,9 @@ entries two and three, and the type-`0xda` data volume at entry four. Whole-card
 initialization, a future v1-to-v2 migration, routine v2 slot installation, and
 a volatile USB handoff are separate operations. Do not describe a file copy as
 migration or flashing, and do not describe a live USB update as installed.
+Within format v2, the boot-control fingerprint is authoritative: revision 3 is
+the only current kernel/update format. Revision 2 is retained solely as an exact
+host-side read-only diagnostic profile and requires whole-card reinitialization.
 
 The physical traces and returned-card evidence linked from this document were
 captured from legacy v1 media. They remain valid evidence for the code and

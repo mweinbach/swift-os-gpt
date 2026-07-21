@@ -23,7 +23,7 @@ Partition 2:
   type: 0x0c (FAT32 LBA)
   default size: 128 MiB
   volume label: SWIFTOS-AB
-  hidden-sector field: 0 (partition-location independent)
+  hidden-sector fields: 2048 in primary sector 0 and backup sector 6
   contents: every file covered by the slot's SHA256SUMS
 
 Partition 3:
@@ -32,7 +32,7 @@ Partition 3:
   type: 0x0c (FAT32 LBA)
   default size: 128 MiB
   volume label: SWIFTOS-AB
-  hidden-sector field: 0 (partition-location independent)
+  hidden-sector fields: 264192 in primary sector 0 and backup sector 6
   contents: every file covered by the slot's SHA256SUMS
 
 Partition 4:
@@ -86,11 +86,12 @@ The partition-one fallback also requires a recorded EEPROM build/configuration
 with PARTITION_WALK=1. The on-card format does not prove that firmware policy;
 physical acceptance must capture it and the observed fallback order.
 
-Partition 1 currently embeds a factory snapshot of the complete SwiftOS kernel
-and DTB under a rescue-only config without overlays. It is capacity-constrained
-and hardware-unverified. A future media revision should replace it with a
-smaller, separately pinned rescue build instead of allowing the full GUI kernel
-to grow indefinitely inside the invariant control partition.
+Partition 1 currently embeds a factory snapshot of the complete SwiftOS kernel,
+DTB, and pinned DWC2 overlay under a rescue-only config. It is
+capacity-constrained and hardware-unverified. A future media revision should
+replace it with a smaller, separately pinned rescue build instead of allowing
+the full GUI kernel to grow indefinitely inside the invariant control
+partition.
 
 The selector occupies the alignment gap that format 1 left unused. Slots A and
 B subdivide format 1's 256 MiB boot extent, so the default type-0xda partition

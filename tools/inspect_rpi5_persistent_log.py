@@ -355,6 +355,49 @@ def inspect_stream(
         else f"degraded-{decoded[0][0]}-only"
     )
 
+    boot_control: dict[str, object] | None = None
+    media_layout: dict[str, object] | None = None
+    valid_outer_names = {name for name, _ in decoded}
+    has_control_magic = any(
+        block[
+            media.BOOT_CONTROL_OFFSET:
+            media.BOOT_CONTROL_OFFSET + len(media.BOOT_CONTROL_MAGIC)
+        ] == media.BOOT_CONTROL_MAGIC
+        for name, block in (("primary", primary), ("backup", backup))
+        if name in valid_outer_names
+    )
+    looks_like_ab = (
+        len(entries) == 4 and entries[0]["type"] == media.FAT12_TYPE
+    )
+    candidate_control = (
+        media.inspect_boot_control_journal(
+            primary,
+            backup,
+            primary_outer_valid="primary" in valid_outer_names,
+            backup_outer_valid="backup" in valid_outer_names,
+        )
+        if has_control_magic or looks_like_ab
+        else {"status": "empty", "newest": None, "valid_replicas": 0}
+    )
+    newest = candidate_control.get("newest")
+    if isinstance(newest, dict):
+        profile = media.ab_media_layout_profile(
+            newest.get("media_layout_fingerprint")
+        )
+        boot_control = candidate_control
+        media_layout = media.ab_media_layout_report(profile)
+        try:
+            version, classified = media.classify_media_layout(entries)
+        except media.MediaError:
+            classified = None
+        if classified is not None and version == "v2" and (
+            int(newest["slot_block_count"])
+                != int(classified["slot_a"]["block_count"])
+        ):
+            raise media.MediaError("A/B boot-control state targets another layout")
+    elif looks_like_ab:
+        raise media.MediaError("A/B media has no initial boot-control state")
+
     log_start = int(layout["kernel_log_start_block"])
     log_count = int(layout["kernel_log_block_count"])
     log_end = log_start + log_count
@@ -369,7 +412,7 @@ def inspect_stream(
 
     records = media.persistent_records(image, data, layout)
     diagnostics = media.persistent_log_diagnostics(records)
-    return {
+    result: dict[str, object] = {
         "format": "swiftos-persistent-log-capture-v1",
         "source": {
             "path": source_path,
@@ -387,6 +430,10 @@ def inspect_stream(
         "persistent_records": records,
         **diagnostics,
     }
+    if media_layout is not None and boot_control is not None:
+        result["media_layout"] = media_layout
+        result["boot_control_journal"] = boot_control
+    return result
 
 
 def inspect_path(

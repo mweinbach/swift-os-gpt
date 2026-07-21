@@ -22,6 +22,59 @@ import build_rpi5_media as media
 import inspect_rpi5_persistent_log as source_io
 
 
+def require_current_ab_layout(
+    image: source_io.BoundedReadOnlyMedia,
+    layout: dict[str, dict[str, int | bool]],
+) -> None:
+    data = layout["data"]
+    data_start = int(data["start_block"])
+    data_count = int(data["block_count"])
+    primary = media.read_exact(
+        image,
+        data_start * media.SECTOR_SIZE,
+        media.SECTOR_SIZE,
+        "primary SwiftOS data superblock",
+    )
+    backup = media.read_exact(
+        image,
+        (data_start + 1) * media.SECTOR_SIZE,
+        media.SECTOR_SIZE,
+        "backup SwiftOS data superblock",
+    )
+    valid: list[tuple[str, dict[str, int]]] = []
+    for name, block in (("primary", primary), ("backup", backup)):
+        try:
+            valid.append((name, media.decode_data_layout(block, data_count)))
+        except media.MediaError:
+            pass
+    if not valid:
+        raise media.MediaError("both SwiftOS data superblocks are invalid")
+    if len(valid) == 2 and valid[0][1] != valid[1][1]:
+        raise media.MediaError("valid SwiftOS data superblocks disagree")
+    valid_names = {name for name, _ in valid}
+    journal = media.inspect_boot_control_journal(
+        primary,
+        backup,
+        primary_outer_valid="primary" in valid_names,
+        backup_outer_valid="backup" in valid_names,
+    )
+    newest = journal.get("newest")
+    if not isinstance(newest, dict):
+        raise media.MediaError("A/B media has no initial boot-control state")
+    profile = media.ab_media_layout_profile(
+        newest.get("media_layout_fingerprint")
+    )
+    if profile.legacy_read_only:
+        raise media.MediaError(
+            "revision-two A/B media is legacy-read-only; "
+            "whole-card reflash required"
+        )
+    if int(newest["slot_block_count"]) != int(
+        layout["slot_a"]["block_count"]
+    ):
+        raise media.MediaError("A/B boot-control state targets another layout")
+
+
 def read_mbr_boot_partitions(
     image: source_io.BoundedReadOnlyMedia,
     logical_block_count: int,
@@ -73,6 +126,7 @@ def read_mbr_boot_partitions(
     version, layout = media.classify_media_layout(entries)
     if version == "v1":
         return entries, {"A": layout["boot"]}, None
+    require_current_ab_layout(image, layout)
     selector = layout["selector"]
     media.FAT12SelectorVolume.read_autoboot(image, selector)
     return entries, {

@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -91,6 +92,26 @@ def boot_extent(image: Path, slot: str = "a") -> tuple[int, int]:
     require(mbr[510:512] == b"\x55\xaa", "fixture MBR is invalid")
     offset = 470 if slot == "a" else 486
     return struct.unpack_from("<II", mbr, offset)
+
+
+def set_media_layout_fingerprint(image: Path, fingerprint: int) -> None:
+    with image.open("r+b") as target:
+        mbr = target.read(512)
+        data_start, _ = struct.unpack_from("<II", mbr, 502)
+        for replica in (0, 1):
+            offset = (data_start + replica) * 512 + 64
+            target.seek(offset)
+            record = bytearray(target.read(160))
+            require(len(record) == 160, "boot-control fixture is truncated")
+            struct.pack_into("<Q", record, 136, fingerprint)
+            struct.pack_into(
+                "<I",
+                record,
+                156,
+                zlib.crc32(record[:156]) & 0xFFFF_FFFF,
+            )
+            target.seek(offset)
+            target.write(record)
 
 
 def fat_geometry(image: Path, boot_start: int) -> tuple[int, int, int, int]:
@@ -306,7 +327,16 @@ def main() -> int:
         require("differs from the expected manifest" in error,
                 "trusted manifest mismatch was not rejected")
 
-    print("Raspberry Pi 5 boot partition verifier: 6 groups passed")
+        legacy = root / "legacy-revision-two.img"
+        shutil.copyfile(pristine, legacy)
+        set_media_layout_fingerprint(legacy, 0x5357_4142_0000_0002)
+        error = verify(legacy, should_succeed=False)
+        require(
+            "legacy-read-only; whole-card reflash required" in error,
+            "boot verifier did not explicitly refuse legacy A/B media",
+        )
+
+    print("Raspberry Pi 5 boot partition verifier: 7 groups passed")
     return 0
 
 

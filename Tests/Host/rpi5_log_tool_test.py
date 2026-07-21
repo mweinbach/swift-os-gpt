@@ -455,6 +455,17 @@ def test_card_summary_and_evidence_files_are_stable_and_non_overwriting() -> Non
         "console: 20 bytes; complete yes",
         "diagnostic markers: none",
     ], "readable card summary changed")
+    legacy_report = dict(report)
+    legacy_report["media_layout"] = {
+        "revision": 2,
+        "compatibility": "legacy-read-only",
+        "requires_whole_card_reflash": True,
+    }
+    require(
+        "media layout: revision 2; legacy-read-only; whole-card reflash required"
+            in logs.card_summary_lines(legacy_report),
+        "legacy media warning was not promoted into the card summary",
+    )
     require(logs.canonical_console_text(report).endswith("READY\r\n"),
             "canonical console text changed")
 

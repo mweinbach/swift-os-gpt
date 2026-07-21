@@ -64,7 +64,12 @@ AB_SLOT_VOLUME_LABEL = b"SWIFTOS-AB "
 # Revision three records location-neutral slot digests while requiring each
 # FAT32 BPB_HiddSec replica to name its actual MBR partition start. Revision
 # two incorrectly forced both fields to zero and journaled raw-slot hashes.
-AB_MEDIA_LAYOUT_FINGERPRINT = 0x5357_4142_0000_0003
+# Revision two is accepted only by host-side, read-only diagnostics so an
+# already-returned card remains inspectable. Builders and the kernel emit and
+# authorize revision three exclusively.
+AB_MEDIA_LAYOUT_FINGERPRINT_REVISION_2 = 0x5357_4142_0000_0002
+AB_MEDIA_LAYOUT_FINGERPRINT_REVISION_3 = 0x5357_4142_0000_0003
+AB_MEDIA_LAYOUT_FINGERPRINT = AB_MEDIA_LAYOUT_FINGERPRINT_REVISION_3
 AB_SLOT_BOOT_SECTORS = (0, 6)
 FAT32_HIDDEN_SECTORS_OFFSET = 28
 BOOT_CONTROL_MAGIC = b"SWABCTL1"
@@ -120,6 +125,104 @@ KERNEL_CONSOLE_SOURCE_NAMES = {
 
 class MediaError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class ABMediaLayoutProfile:
+    revision: int
+    fingerprint: int
+    selector_format: str
+    hidden_sector_policy: str
+    journal_digest_kind: str
+    legacy_read_only: bool
+
+
+@dataclass(frozen=True)
+class FAT32SlotMetadataProfile:
+    """Frozen canonical BPB/replica identity for one media revision."""
+
+    jump: bytes
+    oem: bytes
+    reserved_sectors: int
+    root_cluster: int
+    fsinfo_sector: int
+    backup_boot_sector: int
+    volume_id: int
+    volume_label: bytes
+
+
+AB_FAT32_METADATA_REVISION_2 = FAT32SlotMetadataProfile(
+    jump=b"\xeb\x58\x90",
+    oem=b"SWIFTOS ",
+    reserved_sectors=32,
+    root_cluster=2,
+    fsinfo_sector=1,
+    backup_boot_sector=6,
+    volume_id=0x5357_4142,
+    volume_label=b"SWIFTOS-AB ",
+)
+AB_FAT32_METADATA_REVISION_3 = FAT32SlotMetadataProfile(
+    jump=b"\xeb\x58\x90",
+    oem=b"SWIFTOS ",
+    reserved_sectors=32,
+    root_cluster=2,
+    fsinfo_sector=1,
+    backup_boot_sector=6,
+    volume_id=AB_SLOT_VOLUME_ID,
+    volume_label=AB_SLOT_VOLUME_LABEL,
+)
+
+
+AB_MEDIA_LAYOUT_REVISION_2_PROFILE = ABMediaLayoutProfile(
+    revision=2,
+    fingerprint=AB_MEDIA_LAYOUT_FINGERPRINT_REVISION_2,
+    selector_format="fat12-rescue-manifest-v1",
+    hidden_sector_policy="zero",
+    journal_digest_kind="raw-slot-sha256",
+    legacy_read_only=True,
+)
+AB_MEDIA_LAYOUT_REVISION_3_PROFILE = ABMediaLayoutProfile(
+    revision=3,
+    fingerprint=AB_MEDIA_LAYOUT_FINGERPRINT_REVISION_3,
+    selector_format="fat12-rescue-manifest-v2",
+    hidden_sector_policy="partition-start",
+    journal_digest_kind="location-neutral-slot-sha256",
+    legacy_read_only=False,
+)
+
+
+def ab_media_layout_profile(fingerprint: object) -> ABMediaLayoutProfile:
+    """Resolve an exact known A/B journal fingerprint for host inspection."""
+
+    profiles = (
+        AB_MEDIA_LAYOUT_REVISION_2_PROFILE,
+        AB_MEDIA_LAYOUT_REVISION_3_PROFILE,
+    )
+    for profile in profiles:
+        if fingerprint == f"0x{profile.fingerprint:016x}":
+            return profile
+    rendered = fingerprint if isinstance(fingerprint, str) else repr(fingerprint)
+    raise MediaError(
+        f"unsupported SwiftOS A/B media layout fingerprint: {rendered}"
+    )
+
+
+def ab_media_layout_report(
+    profile: ABMediaLayoutProfile,
+) -> dict[str, object]:
+    return {
+        "revision": profile.revision,
+        "fingerprint": f"0x{profile.fingerprint:016x}",
+        "compatibility": (
+            "legacy-read-only" if profile.legacy_read_only else "current"
+        ),
+        "inspection_mode": "read-only",
+        "kernel_format_compatible": not profile.legacy_read_only,
+        "requires_whole_card_reflash": profile.legacy_read_only,
+        "selector_format": profile.selector_format,
+        "fat32_hidden_sector_policy": profile.hidden_sector_policy,
+        "journal_digest_kind": profile.journal_digest_kind,
+    }
 
 
 def align_up(value: int, alignment: int) -> int:
@@ -792,6 +895,270 @@ class FAT12SelectorVolume:
         partition: dict[str, int | bool],
     ) -> bytes:
         return cls.read_files(image, partition)["autoboot.txt"]
+
+
+class LegacyFAT12SelectorVolumeRevision2:
+    """Exact read-only decoder for the superseded revision-two selector.
+
+    Revision two used manifest version one, four SFN-only root entries, and a
+    non-canonical ``rescue.dtb`` filename. There is intentionally no writer:
+    admitting these bytes for returned-card diagnosis must not recreate
+    selector or kernel write authority for the superseded format.
+    """
+
+    rescue_manifest_offset = 64
+    rescue_manifest_bytes = 128
+    rescue_manifest_version = 1
+    rescue_manifest_magic = b"SWRSQ001"
+    reserved_sectors = 1
+    fat_count = 2
+    fat_sectors = 6
+    root_entry_count = 32
+    root_directory_sectors = 2
+    sectors_per_cluster = 1
+    first_file_cluster = 2
+    file_layout = (
+        ("autoboot.txt", b"AUTOBOOTTXT"),
+        ("config.txt", b"CONFIG  TXT"),
+        ("kernel8.img", b"KERNEL8 IMG"),
+        ("rescue.dtb", b"RESCUE  DTB"),
+    )
+
+    @classmethod
+    def _boot_sector(cls, partition_start: int, partition_sectors: int) -> bytes:
+        sector = bytearray(SECTOR_SIZE)
+        sector[0:3] = b"\xeb\x3c\x90"
+        sector[3:11] = b"SWIFTOS "
+        struct.pack_into("<H", sector, 11, SECTOR_SIZE)
+        sector[13] = cls.sectors_per_cluster
+        struct.pack_into("<H", sector, 14, cls.reserved_sectors)
+        sector[16] = cls.fat_count
+        struct.pack_into("<H", sector, 17, cls.root_entry_count)
+        struct.pack_into("<H", sector, 19, partition_sectors)
+        sector[21] = 0xF8
+        struct.pack_into("<H", sector, 22, cls.fat_sectors)
+        struct.pack_into("<H", sector, 24, 63)
+        struct.pack_into("<H", sector, 26, 255)
+        struct.pack_into("<I", sector, 28, partition_start)
+        sector[36] = 0x80
+        sector[38] = 0x29
+        struct.pack_into("<I", sector, 39, 0x4354_4C31)
+        sector[43:54] = b"SWIFTOS-CTL"
+        sector[54:62] = b"FAT12   "
+        sector[510:512] = b"\x55\xaa"
+        return bytes(sector)
+
+    @staticmethod
+    def _directory_entry(
+        short_name: bytes,
+        first_cluster: int,
+        byte_count: int,
+    ) -> bytes:
+        entry = bytearray(32)
+        entry[0:11] = short_name
+        entry[11] = 0x20
+        struct.pack_into("<H", entry, 16, 0x0021)
+        struct.pack_into("<H", entry, 18, 0x0021)
+        struct.pack_into("<H", entry, 24, 0x0021)
+        struct.pack_into("<H", entry, 26, first_cluster)
+        struct.pack_into("<I", entry, 28, byte_count)
+        return bytes(entry)
+
+    @staticmethod
+    def _set_fat12_entry(fat: bytearray, cluster: int, value: int) -> None:
+        offset = cluster + cluster // 2
+        if cluster & 1:
+            fat[offset] = (fat[offset] & 0x0F) | ((value << 4) & 0xF0)
+            fat[offset + 1] = (value >> 4) & 0xFF
+        else:
+            fat[offset] = value & 0xFF
+            fat[offset + 1] = (
+                fat[offset + 1] & 0xF0
+            ) | ((value >> 8) & 0x0F)
+
+    @classmethod
+    def read_files(
+        cls,
+        image,
+        partition: dict[str, int | bool],
+        *,
+        allow_invalid_autoboot: bool = False,
+    ) -> dict[str, bytes]:
+        start = int(partition["start_block"])
+        count = int(partition["block_count"])
+        boot = read_exact(
+            image,
+            start * SECTOR_SIZE,
+            SECTOR_SIZE,
+            "legacy FAT12 selector boot sector",
+        )
+        manifest_start = cls.rescue_manifest_offset
+        manifest_end = manifest_start + cls.rescue_manifest_bytes
+        manifest = boot[manifest_start:manifest_end]
+        actual_without_manifest = bytearray(boot)
+        actual_without_manifest[manifest_start:manifest_end] = bytes(
+            cls.rescue_manifest_bytes
+        )
+        expected_boot = cls._boot_sector(start, count)
+        if (
+            start != SELECTOR_START_SECTOR
+            or count != SELECTOR_SECTORS
+            or actual_without_manifest != expected_boot
+        ):
+            raise MediaError(
+                "legacy selector is not the SwiftOS revision-two FAT12 format"
+            )
+        if (
+            manifest[0:8] != cls.rescue_manifest_magic
+            or struct.unpack_from("<HHHH", manifest, 8)
+                != (
+                    cls.rescue_manifest_version,
+                    cls.rescue_manifest_bytes,
+                    3,
+                    0,
+                )
+            or struct.unpack_from("<I", manifest, 124)[0]
+                != crc32(manifest[:124])
+        ):
+            raise MediaError("legacy selector rescue manifest is invalid")
+
+        root_start = (
+            start
+            + cls.reserved_sectors
+            + cls.fat_count * cls.fat_sectors
+        )
+        root = read_exact(
+            image,
+            root_start * SECTOR_SIZE,
+            cls.root_directory_sectors * SECTOR_SIZE,
+            "legacy FAT12 selector root directory",
+        )
+        declared: list[tuple[str, int, tuple[int, ...]]] = []
+        next_cluster = cls.first_file_cluster
+        available_clusters = count - (
+            cls.reserved_sectors
+            + cls.fat_count * cls.fat_sectors
+            + cls.root_directory_sectors
+        )
+        for index, (name, short_name) in enumerate(cls.file_layout):
+            entry = root[index * 32:(index + 1) * 32]
+            byte_count = struct.unpack_from("<I", entry, 28)[0]
+            if byte_count == 0 or (index == 0 and byte_count > SECTOR_SIZE):
+                raise MediaError(
+                    "legacy selector rescue directory entries are invalid"
+                )
+            cluster_count = max(1, math.ceil(byte_count / SECTOR_SIZE))
+            if (
+                next_cluster - cls.first_file_cluster
+                    + cluster_count
+                    > available_clusters
+            ):
+                raise MediaError(
+                    "legacy selector rescue directory entries are invalid"
+                )
+            clusters = tuple(range(next_cluster, next_cluster + cluster_count))
+            expected_entry = cls._directory_entry(
+                short_name,
+                next_cluster,
+                byte_count,
+            )
+            if entry != expected_entry:
+                raise MediaError(
+                    "legacy selector rescue directory entries are invalid"
+                )
+            declared.append((name, byte_count, clusters))
+            next_cluster += cluster_count
+        if any(root[len(cls.file_layout) * 32:]):
+            raise MediaError(
+                "legacy selector rescue directory entries are invalid"
+            )
+
+        fat_start = start + cls.reserved_sectors
+        fat_bytes = cls.fat_sectors * SECTOR_SIZE
+        primary_fat = read_exact(
+            image,
+            fat_start * SECTOR_SIZE,
+            fat_bytes,
+            "legacy primary FAT12 selector allocation table",
+        )
+        backup_fat = read_exact(
+            image,
+            (fat_start + cls.fat_sectors) * SECTOR_SIZE,
+            fat_bytes,
+            "legacy backup FAT12 selector allocation table",
+        )
+        expected_fat = bytearray(fat_bytes)
+        cls._set_fat12_entry(expected_fat, 0, 0xFF8)
+        cls._set_fat12_entry(expected_fat, 1, 0xFFF)
+        for _, _, clusters in declared:
+            for index, cluster in enumerate(clusters):
+                value = (
+                    clusters[index + 1]
+                    if index + 1 < len(clusters)
+                    else 0xFFF
+                )
+                cls._set_fat12_entry(
+                    expected_fat,
+                    cluster,
+                    value,
+                )
+        if primary_fat != backup_fat or primary_fat != bytes(expected_fat):
+            raise MediaError(
+                "legacy selector FAT12 allocation tables are invalid"
+            )
+
+        data_start = (
+            start
+            + cls.reserved_sectors
+            + cls.fat_count * cls.fat_sectors
+            + cls.root_directory_sectors
+        )
+        result: dict[str, bytes] = {}
+        for name, byte_count, clusters in declared:
+            raw = read_exact(
+                image,
+                (
+                    data_start
+                    + clusters[0]
+                    - cls.first_file_cluster
+                ) * SECTOR_SIZE,
+                len(clusters) * SECTOR_SIZE,
+                f"legacy selector {name}",
+            )
+            if any(raw[byte_count:]):
+                raise MediaError(
+                    f"legacy selector {name} has unexpected trailing data"
+                )
+            result[name] = raw[:byte_count]
+
+        used_clusters = (
+            next_cluster - cls.first_file_cluster
+        )
+        free_blocks = available_clusters - used_clusters
+        free = read_exact(
+            image,
+            (data_start + used_clusters) * SECTOR_SIZE,
+            free_blocks * SECTOR_SIZE,
+            "unused legacy FAT12 selector data area",
+        )
+        if any(free):
+            raise MediaError("unused legacy FAT12 selector data area is not zero")
+
+        autoboot = result["autoboot.txt"]
+        if (
+            not allow_invalid_autoboot
+            and autoboot not in (SELECTOR_AUTOBOOT_A, SELECTOR_AUTOBOOT_B)
+        ):
+            raise MediaError("legacy selector autoboot.txt policy is invalid")
+        for index, (name, _) in enumerate(cls.file_layout[1:]):
+            expected_size = struct.unpack_from("<I", manifest, 16 + index * 4)[0]
+            expected_digest = manifest[28 + index * 32:60 + index * 32]
+            if (
+                len(result[name]) != expected_size
+                or hashlib.sha256(result[name]).digest() != expected_digest
+            ):
+                raise MediaError(f"legacy selector rescue {name} digest is invalid")
+        return result
 
 
 class FAT32Volume:
@@ -1595,6 +1962,8 @@ class FAT32Reader:
         *,
         validate_hidden_sectors: bool = True,
         canonical_hidden_sectors: bool = False,
+        expected_hidden_sectors: int | None = None,
+        canonical_profile: FAT32SlotMetadataProfile | None = None,
     ) -> None:
         self.image = image
         self.start = int(partition["start_block"])
@@ -1615,6 +1984,13 @@ class FAT32Reader:
         self.root_cluster = struct.unpack_from("<I", boot, 44)[0]
         hidden_sectors = struct.unpack_from("<I", boot, 28)[0]
         self.hidden_sectors = hidden_sectors
+        expected_hidden = (
+            self.start
+            if expected_hidden_sectors is None
+            else expected_hidden_sectors
+        )
+        if not 0 <= expected_hidden <= 0xFFFF_FFFF:
+            raise MediaError("expected FAT32 hidden-sector value is invalid")
         total_sectors = struct.unpack_from("<I", boot, 32)[0]
         if (
             self.bytes_per_sector != SECTOR_SIZE
@@ -1627,7 +2003,7 @@ class FAT32Reader:
             or (
                 validate_hidden_sectors
                 and hidden_sectors
-                    != self.start
+                    != expected_hidden
             )
             or total_sectors != self.count
             or boot[82:90] != b"FAT32   "
@@ -1648,25 +2024,35 @@ class FAT32Reader:
             or not 2 <= self.root_cluster <= self.maximum_cluster
         ):
             raise MediaError("FAT32 cluster geometry is invalid")
+        if canonical_hidden_sectors and canonical_profile is not None:
+            raise MediaError("select only one FAT32 canonical metadata profile")
         if canonical_hidden_sectors:
-            self._validate_canonical_metadata(boot)
+            canonical_profile = AB_FAT32_METADATA_REVISION_3
+        if canonical_profile is not None:
+            self._validate_canonical_metadata(boot, canonical_profile)
 
-    def _validate_canonical_metadata(self, boot: bytes) -> None:
+    def _validate_canonical_metadata(
+        self,
+        boot: bytes,
+        profile: FAT32SlotMetadataProfile,
+    ) -> None:
         if (
-            boot[0:3] != b"\xeb\x58\x90"
-            or boot[3:11] != b"SWIFTOS "
-            or self.reserved != FAT32Volume.reserved_sectors
-            or self.root_cluster != FAT32Volume.root_cluster
-            or struct.unpack_from("<H", boot, 48)[0] != 1
-            or struct.unpack_from("<H", boot, 50)[0] != 6
-            or struct.unpack_from("<I", boot, 67)[0] != AB_SLOT_VOLUME_ID
-            or boot[71:82] != AB_SLOT_VOLUME_LABEL
+            boot[0:3] != profile.jump
+            or boot[3:11] != profile.oem
+            or self.reserved != profile.reserved_sectors
+            or self.root_cluster != profile.root_cluster
+            or struct.unpack_from("<H", boot, 48)[0]
+                != profile.fsinfo_sector
+            or struct.unpack_from("<H", boot, 50)[0]
+                != profile.backup_boot_sector
+            or struct.unpack_from("<I", boot, 67)[0] != profile.volume_id
+            or boot[71:82] != profile.volume_label
         ):
             raise MediaError("A/B FAT32 canonical metadata is invalid")
 
         backup_boot = read_exact(
             self.image,
-            (self.start + 6) * SECTOR_SIZE,
+            (self.start + profile.backup_boot_sector) * SECTOR_SIZE,
             SECTOR_SIZE,
             "FAT32 backup boot sector",
         )
@@ -1675,13 +2061,17 @@ class FAT32Reader:
 
         primary_fsinfo = read_exact(
             self.image,
-            (self.start + 1) * SECTOR_SIZE,
+            (self.start + profile.fsinfo_sector) * SECTOR_SIZE,
             SECTOR_SIZE,
             "FAT32 primary FSInfo sector",
         )
         backup_fsinfo = read_exact(
             self.image,
-            (self.start + 7) * SECTOR_SIZE,
+            (
+                self.start
+                + profile.backup_boot_sector
+                + profile.fsinfo_sector
+            ) * SECTOR_SIZE,
             SECTOR_SIZE,
             "FAT32 backup FSInfo sector",
         )
@@ -1780,7 +2170,10 @@ class FAT32Reader:
             raise MediaError("FAT32 long-name ordinals are malformed")
         if any(entry[12] != 0 or entry[26:28] != b"\0\0" for entry in entries):
             raise MediaError("FAT32 long-name reserved fields are invalid")
-        checksum = FAT32Volume._lfn_checksum(short_name)
+        checksum = 0
+        for byte in short_name:
+            checksum = (((checksum & 1) << 7) | (checksum >> 1)) + byte
+            checksum &= 0xFF
         if any(entry[13] != checksum for entry in entries):
             raise MediaError("FAT32 long-name checksum is invalid")
         positions = (1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30)
@@ -2272,6 +2665,17 @@ def inspect_boot_control_journal(
         if all(outer):
             return {"status": "empty", "newest": None, "valid_replicas": 0}
         raise MediaError("SwiftOS A/B boot-control state is unavailable")
+    media_identities = {
+        (
+            record["media_layout_fingerprint"],
+            record["slot_block_count"],
+        )
+        for _, record, _ in decoded
+    }
+    if len(media_identities) != 1:
+        raise MediaError(
+            "SwiftOS A/B boot-control replicas disagree on media identity"
+        )
     if len(decoded) == 2:
         left = decoded[0]
         right = decoded[1]
@@ -2685,11 +3089,15 @@ def validated_boot_files(
     partition,
     *,
     canonical_hidden_sectors: bool = False,
+    expected_hidden_sectors: int | None = None,
+    canonical_profile: FAT32SlotMetadataProfile | None = None,
 ) -> dict[str, dict[str, object]]:
     fat_files = FAT32Reader(
         image,
         partition,
         canonical_hidden_sectors=canonical_hidden_sectors,
+        expected_hidden_sectors=expected_hidden_sectors,
+        canonical_profile=canonical_profile,
     ).files()
     if "SHA256SUMS" not in fat_files:
         raise MediaError("FAT32 package has no SHA256SUMS")
@@ -2760,28 +3168,42 @@ def classify_media_layout(
 def inspect_ab_boot_slot(
     image,
     partition: dict[str, int | bool],
+    *,
+    profile: ABMediaLayoutProfile,
 ) -> dict[str, object]:
     """Inspect one slot without assuming its inactive peer is bootable yet."""
 
+    raw_digest = sha256_extent(
+        image,
+        int(partition["start_block"]),
+        int(partition["block_count"]),
+    ).hex()
     report: dict[str, object] = {
         "partition": partition,
-        "image_sha256": sha256_extent(
-            image,
-            int(partition["start_block"]),
-            int(partition["block_count"]),
-        ).hex(),
+        "image_sha256": raw_digest,
+        "journal_digest_kind": profile.journal_digest_kind,
     }
     try:
         report["files"] = validated_boot_files(
             image,
             partition,
-            canonical_hidden_sectors=True,
+            canonical_profile=AB_FAT32_METADATA_REVISION_2
+                if profile.revision == 2
+                else AB_FAT32_METADATA_REVISION_3,
+            expected_hidden_sectors=(
+                0 if profile.revision == 2 else int(partition["start_block"])
+            ),
         )
-        report["content_sha256"] = sha256_ab_slot_content(
-            image,
-            int(partition["start_block"]),
-            int(partition["block_count"]),
-        ).hex()
+        report["content_sha256"] = (
+            raw_digest
+            if profile.revision == 2
+            else sha256_ab_slot_content(
+                image,
+                int(partition["start_block"]),
+                int(partition["block_count"]),
+            ).hex()
+        )
+        report["journal_identity_sha256"] = report["content_sha256"]
     except MediaError as error:
         report["valid"] = False
         report["validation_error"] = str(error)
@@ -2826,9 +3248,12 @@ def reconcile_ab_transaction(
         raise MediaError(
             f"A/B confirmed boot slot is not a valid payload: {detail}"
         )
-    if confirmed_report["content_sha256"] != newest.get("confirmed_digest"):
+    if (
+        confirmed_report["journal_identity_sha256"]
+            != newest.get("confirmed_digest")
+    ):
         raise MediaError(
-            "A/B confirmed boot-slot content digest disagrees with journal"
+            "A/B confirmed boot-slot identity disagrees with journal"
         )
 
     repair_target = confirmed
@@ -2858,9 +3283,12 @@ def reconcile_ab_transaction(
             raise MediaError(
                 f"A/B completed candidate slot is not a valid payload: {detail}"
             )
-        if candidate_report["content_sha256"] != newest.get("candidate_digest"):
+        if (
+            candidate_report["journal_identity_sha256"]
+                != newest.get("candidate_digest")
+        ):
             raise MediaError(
-                "A/B completed candidate content digest disagrees with journal"
+                "A/B completed candidate identity disagrees with journal"
             )
     elif phase == "stable":
         # A failed trial may leave a different but complete release in the
@@ -2919,59 +3347,11 @@ def inspect_image(path: Path) -> dict[str, object]:
         version, media = classify_media_layout(entries)
         data = media["data"]
 
-        selector_report: dict[str, object] | None = None
-        slot_reports: dict[str, dict[str, object]] = {}
-        if version == "v1":
-            boot_files = validated_boot_files(image, media["boot"])
-        else:
-            slot_reports = {
-                "A": inspect_ab_boot_slot(image, media["slot_a"]),
-                "B": inspect_ab_boot_slot(image, media["slot_b"]),
-            }
-            selector_files = FAT12SelectorVolume.read_files(
-                image,
-                media["selector"],
-                allow_invalid_autoboot=True,
-            )
-            autoboot = selector_files["autoboot.txt"]
-            if autoboot == SELECTOR_AUTOBOOT_A:
-                default_slot: str | None = "A"
-            elif autoboot == SELECTOR_AUTOBOOT_B:
-                default_slot = "B"
-            else:
-                default_slot = None
-            rescue_report = {
-                name: {
-                    "byte_count": len(contents),
-                    "sha256": sha256(contents),
-                }
-                for name, contents in sorted(selector_files.items())
-                if name != "autoboot.txt"
-            }
-            selector_report = {
-                "partition": media["selector"],
-                "autoboot_byte_count": len(autoboot),
-                "autoboot_sha256": sha256(autoboot),
-                "autoboot_cluster": FAT12SelectorVolume.first_file_cluster,
-                "autoboot_partition_block": (
-                    FAT12SelectorVolume.reserved_sectors
-                    + FAT12SelectorVolume.fat_count
-                        * FAT12SelectorVolume.fat_sectors
-                    + FAT12SelectorVolume.root_directory_sectors
-                ),
-                "policy_valid": default_slot is not None,
-                "default_slot": default_slot,
-                "try_slot": (
-                    None if default_slot is None
-                    else "B" if default_slot == "A" else "A"
-                ),
-                "rescue": {
-                    "boot_partition": 1,
-                    "hardware_verified": False,
-                    "files": rescue_report,
-                },
-            }
-
+        # Decode the redundant data layout and journal before accepting any
+        # selector or slot interpretation. The journal fingerprint is the
+        # discriminator between the exact legacy revision-two format and the
+        # current revision-three format; an unknown value must not relax slot
+        # validation by accidentally falling through either decoder.
         data_start = int(data["start_block"])
         primary = read_exact(
             image,
@@ -3004,6 +3384,7 @@ def inspect_image(path: Path) -> dict[str, object]:
             else f"degraded-{decoded[0][0]}-only"
         )
         valid_outer_names = {name for name, _ in decoded}
+        profile: ABMediaLayoutProfile | None = None
         if version == "v2":
             boot_control = inspect_boot_control_journal(
                 primary,
@@ -3014,13 +3395,88 @@ def inspect_image(path: Path) -> dict[str, object]:
             newest_control = boot_control["newest"]
             if newest_control is None:
                 raise MediaError("A/B media has no initial boot-control state")
-            if (
-                int(newest_control["slot_block_count"])
-                    != int(media["slot_a"]["block_count"])
-                or newest_control["media_layout_fingerprint"]
-                    != f"0x{AB_MEDIA_LAYOUT_FINGERPRINT:016x}"
+            profile = ab_media_layout_profile(
+                newest_control["media_layout_fingerprint"]
+            )
+            if int(newest_control["slot_block_count"]) != int(
+                media["slot_a"]["block_count"]
             ):
                 raise MediaError("A/B boot-control state targets another layout")
+        else:
+            boot_control = {
+                "status": "not-present-on-v1",
+                "valid_replicas": 0,
+                "newest": None,
+            }
+
+        selector_report: dict[str, object] | None = None
+        slot_reports: dict[str, dict[str, object]] = {}
+        if version == "v1":
+            boot_files = validated_boot_files(image, media["boot"])
+        else:
+            assert profile is not None
+            selector_reader = (
+                LegacyFAT12SelectorVolumeRevision2
+                if profile.revision == 2
+                else FAT12SelectorVolume
+            )
+            selector_files = selector_reader.read_files(
+                image,
+                media["selector"],
+                allow_invalid_autoboot=True,
+            )
+            slot_reports = {
+                "A": inspect_ab_boot_slot(
+                    image,
+                    media["slot_a"],
+                    profile=profile,
+                ),
+                "B": inspect_ab_boot_slot(
+                    image,
+                    media["slot_b"],
+                    profile=profile,
+                ),
+            }
+            autoboot = selector_files["autoboot.txt"]
+            if autoboot == SELECTOR_AUTOBOOT_A:
+                default_slot: str | None = "A"
+            elif autoboot == SELECTOR_AUTOBOOT_B:
+                default_slot = "B"
+            else:
+                default_slot = None
+            rescue_report = {
+                name: {
+                    "byte_count": len(contents),
+                    "sha256": sha256(contents),
+                }
+                for name, contents in sorted(selector_files.items())
+                if name != "autoboot.txt"
+            }
+            selector_report = {
+                "partition": media["selector"],
+                "format_revision": profile.revision,
+                "read_only_compatibility": profile.legacy_read_only,
+                "autoboot_byte_count": len(autoboot),
+                "autoboot_sha256": sha256(autoboot),
+                "autoboot_cluster": selector_reader.first_file_cluster,
+                "autoboot_partition_block": (
+                    selector_reader.reserved_sectors
+                    + selector_reader.fat_count
+                        * selector_reader.fat_sectors
+                    + selector_reader.root_directory_sectors
+                ),
+                "policy_valid": default_slot is not None,
+                "default_slot": default_slot,
+                "try_slot": (
+                    None if default_slot is None
+                    else "B" if default_slot == "A" else "A"
+                ),
+                "rescue": {
+                    "boot_partition": 1,
+                    "hardware_verified": False,
+                    "files": rescue_report,
+                },
+            }
             ab_transaction = reconcile_ab_transaction(
                 slot_reports,
                 selector_default=default_slot,
@@ -3036,12 +3492,6 @@ def inspect_image(path: Path) -> dict[str, object]:
             # Compatibility field for read-only tooling that only needs the
             # currently preferred payload. A/B-aware consumers use boot_slots.
             boot_files = selected_files
-        else:
-            boot_control = {
-                "status": "not-present-on-v1",
-                "valid_replicas": 0,
-                "newest": None,
-            }
         records = persistent_records(image, data, layout)
         diagnostics = persistent_log_diagnostics(records)
         result: dict[str, object] = {
@@ -3060,6 +3510,8 @@ def inspect_image(path: Path) -> dict[str, object]:
             **diagnostics,
         }
         if selector_report is not None:
+            assert profile is not None
+            result["media_layout"] = ab_media_layout_report(profile)
             result["selector"] = selector_report
             result["boot_slots"] = slot_reports
             result["ab_transaction"] = ab_transaction

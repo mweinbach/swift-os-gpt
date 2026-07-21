@@ -15,6 +15,12 @@ import zlib
 REPOSITORY = Path(__file__).resolve().parents[2]
 PACKAGER = REPOSITORY / "Boards/RaspberryPi5/package-boot.sh"
 MEDIA_TOOL = REPOSITORY / "tools/build_rpi5_media.py"
+SELECTOR_AUTOBOOT_A = b"""[all]
+tryboot_a_b=1
+boot_partition=2
+[tryboot]
+boot_partition=3
+"""
 SELECTOR_AUTOBOOT_B = b"""[all]
 tryboot_a_b=1
 boot_partition=3
@@ -98,6 +104,169 @@ def relocate_slot_hidden_sectors(
         for boot_sector in (0, 6):
             target.seek((start_block + boot_sector) * 512 + 28)
             target.write(struct.pack("<I", start_block))
+
+
+def legacy_fat12_entry(
+    short_name: bytes,
+    first_cluster: int,
+    byte_count: int,
+) -> bytes:
+    entry = bytearray(32)
+    entry[0:11] = short_name
+    entry[11] = 0x20
+    for offset in (16, 18, 24):
+        struct.pack_into("<H", entry, offset, 0x0021)
+    struct.pack_into("<H", entry, 26, first_cluster)
+    struct.pack_into("<I", entry, 28, byte_count)
+    return bytes(entry)
+
+
+def set_legacy_fat12_value(
+    fat: bytearray,
+    cluster: int,
+    value: int,
+) -> None:
+    offset = cluster + cluster // 2
+    if cluster & 1:
+        fat[offset] = (fat[offset] & 0x0F) | ((value << 4) & 0xF0)
+        fat[offset + 1] = (value >> 4) & 0xFF
+    else:
+        fat[offset] = value & 0xFF
+        fat[offset + 1] = (
+            fat[offset + 1] & 0xF0
+        ) | ((value >> 8) & 0x0F)
+
+
+def install_revision_two_selector(
+    image: Path,
+    selector: tuple[int, int],
+    package: Path,
+) -> None:
+    start, count = selector
+    files = (
+        (b"AUTOBOOTTXT", SELECTOR_AUTOBOOT_A),
+        (b"CONFIG  TXT", (package / "RESCUE-CONFIG.txt").read_bytes()),
+        (b"KERNEL8 IMG", (package / "kernel8.img").read_bytes()),
+        (b"RESCUE  DTB", (package / "bcm2712-rpi-5-b.dtb").read_bytes()),
+    )
+    allocations: list[tuple[bytes, bytes, tuple[int, ...]]] = []
+    next_cluster = 2
+    for short_name, contents in files:
+        cluster_count = max(1, (len(contents) + 511) // 512)
+        clusters = tuple(range(next_cluster, next_cluster + cluster_count))
+        allocations.append((short_name, contents, clusters))
+        next_cluster += cluster_count
+    require(next_cluster - 2 <= count - 15,
+            "revision-two rescue fixture does not fit")
+
+    manifest = bytearray(128)
+    manifest[0:8] = b"SWRSQ001"
+    struct.pack_into("<HHHH", manifest, 8, 1, 128, 3, 0)
+    for index, (_, contents, _) in enumerate(allocations[1:]):
+        struct.pack_into("<I", manifest, 16 + index * 4, len(contents))
+        manifest[28 + index * 32:60 + index * 32] = hashlib.sha256(
+            contents
+        ).digest()
+    struct.pack_into(
+        "<I",
+        manifest,
+        124,
+        zlib.crc32(manifest[:124]) & 0xFFFF_FFFF,
+    )
+
+    boot = bytearray(512)
+    boot[0:3] = b"\xeb\x3c\x90"
+    boot[3:11] = b"SWIFTOS "
+    struct.pack_into("<H", boot, 11, 512)
+    boot[13] = 1
+    struct.pack_into("<H", boot, 14, 1)
+    boot[16] = 2
+    struct.pack_into("<H", boot, 17, 32)
+    struct.pack_into("<H", boot, 19, count)
+    boot[21] = 0xF8
+    struct.pack_into("<H", boot, 22, 6)
+    struct.pack_into("<H", boot, 24, 63)
+    struct.pack_into("<H", boot, 26, 255)
+    struct.pack_into("<I", boot, 28, start)
+    boot[36] = 0x80
+    boot[38] = 0x29
+    struct.pack_into("<I", boot, 39, 0x4354_4C31)
+    boot[43:54] = b"SWIFTOS-CTL"
+    boot[54:62] = b"FAT12   "
+    boot[64:192] = manifest
+    boot[510:512] = b"\x55\xaa"
+
+    fat = bytearray(6 * 512)
+    set_legacy_fat12_value(fat, 0, 0xFF8)
+    set_legacy_fat12_value(fat, 1, 0xFFF)
+    for _, _, clusters in allocations:
+        for index, cluster in enumerate(clusters):
+            value = clusters[index + 1] if index + 1 < len(clusters) else 0xFFF
+            set_legacy_fat12_value(fat, cluster, value)
+
+    root = bytearray(2 * 512)
+    for index, (short_name, contents, clusters) in enumerate(allocations):
+        root[index * 32:(index + 1) * 32] = legacy_fat12_entry(
+            short_name,
+            clusters[0],
+            len(contents),
+        )
+
+    with image.open("r+b") as target:
+        target.seek(start * 512)
+        target.write(bytes(count * 512))
+        target.seek(start * 512)
+        target.write(boot)
+        target.write(fat)
+        target.write(fat)
+        target.write(root)
+        data_start = start + 15
+        for _, contents, clusters in allocations:
+            for index, cluster in enumerate(clusters):
+                chunk = contents[index * 512:(index + 1) * 512]
+                target.seek((data_start + cluster - 2) * 512)
+                target.write(chunk.ljust(512, b"\0"))
+
+
+def convert_to_revision_two(
+    source: Path,
+    destination: Path,
+    package: Path,
+    selector: tuple[int, int],
+    slot_a: tuple[int, int],
+    slot_b: tuple[int, int],
+    data: tuple[int, int],
+) -> str:
+    shutil.copyfile(source, destination)
+    install_revision_two_selector(destination, selector, package)
+    with destination.open("r+b") as target:
+        for slot_start, _ in (slot_a, slot_b):
+            for relative_block in (0, 6):
+                target.seek((slot_start + relative_block) * 512 + 28)
+                target.write(bytes(4))
+    raw_digest = extent_digest(destination, *slot_a)
+    require(
+        extent_digest(destination, *slot_b) == raw_digest,
+        "revision-two raw slots did not converge",
+    )
+    with destination.open("r+b") as target:
+        for replica in (0, 1):
+            offset = (data[0] + replica) * 512 + 64
+            target.seek(offset)
+            record = bytearray(target.read(160))
+            require(len(record) == 160,
+                    "revision-two boot-control fixture is truncated")
+            record[72:104] = bytes.fromhex(raw_digest)
+            struct.pack_into("<Q", record, 136, 0x5357_4142_0000_0002)
+            struct.pack_into(
+                "<I",
+                record,
+                156,
+                zlib.crc32(record[:156]) & 0xFFFF_FFFF,
+            )
+            target.seek(offset)
+            target.write(record)
+    return raw_digest
 
 
 def package_fixture(root: Path, *, mutate_kernel: bool = False) -> Path:
@@ -693,6 +862,43 @@ def main() -> int:
         require(layout["kernel_log_start_block"] == 2, "log arena start")
         require(layout["kernel_log_block_count"] == 64, "log arena count")
         require(layout["user_data_start_block"] == 66, "user arena start")
+
+        legacy_revision_two = root / "legacy-revision-two.img"
+        legacy_digest = convert_to_revision_two(
+            first,
+            legacy_revision_two,
+            package,
+            selector,
+            slot_a,
+            slot_b,
+            data,
+        )
+        legacy_report = inspect(legacy_revision_two)
+        require(
+            legacy_report["media_layout"]["revision"] == 2
+                and legacy_report["media_layout"]["compatibility"]
+                    == "legacy-read-only"
+                and legacy_report["media_layout"]
+                    ["requires_whole_card_reflash"] is True,
+            "revision-two whole image lost its read-only compatibility profile",
+        )
+        require(
+            legacy_report["selector"]["format_revision"] == 2
+                and legacy_report["selector"]["read_only_compatibility"] is True
+                and "rescue.dtb"
+                    in legacy_report["selector"]["rescue"]["files"],
+            "revision-two selector was not decoded by its frozen reader",
+        )
+        require(
+            legacy_report["boot_slots"]["A"]["image_sha256"] == legacy_digest
+                and legacy_report["boot_slots"]["A"]
+                    ["journal_identity_sha256"] == legacy_digest
+                and legacy_report["boot_slots"]["B"]
+                    ["journal_identity_sha256"] == legacy_digest
+                and legacy_report["boot_control_journal"]["newest"]
+                    ["confirmed_digest"] == legacy_digest,
+            "revision-two raw-slot journal identity was not preserved",
+        )
 
         torn_journal = root / "torn-journal.img"
         shutil.copyfile(first, torn_journal)

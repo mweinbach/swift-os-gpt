@@ -30,7 +30,7 @@ private struct TestBootUpdateRuntimePort: BootUpdateRuntimePort {
     var selectorCommitResult = BootUpdateRuntimeSelectorCommitResult.committed
     var recoverySelectorRepair:
         BootUpdateRuntimeRecoverySelectorRepairResult = .repaired
-    var peerMirrorSucceeds = true
+    var peerMirrorResult = BootUpdateRuntimePeerMirrorResult.mirrored
     var candidateVerification:
         BootUpdateRuntimeCandidateVerificationResult = .inProgress
     var mirrorVerification:
@@ -106,10 +106,12 @@ private struct TestBootUpdateRuntimePort: BootUpdateRuntimePort {
         return recoverySelectorRepair
     }
 
-    mutating func mirrorPeer(_ action: BootPeerMirrorAction) -> Bool {
+    mutating func mirrorPeer(
+        _ action: BootPeerMirrorAction
+    ) -> BootUpdateRuntimePeerMirrorResult {
         expect(leaseHeld, "peer mirror escaped the runtime media lease")
         events.append(.mirror(action))
-        return peerMirrorSucceeds
+        return peerMirrorResult
     }
 
     mutating func verifyMirror(
@@ -671,6 +673,29 @@ struct BootUpdateRuntimeExecutorTests {
             layout: layout
         ) else { fail("normal confirmed boot was not recovered") }
         port.events = []
+
+        port.peerMirrorResult = .inProgress
+        expect(
+            confirmedExecutor.serviceOnce(
+                through: &port,
+                observation: normal(.b),
+                layout: layout,
+                maximumBlockCount: 3
+            ) == .verificationInProgress(.mirrorSource(.b)),
+            "confirmed source hashing was treated as mirror failure"
+        )
+        expect(
+            port.record!.nextCandidateBlock == 0,
+            "source hash progress advanced the durable mirror cursor"
+        )
+        expect(
+            !port.events.contains(where: {
+                if case .commit = $0 { return true }
+                return false
+            }),
+            "source hash progress committed a false mirror transition"
+        )
+        port.peerMirrorResult = .mirrored
 
         while port.record!.nextCandidateBlock < layout.slotBlockCount {
             guard case .progressed = confirmedExecutor.serviceOnce(

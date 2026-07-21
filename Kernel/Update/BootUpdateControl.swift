@@ -660,6 +660,7 @@ enum BootControlJournalOpenFailure: Equatable {
     case readFailed(block: UInt64, result: BlockDeviceIOResult)
     case corruptRecord
     case conflictingRecords
+    case conflictingMediaIdentity
 }
 
 enum BootControlJournalOpenResult: Equatable {
@@ -673,6 +674,7 @@ enum BootControlJournalCommitFailure: Equatable {
     case invalidDataVolume
     case readFailed(block: UInt64, result: BlockDeviceIOResult)
     case existingJournal(BootControlJournalOpenFailure)
+    case mediaIdentityMismatch
     case sequenceMismatch
     case encodeFailed
     case writeFailed(block: UInt64, result: BlockDeviceIOResult)
@@ -760,6 +762,9 @@ enum BootControlJournal {
             return .empty
         }
         if let record0, let record1 {
+            guard sameMediaIdentity(record0, record1) else {
+                return .failure(.conflictingMediaIdentity)
+            }
             if record0.sequence == record1.sequence,
                record0 != record1 {
                 return .failure(.conflictingRecords)
@@ -819,6 +824,9 @@ enum BootControlJournal {
 
         let target: UInt64
         if let existing0, let existing1 {
+            guard sameMediaIdentity(existing0, existing1) else {
+                return .failure(.existingJournal(.conflictingMediaIdentity))
+            }
             if existing0.sequence == existing1.sequence,
                existing0 != existing1 {
                 return .failure(.existingJournal(.conflictingRecords))
@@ -835,6 +843,9 @@ enum BootControlJournal {
                     scratch: scratch
                 )
             }
+            guard sameMediaIdentity(record, current) else {
+                return .failure(.mediaIdentityMismatch)
+            }
             guard current.sequence != UInt64.max,
                   record.sequence == current.sequence + 1
             else { return .failure(.sequenceMismatch) }
@@ -848,6 +859,9 @@ enum BootControlJournal {
                     on: &device,
                     scratch: scratch
                 )
+            }
+            guard sameMediaIdentity(record, existing) else {
+                return .failure(.mediaIdentityMismatch)
             }
             guard existing.sequence != UInt64.max,
                   record.sequence == existing.sequence + 1
@@ -950,6 +964,14 @@ enum BootControlJournal {
             index += 1
         }
         return true
+    }
+
+    private static func sameMediaIdentity(
+        _ lhs: BootControlRecord,
+        _ rhs: BootControlRecord
+    ) -> Bool {
+        lhs.mediaLayoutFingerprint == rhs.mediaLayoutFingerprint
+            && lhs.slotBlockCount == rhs.slotBlockCount
     }
 
     private static func validDataVolumePrefix(

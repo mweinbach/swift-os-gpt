@@ -9,6 +9,7 @@ enum BootUpdateRuntimeJournalLoadResult: Equatable {
 
 enum BootUpdateRuntimeVerificationKind: Equatable {
     case candidate(BootSlot)
+    case mirrorSource(BootSlot)
     case mirror(BootSlot)
     case recoverySelector(BootSlot)
 }
@@ -45,6 +46,15 @@ enum BootUpdateRuntimeMirrorVerificationResult: Equatable {
     case failed
 }
 
+/// Confirmed-source hashing is cooperative and must finish before the first
+/// peer write in this boot. A reconstructed port has no in-memory proof and
+/// therefore returns `inProgress` while it revalidates a resumed mirror.
+enum BootUpdateRuntimePeerMirrorResult: Equatable {
+    case inProgress
+    case mirrored
+    case failed
+}
+
 /// One serialization boundary for every persistent A/B media operation.
 ///
 /// A physical-board implementation must route this port through the same owner
@@ -52,6 +62,11 @@ enum BootUpdateRuntimeMirrorVerificationResult: Equatable {
 /// prevent every aliased block-device view from issuing I/O until release. In
 /// particular, implementing this protocol beside an independently active raw
 /// SD alias is invalid even if each individual method is synchronous.
+/// Cooperative hashes and source proofs may span lease acquisitions, so the
+/// owner must also keep both boot-slot extents mutation-quiescent for the full
+/// lifetime of a pending update transaction. A platform that cannot enforce
+/// that ownership must invalidate progress with a mutation epoch and rehash;
+/// it must never reuse a proof across an untracked slot write.
 protocol BootUpdateRuntimePort {
     mutating func acquireExclusiveMediaLease() -> Bool
     mutating func releaseExclusiveMediaLease()
@@ -87,10 +102,13 @@ protocol BootUpdateRuntimePort {
         _ action: BootRecoverySelectorRepairAction
     ) -> BootUpdateRuntimeRecoverySelectorRepairResult
 
-    /// Copies exactly one bounded, synchronized, read-back-verified chunk from
-    /// the confirmed slot into its peer. It must preserve the action's
+    /// Hashes the complete confirmed source against the action identity before
+    /// any peer write in this boot, then copies exactly one bounded,
+    /// synchronized, read-back-verified chunk. It must preserve the action's
     /// activation-last write policy.
-    mutating func mirrorPeer(_ action: BootPeerMirrorAction) -> Bool
+    mutating func mirrorPeer(
+        _ action: BootPeerMirrorAction
+    ) -> BootUpdateRuntimePeerMirrorResult
 
     mutating func verifyMirror(
         _ action: BootPeerMirrorVerificationAction
@@ -377,8 +395,15 @@ struct BootUpdateRuntimeExecutor {
             return .confirmedResetRequired(reboot)
 
         case .mirrorPeer(let mirror):
-            guard port.mirrorPeer(mirror) else {
+            switch port.mirrorPeer(mirror) {
+            case .inProgress:
+                return .verificationInProgress(
+                    .mirrorSource(mirror.sourceSlot)
+                )
+            case .failed:
                 return .failure(.peerMirrorFailed)
+            case .mirrored:
+                break
             }
             return progressed(
                 BootUpdateOrchestrator.recordVerifiedMirrorProgress(

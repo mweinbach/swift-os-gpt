@@ -12,12 +12,142 @@ struct RaspberryPi5ABUpdatePortTests {
     private static let slotBlockCount: UInt64 = 256
 
     static func main() {
+        acceptsBuilderRevisionThreeDigestGolden()
         borrowsOneDeviceForJournalHashAndMirrorWork()
+        verifiesConfirmedSourceBeforeFreshAndResumedMirrorWrites()
         failsClosedWithoutAFullSlotReleaseSource()
         suspendsBeforeWritingAnInvalidImmutableRescue()
         rejectsIncompatibleGeometryAndScratch()
         classifiesBootFailuresBeforePublishingStorageAliases()
-        print("Raspberry Pi 5 A/B update port: 5 groups passed")
+        print("Raspberry Pi 5 A/B update port: 7 groups passed")
+    }
+
+    /// The Python half of this golden invokes the production media builder on
+    /// the same compact fixture. This half independently constructs both
+    /// physical slot byte streams and requires the Embedded Swift update port
+    /// to accept the builder's fixed revision-three digest.
+    private static func acceptsBuilderRevisionThreeDigestGolden() {
+        typealias Golden = RaspberryPiABSlotDigestRevision3Golden
+        expect(Golden.fixtureVersion == 1, "unknown digest fixture")
+        expect(
+            Golden.logicalBlockByteCount == 512,
+            "digest fixture changed the Pi logical sector"
+        )
+        expect(
+            Golden.slotBlockCount == slotBlockCount,
+            "digest fixture changed the test slot extent"
+        )
+        expect(
+            Golden.slotAStartBlock == 2_048
+                && Golden.slotBStartBlock == 2_304,
+            "digest fixture changed the test slot locations"
+        )
+        expect(
+            Golden.hiddenSectorRelativeBlocks == [0, 6]
+                && Golden.hiddenSectorByteOffset == 28
+                && Golden.hiddenSectorByteCount == 4
+                && Golden.hiddenSectorEncoding == "little-endian-u32",
+            "digest fixture changed the FAT32 metadata contract"
+        )
+        expect(
+            Golden.contentPatternModulus == 256
+                && Golden.contentPatternMultiplier >= 0
+                && Golden.contentPatternIncrement >= 0,
+            "digest fixture has an unsupported byte pattern"
+        )
+        guard Golden.mediaLayoutFingerprint
+                == RaspberryPiABUpdateLayout.mediaLayoutFingerprint,
+              let digestBytes = decodeHex(Golden.normalizedSHA256Hex),
+              let expectedDigest = digestBytes.withUnsafeBytes({
+                  BootImageDigest(bytes: $0)
+              })
+        else { fail("invalid revision-three digest golden") }
+
+        var device = MemoryBlockDevice(blockCount: totalBlockCount)
+        let media = makeMedia()
+        fillGoldenSlot(on: device, range: media.slotA.range)
+        fillGoldenSlot(on: device, range: media.slotB.range)
+        expect(
+            readSlotHiddenSectors(
+                on: device,
+                range: media.slotA.range,
+                relativeBlock: 0,
+                byteOffset: Golden.hiddenSectorByteOffset
+            ) != readSlotHiddenSectors(
+                on: device,
+                range: media.slotB.range,
+                relativeBlock: 0,
+                byteOffset: Golden.hiddenSectorByteOffset
+            ),
+            "digest golden did not create location-specific raw slots"
+        )
+
+        withScratch(byteCount: 1_024) { scratch in
+            withUnsafeMutablePointer(to: &device) { pointer in
+                guard var port = RaspberryPi5ABUpdatePort(
+                          borrowing: pointer,
+                          media: media,
+                          scratch: scratch
+                      )
+                else { fail("digest golden did not create an update port") }
+                expect(port.acquireExclusiveMediaLease(), "golden lease")
+
+                let descriptor = BootReleaseDescriptor(
+                    generation: 1,
+                    digest: expectedDigest,
+                    blockCount: Golden.slotBlockCount,
+                    trialToken: 1
+                )!
+                for slot: BootSlot in [.a, .b] {
+                    let action = BootCandidateVerificationAction(
+                        slot: slot,
+                        descriptor: descriptor
+                    )
+                    expect(
+                        verifyToCompletion(action, through: &port)
+                            == .verified(descriptor),
+                        "Swift port digest disagrees with the Python golden"
+                    )
+                }
+
+                // Each physical slot and both FAT32 boot-sector replicas must
+                // be validated, rather than merely zeroed before hashing.
+                for slot: BootSlot in [.a, .b] {
+                    let range = port.layout.range(for: slot)
+                    for relativeBlock in
+                            Golden.hiddenSectorRelativeBlocks {
+                        let offset = slotByteOffset(
+                            range: range,
+                            relativeBlock: relativeBlock,
+                            byteOffset: Golden.hiddenSectorByteOffset
+                        )
+                        let original = readLE32(
+                            pointer.pointee.bytes,
+                            at: offset
+                        )
+                        writeLE32(
+                            original &+ 1,
+                            on: pointer.pointee,
+                            at: offset
+                        )
+                        let action = BootCandidateVerificationAction(
+                            slot: slot,
+                            descriptor: descriptor
+                        )
+                        expect(
+                            port.verifyCandidate(action) == .failed,
+                            "Swift port accepted a wrong BPB_HiddSec replica"
+                        )
+                        writeLE32(
+                            original,
+                            on: pointer.pointee,
+                            at: offset
+                        )
+                    }
+                }
+                port.releaseExclusiveMediaLease()
+            }
+        }
     }
 
     private static func classifiesBootFailuresBeforePublishingStorageAliases() {
@@ -147,13 +277,14 @@ struct RaspberryPi5ABUpdatePortTests {
                 }
                 let beforeMalformedAction = pointer.pointee.bytes
                 expect(
-                    !port.mirrorPeer(BootPeerMirrorAction(
+                    port.mirrorPeer(BootPeerMirrorAction(
                         sourceSlot: .a,
                         destinationSlot: .b,
                         plan: plan,
+                        expectedDigest: digest,
                         nextBlock: slotBlockCount - 2,
                         blockCount: 2
-                    )),
+                    )) == .failed,
                     "malformed activation action was accepted"
                 )
                 expect(
@@ -172,10 +303,25 @@ struct RaspberryPi5ABUpdatePortTests {
                         sourceSlot: .a,
                         destinationSlot: .b,
                         plan: plan,
+                        expectedDigest: digest,
                         nextBlock: progress,
                         blockCount: count
                     )
-                    expect(port.mirrorPeer(action), "verified mirror chunk")
+                    if progress == 0 {
+                        let beforeSourceHash = pointer.pointee.bytes
+                        expect(
+                            port.mirrorPeer(action) == .inProgress,
+                            "confirmed source hash did not yield cooperatively"
+                        )
+                        expect(
+                            pointer.pointee.bytes == beforeSourceHash,
+                            "partial source hash modified the peer"
+                        )
+                    }
+                    expect(
+                        port.mirrorPeer(action) == .mirrored,
+                        "verified mirror chunk"
+                    )
                     progress += count
                 }
                 expectSlotsSemanticallyEqual(
@@ -210,6 +356,112 @@ struct RaspberryPi5ABUpdatePortTests {
                     port.loadBootControlRecord() == .unavailable,
                     "journal I/O escaped the exclusive media lease"
                 )
+            }
+        }
+    }
+
+    /// A journaled peer cursor may survive reset while the port's in-memory
+    /// source proof cannot. Both a fresh copy and a reconstructed, resumed copy
+    /// must therefore finish a complete confirmed-slot hash before changing
+    /// even one destination byte.
+    private static func verifiesConfirmedSourceBeforeFreshAndResumedMirrorWrites() {
+        var device = MemoryBlockDevice(blockCount: totalBlockCount)
+        let media = makeMedia()
+        fillSlotA(on: device, media: media)
+        let digest = digestOfSlotA(on: device, media: media)
+
+        withScratch(byteCount: 1_024) { scratch in
+            withUnsafeMutablePointer(to: &device) { pointer in
+                guard var freshPort = RaspberryPi5ABUpdatePort(
+                          borrowing: pointer,
+                          media: media,
+                          scratch: scratch
+                      ),
+                      let plan = freshPort.layout.copyPlan(
+                          from: .a,
+                          to: .b
+                      ),
+                      let firstCount = plan.writePolicy.boundedOperationCount(
+                          atProgress: 0,
+                          blockCount: slotBlockCount,
+                          requested: 8
+                      )
+                else { fail("fresh mirror source-proof fixture") }
+                expect(
+                    freshPort.acquireExclusiveMediaLease(),
+                    "fresh mirror lease"
+                )
+                let first = BootPeerMirrorAction(
+                    sourceSlot: .a,
+                    destinationSlot: .b,
+                    plan: plan,
+                    expectedDigest: digest,
+                    nextBlock: 0,
+                    blockCount: firstCount
+                )
+                let beforeFreshProof = pointer.pointee.bytes
+                expect(
+                    freshPort.mirrorPeer(first) == .inProgress,
+                    "fresh mirror skipped its complete source proof"
+                )
+                expect(
+                    pointer.pointee.bytes == beforeFreshProof,
+                    "fresh source proof changed the destination"
+                )
+                expect(
+                    freshPort.mirrorPeer(first) == .mirrored,
+                    "fresh mirror did not follow its source proof"
+                )
+                expect(
+                    pointer.pointee.bytes != beforeFreshProof,
+                    "fresh verified mirror wrote no destination bytes"
+                )
+                freshPort.releaseExclusiveMediaLease()
+
+                // Reconstructing the physical port models a boot between a
+                // durable mirror cursor and the next bounded peer operation.
+                guard var resumedPort = RaspberryPi5ABUpdatePort(
+                          borrowing: pointer,
+                          media: media,
+                          scratch: scratch
+                      ),
+                      let resumedCount = plan.writePolicy
+                          .boundedOperationCount(
+                              atProgress: firstCount,
+                              blockCount: slotBlockCount,
+                              requested: 8
+                          )
+                else { fail("resumed mirror source-proof fixture") }
+                expect(
+                    resumedPort.acquireExclusiveMediaLease(),
+                    "resumed mirror lease"
+                )
+                let resumed = BootPeerMirrorAction(
+                    sourceSlot: .a,
+                    destinationSlot: .b,
+                    plan: plan,
+                    expectedDigest: digest,
+                    nextBlock: firstCount,
+                    blockCount: resumedCount
+                )
+                let beforeResumedProof = pointer.pointee.bytes
+                expect(
+                    resumedPort.mirrorPeer(resumed) == .inProgress,
+                    "resumed mirror reused a lost source proof"
+                )
+                expect(
+                    pointer.pointee.bytes == beforeResumedProof,
+                    "resumed source proof changed the destination"
+                )
+                expect(
+                    resumedPort.mirrorPeer(resumed) == .mirrored,
+                    "resumed mirror did not follow its source proof"
+                )
+                expect(
+                    pointer.pointee.bytes != beforeResumedProof,
+                    "resumed verified mirror wrote no destination bytes"
+                )
+                resumedPort.releaseExclusiveMediaLease()
             }
         }
     }
@@ -698,6 +950,101 @@ struct RaspberryPi5ABUpdatePortTests {
             | UInt32(bytes[offset + 1]) << 8
             | UInt32(bytes[offset + 2]) << 16
             | UInt32(bytes[offset + 3]) << 24
+    }
+
+    private static func fillGoldenSlot(
+        on device: MemoryBlockDevice,
+        range: BlockDeviceRange
+    ) {
+        typealias Golden = RaspberryPiABSlotDigestRevision3Golden
+        expect(
+            range.blockCount == Golden.slotBlockCount,
+            "golden slot extent mismatch"
+        )
+        let start = Int(range.startBlock) * Golden.logicalBlockByteCount
+        let count = Int(range.blockCount) * Golden.logicalBlockByteCount
+        var index = 0
+        while index < count {
+            device.bytes[start + index] = UInt8(
+                (index * Golden.contentPatternMultiplier
+                    + Golden.contentPatternIncrement)
+                    % Golden.contentPatternModulus
+            )
+            index += 1
+        }
+        for relativeBlock in Golden.hiddenSectorRelativeBlocks {
+            writeLE32(
+                UInt32(range.startBlock),
+                on: device,
+                at: slotByteOffset(
+                    range: range,
+                    relativeBlock: relativeBlock,
+                    byteOffset: Golden.hiddenSectorByteOffset
+                )
+            )
+        }
+    }
+
+    private static func readSlotHiddenSectors(
+        on device: MemoryBlockDevice,
+        range: BlockDeviceRange,
+        relativeBlock: UInt64,
+        byteOffset: Int
+    ) -> UInt32 {
+        readLE32(
+            device.bytes,
+            at: slotByteOffset(
+                range: range,
+                relativeBlock: relativeBlock,
+                byteOffset: byteOffset
+            )
+        )
+    }
+
+    private static func slotByteOffset(
+        range: BlockDeviceRange,
+        relativeBlock: UInt64,
+        byteOffset: Int
+    ) -> Int {
+        Int(range.startBlock + relativeBlock) * 512 + byteOffset
+    }
+
+    private static func verifyToCompletion(
+        _ action: BootCandidateVerificationAction,
+        through port: inout RaspberryPi5ABUpdatePort<MemoryBlockDevice>
+    ) -> BootUpdateRuntimeCandidateVerificationResult {
+        var passes = 0
+        while passes < 4 {
+            let result = port.verifyCandidate(action)
+            if result != .inProgress { return result }
+            passes += 1
+        }
+        return .inProgress
+    }
+
+    private static func decodeHex(_ value: String) -> [UInt8]? {
+        let characters = Array(value.utf8)
+        guard characters.count == 64 else { return nil }
+        var output = [UInt8]()
+        output.reserveCapacity(32)
+        var index = 0
+        while index < characters.count {
+            guard let high = hexadecimalNibble(characters[index]),
+                  let low = hexadecimalNibble(characters[index + 1])
+            else { return nil }
+            output.append(high << 4 | low)
+            index += 2
+        }
+        return output
+    }
+
+    private static func hexadecimalNibble(_ character: UInt8) -> UInt8? {
+        switch character {
+        case 48...57: return character - 48
+        case 65...70: return character - 65 + 10
+        case 97...102: return character - 97 + 10
+        default: return nil
+        }
     }
 
     private static func withScratch(

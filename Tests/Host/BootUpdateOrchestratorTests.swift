@@ -29,7 +29,8 @@ struct BootUpdateOrchestratorTests {
         recoversSelectorCommitAndRejectsInvalidTransitions()
         journalsAtomicConfirmationAndMirrorIntent()
         mapsPiFATBootabilityAfterPayloadProgress()
-        print("boot update orchestrator host tests: 6 groups passed")
+        rejectsUnsafeFAT32LayoutPolicies()
+        print("boot update orchestrator host tests: 7 groups passed")
     }
 
     private static func stagesOnlyTheInactiveSlotBeforeTrialAuthorization() {
@@ -312,6 +313,24 @@ struct BootUpdateOrchestratorTests {
                "mirror source range")
         expect(first.plan.destination == layout.slotA,
                "mirror destination range")
+        expect(first.expectedDigest == newDigest,
+               "mirror omitted the confirmed source identity")
+        expect(
+            BootUpdateOrchestrator.recordVerifiedMirrorProgress(
+                in: record,
+                observation: normal(.b),
+                layout: layout,
+                completed: BootPeerMirrorAction(
+                    sourceSlot: first.sourceSlot,
+                    destinationSlot: first.destinationSlot,
+                    plan: first.plan,
+                    expectedDigest: oldDigest,
+                    nextBlock: first.nextBlock,
+                    blockCount: first.blockCount
+                )
+            ) == .failure(.invalidVerifiedProgress),
+            "mirror progress accepted an unproven source identity"
+        )
 
         record = takePersist(
             BootUpdateOrchestrator.recordVerifiedMirrorProgress(
@@ -800,6 +819,93 @@ struct BootUpdateOrchestratorTests {
                     blockCount: 10
                 ) == 0,
             "Pi primary boot sector was not the final bootability commit"
+        )
+    }
+
+    private static func rejectsUnsafeFAT32LayoutPolicies() {
+        let slotA = BlockDeviceRange(
+            startBlock: 2,
+            blockCount: 10,
+            within: 40
+        )!
+        let slotB = BlockDeviceRange(
+            startBlock: 20,
+            blockCount: 10,
+            within: 40
+        )!
+        let metadata = BootSlotMetadataPolicy.fat32HiddenSectors(
+            primaryBootBlock: 0,
+            backupBootBlock: 6
+        )
+        expect(
+            BootSlotLayout(
+                slotA: slotA,
+                slotB: slotB,
+                mediaLayoutFingerprint: fingerprint,
+                writePolicy: .direct,
+                metadataPolicy: metadata
+            ) == nil,
+            "layout accepted direct FAT32 metadata writes"
+        )
+        expect(
+            BootSlotLayout(
+                slotA: slotA,
+                slotB: slotB,
+                mediaLayoutFingerprint: fingerprint,
+                writePolicy: .deferredActivation(
+                    firstCommitBlock: 0,
+                    lastCommitBlock: 6
+                ),
+                metadataPolicy: metadata
+            ) == nil,
+            "layout accepted primary-first FAT32 activation"
+        )
+        expect(
+            BootSlotLayout(
+                slotA: slotA,
+                slotB: slotB,
+                mediaLayoutFingerprint: fingerprint,
+                writePolicy: .deferredActivation(
+                    firstCommitBlock: 5,
+                    lastCommitBlock: 0
+                ),
+                metadataPolicy: metadata
+            ) == nil,
+            "layout accepted a mismatched FAT32 backup block"
+        )
+        expect(
+            BootSlotLayout(
+                slotA: slotA,
+                slotB: slotB,
+                mediaLayoutFingerprint: fingerprint,
+                writePolicy: .deferredActivation(
+                    firstCommitBlock: 6,
+                    lastCommitBlock: 1
+                ),
+                metadataPolicy: metadata
+            ) == nil,
+            "layout accepted a mismatched FAT32 primary block"
+        )
+        expect(
+            BootSlotLayout(
+                slotA: slotA,
+                slotB: slotB,
+                mediaLayoutFingerprint: fingerprint,
+                writePolicy: .deferredActivation(
+                    firstCommitBlock: 6,
+                    lastCommitBlock: 0
+                ),
+                metadataPolicy: metadata
+            ) != nil,
+            "layout rejected backup-first FAT32 activation"
+        )
+        expect(
+            BootSlotLayout(
+                slotA: slotA,
+                slotB: slotB,
+                mediaLayoutFingerprint: fingerprint
+            ) != nil,
+            "layout rejected metadata-free direct writes"
         )
     }
 

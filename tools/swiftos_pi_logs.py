@@ -667,11 +667,21 @@ def card_summary_lines(report: Mapping[str, object]) -> list[str]:
         )
     lines = [
         f"source: {source_path} (read-only)",
+    ]
+    media_layout = report.get("media_layout")
+    if isinstance(media_layout, dict):
+        revision = media_layout.get("revision", "unknown")
+        compatibility = media_layout.get("compatibility", "unknown")
+        line = f"media layout: revision {revision}; {compatibility}"
+        if media_layout.get("requires_whole_card_reflash") is True:
+            line += "; whole-card reflash required"
+        lines.append(line)
+    lines.extend((
         f"data superblocks: {report.get('data_superblock_status', 'unknown')}",
         f"capture: {status}; boot epochs {boot_count}",
         f"sequences: {_sequence_summary(report)}",
         console_line,
-    ]
+    ))
     diagnostic_label = "diagnostic markers"
     if isinstance(latest, dict):
         index = int(latest["epoch_index"]) + 1

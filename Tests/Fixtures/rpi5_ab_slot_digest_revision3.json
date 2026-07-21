@@ -1,0 +1,20 @@
+{
+  "fixtureVersion": 1,
+  "mediaLayoutFingerprint": "5357414200000003",
+  "logicalBlockByteCount": 512,
+  "slotBlockCount": 256,
+  "slotAStartBlock": 2048,
+  "slotBStartBlock": 2304,
+  "contentPattern": {
+    "multiplier": 37,
+    "increment": 11,
+    "modulus": 256
+  },
+  "fat32HiddenSectors": {
+    "relativeBlocks": [0, 6],
+    "byteOffset": 28,
+    "byteCount": 4,
+    "encoding": "little-endian-u32"
+  },
+  "normalizedSHA256": "b82cd79876de9d4f6ae35efe51fceffb924cbb3569106bd027d551753d8ba391"
+}

@@ -139,6 +139,86 @@ def blank_fixture_bytes(log_blocks: int) -> tuple[bytearray, int]:
     return result, data_start
 
 
+def ab_fixture_bytes(fingerprint: int) -> bytearray:
+    selector_start = 1
+    selector_blocks = 2_047
+    slot_blocks = 8
+    slot_a_start = 2_048
+    slot_b_start = slot_a_start + slot_blocks
+    data_start = slot_b_start + slot_blocks
+    data_blocks = 32
+    result = bytearray((data_start + data_blocks) * 512)
+    selector = bytearray(partition_entry(
+        media.FAT12_TYPE,
+        selector_start,
+        selector_blocks,
+    ))
+    selector[0] = 0x80
+    result[446:462] = selector
+    result[462:478] = partition_entry(
+        media.FAT32_LBA_TYPE,
+        slot_a_start,
+        slot_blocks,
+    )
+    result[478:494] = partition_entry(
+        media.FAT32_LBA_TYPE,
+        slot_b_start,
+        slot_blocks,
+    )
+    result[494:510] = partition_entry(
+        media.SWIFTOS_DATA_TYPE,
+        data_start,
+        data_blocks,
+    )
+    result[510:512] = b"\x55\xaa"
+
+    journal = bytearray(media.initial_boot_control_record(
+        slot_digest=bytes([0xA5]) * 32,
+        slot_block_count=slot_blocks,
+    ))
+    struct.pack_into("<Q", journal, 136, fingerprint)
+    struct.pack_into(
+        "<I",
+        journal,
+        156,
+        zlib.crc32(journal[:156]) & 0xFFFF_FFFF,
+    )
+    superblock = bytearray(media.data_superblock(data_blocks, 2))
+    start = media.BOOT_CONTROL_OFFSET
+    superblock[start:start + media.BOOT_CONTROL_BYTES] = journal
+    for replica in (0, 1):
+        offset = (data_start + replica) * 512
+        result[offset:offset + 512] = superblock
+    return result
+
+
+def rewrite_ab_journal_replica(
+    fixture: bytearray,
+    replica: int,
+    *,
+    sequence: int,
+    fingerprint: int | None = None,
+    slot_block_count: int | None = None,
+) -> None:
+    data_start = struct.unpack_from("<I", fixture, 502)[0]
+    offset = (
+        (data_start + replica) * 512 + media.BOOT_CONTROL_OFFSET
+    )
+    record = bytearray(fixture[offset:offset + media.BOOT_CONTROL_BYTES])
+    struct.pack_into("<Q", record, 16, sequence)
+    if fingerprint is not None:
+        struct.pack_into("<Q", record, 136, fingerprint)
+    if slot_block_count is not None:
+        struct.pack_into("<Q", record, 64, slot_block_count)
+    struct.pack_into(
+        "<I",
+        record,
+        156,
+        zlib.crc32(record[:156]) & 0xFFFF_FFFF,
+    )
+    fixture[offset:offset + media.BOOT_CONTROL_BYTES] = record
+
+
 def install_record(
     fixture: bytearray,
     data_start: int,
@@ -393,6 +473,88 @@ def test_empty_arena_is_not_claimed_as_complete_console() -> None:
             "empty console stream was misleadingly called complete")
 
 
+def test_ab_layout_fingerprints_are_explicit_in_log_captures() -> None:
+    legacy, _ = inspect_bytes(ab_fixture_bytes(
+        media.AB_MEDIA_LAYOUT_FINGERPRINT_REVISION_2
+    ))
+    require(legacy["media_layout"] == {
+        "revision": 2,
+        "fingerprint": "0x5357414200000002",
+        "compatibility": "legacy-read-only",
+        "inspection_mode": "read-only",
+        "kernel_format_compatible": False,
+        "requires_whole_card_reflash": True,
+        "selector_format": "fat12-rescue-manifest-v1",
+        "fat32_hidden_sector_policy": "zero",
+        "journal_digest_kind": "raw-slot-sha256",
+    }, "revision-two log capture was not marked legacy read-only")
+    require(
+        legacy["boot_control_journal"]["newest"]
+            ["media_layout_fingerprint"] == "0x5357414200000002",
+        "revision-two journal fingerprint was not retained",
+    )
+
+    current, _ = inspect_bytes(ab_fixture_bytes(
+        media.AB_MEDIA_LAYOUT_FINGERPRINT_REVISION_3
+    ))
+    require(
+        current["media_layout"]["revision"] == 3
+        and current["media_layout"]["compatibility"] == "current"
+        and current["media_layout"]["requires_whole_card_reflash"] is False,
+        "current media layout compatibility changed",
+    )
+
+    expect_media_error(
+        lambda: inspect_bytes(ab_fixture_bytes(0x5357_4142_0000_0004)),
+        "unsupported SwiftOS A/B media layout fingerprint",
+    )
+
+    malformed_selector = ab_fixture_bytes(0x5357_4142_0000_0004)
+    malformed_selector[450] = media.FAT32_LBA_TYPE
+    expect_media_error(
+        lambda: inspect_bytes(malformed_selector),
+        "unsupported SwiftOS A/B media layout fingerprint",
+    )
+
+    salvageable = ab_fixture_bytes(
+        media.AB_MEDIA_LAYOUT_FINGERPRINT_REVISION_2
+    )
+    salvageable[450] = media.FAT32_LBA_TYPE
+    salvaged, _ = inspect_bytes(salvageable)
+    require(
+        salvaged["media_layout"]["compatibility"] == "legacy-read-only",
+        "known journal profile was hidden by damaged boot topology",
+    )
+
+    mixed_fingerprint = ab_fixture_bytes(
+        media.AB_MEDIA_LAYOUT_FINGERPRINT_REVISION_3
+    )
+    rewrite_ab_journal_replica(
+        mixed_fingerprint,
+        1,
+        sequence=2,
+        fingerprint=0x5357_4142_0000_0004,
+    )
+    expect_media_error(
+        lambda: inspect_bytes(mixed_fingerprint),
+        "boot-control replicas disagree on media identity",
+    )
+
+    mixed_geometry = ab_fixture_bytes(
+        media.AB_MEDIA_LAYOUT_FINGERPRINT_REVISION_3
+    )
+    rewrite_ab_journal_replica(
+        mixed_geometry,
+        1,
+        sequence=2,
+        slot_block_count=9,
+    )
+    expect_media_error(
+        lambda: inspect_bytes(mixed_geometry),
+        "boot-control replicas disagree on media identity",
+    )
+
+
 def test_sequence_gaps_and_kernel_epochs_are_explicit() -> None:
     value, data_start = blank_fixture_bytes(6)
     records = [
@@ -637,6 +799,7 @@ def main() -> int:
         test_console_chunks_reconstruct_split_crlf_marker,
         test_structured_boot_epoch_precedes_console_capture,
         test_empty_arena_is_not_claimed_as_complete_console,
+        test_ab_layout_fingerprints_are_explicit_in_log_captures,
         test_sequence_gaps_and_kernel_epochs_are_explicit,
         test_kernel_epoch_boundary_is_not_one_complete_stream,
         test_mbr_and_partition_refusals,

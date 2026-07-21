@@ -1013,6 +1013,8 @@ pi-ab-selector-host-test: | $(BUILD_DIR)
 	$(BUILD_DIR)/raspberry-pi-ab-selector-host-tests
 
 rpi5-ab-update-port-host-test: | $(BUILD_DIR)
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) \
+		Tests/Host/rpi5_ab_slot_digest_golden_test.py
 	mkdir -p $(BUILD_DIR)/host-module-cache
 	$(SWIFTC) -parse-as-library -warnings-as-errors \
 		-DBOOT_UPDATE_ORCHESTRATOR_STANDALONE_TEST \
@@ -1033,6 +1035,7 @@ rpi5-ab-update-port-host-test: | $(BUILD_DIR)
 		Kernel/Drivers/Storage/RaspberryPi5ABUpdatePort.swift \
 		Kernel/Drivers/Storage/RaspberryPi5ABBootPolicy.swift \
 		Tests/Host/StorageTestSupport.swift \
+		Tests/Fixtures/RaspberryPiABSlotDigestRevision3.swift \
 		Tests/Host/RaspberryPi5ABUpdatePortTests.swift \
 		-o $(BUILD_DIR)/raspberry-pi-5-ab-update-port-host-tests
 	$(BUILD_DIR)/raspberry-pi-5-ab-update-port-host-tests

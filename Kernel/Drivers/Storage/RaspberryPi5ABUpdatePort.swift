@@ -5,6 +5,11 @@ private struct RaspberryPi5ABSlotHashState {
     var hash: USBKernelUpdateSHA256
 }
 
+private struct RaspberryPi5ABVerifiedMirrorSource: Equatable {
+    let range: BlockDeviceRange
+    let expectedDigest: BootImageDigest
+}
+
 private enum RaspberryPi5ABSlotHashResult {
     case inProgress
     case verified
@@ -42,6 +47,7 @@ struct RaspberryPi5ABUpdatePort<Device: BlockDevice>:
     private let scratch: UnsafeMutableRawBufferPointer
     private var leaseHeld = false
     private var hashState: RaspberryPi5ABSlotHashState?
+    private var verifiedMirrorSource: RaspberryPi5ABVerifiedMirrorSource?
     private var recoveryAction: BootRecoverySelectorRepairAction?
     private var recoveryPhase =
         RaspberryPi5ABRecoveryVerificationPhase.confirmed
@@ -228,13 +234,16 @@ struct RaspberryPi5ABUpdatePort<Device: BlockDevice>:
         }
     }
 
-    mutating func mirrorPeer(_ action: BootPeerMirrorAction) -> Bool {
+    mutating func mirrorPeer(
+        _ action: BootPeerMirrorAction
+    ) -> BootUpdateRuntimePeerMirrorResult {
         guard leaseHeld,
               action.sourceSlot != action.destinationSlot,
               action.plan == layout.copyPlan(
                   from: action.sourceSlot,
                   to: action.destinationSlot
               ),
+              action.expectedDigest != .zero,
               action.blockCount != 0,
               action.blockCount <= VerifiedSlotCopier.maximumBlocksPerChunk,
               action.plan.writePolicy.boundedOperationCount(
@@ -243,7 +252,25 @@ struct RaspberryPi5ABUpdatePort<Device: BlockDevice>:
                   requested: action.blockCount
               ) == action.blockCount,
               var whole = wholeDevice()
-        else { return false }
+        else { return .failed }
+        let proof = RaspberryPi5ABVerifiedMirrorSource(
+            range: action.plan.source,
+            expectedDigest: action.expectedDigest
+        )
+        if verifiedMirrorSource != proof {
+            switch advanceHash(
+                range: action.plan.source,
+                expected: action.expectedDigest
+            ) {
+            case .inProgress:
+                return .inProgress
+            case .failed:
+                verifiedMirrorSource = nil
+                return .failed
+            case .verified:
+                verifiedMirrorSource = proof
+            }
+        }
         let result = VerifiedSlotCopier.copyNextChunk(
             on: &whole,
             plan: action.plan,
@@ -251,8 +278,16 @@ struct RaspberryPi5ABUpdatePort<Device: BlockDevice>:
             maximumBlockCount: action.blockCount,
             scratch: scratch
         )
-        guard case .advanced(let nextBlock, _) = result else { return false }
-        return nextBlock == action.nextBlock + action.blockCount
+        guard case .advanced(let nextBlock, let isComplete) = result,
+              nextBlock == action.nextBlock + action.blockCount
+        else {
+            verifiedMirrorSource = nil
+            return .failed
+        }
+        if isComplete {
+            verifiedMirrorSource = nil
+        }
+        return .mirrored
     }
 
     mutating func verifyMirror(

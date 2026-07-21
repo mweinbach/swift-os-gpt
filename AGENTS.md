@@ -90,6 +90,12 @@ link against Darwin or any Apple framework.
   verified migration must preserve the existing type-`0xda` extent byte for
   byte, and must make the MBR transition explicit and recoverable. No physical
   v1 card has yet been migrated or used to verify the v2 boot/rollback path.
+- Superseded A/B media whose boot-control journal records layout fingerprint
+  revision 2 remains recognizable only by host-side read-only diagnostics. Its
+  zero-valued FAT32 `BPB_HiddSec` fields, raw-slot journal identity, and older
+  selector manifest are not kernel/update compatible with revision 3. Restore
+  it only with an explicitly targeted whole-card reflash; copying current files
+  into its slots is not an upgrade and must never grant write authority.
 - A live USB `SUPD` kernel update is volatile. `COMMITTED` seals the RAM-staged
   image; it does not install that image to microSD. Re-enumeration and a new
   boot identity verify the live handoff. Boot-time journal recovery and peer
