@@ -137,10 +137,12 @@ python3 tools/build_rpi5_media.py inspect \
 
 The builder refuses existing outputs and every non-regular-file target; it does
 not select, unmount, or write a physical disk. Its inspector validates the
-selector/rescue structure and hashes, both bounded FAT32 slots, their canonical
-raw equality and packaged file hashes, duplicate data superblocks, and the
-seeded CRC-protected boot-control replicas. It can still inspect legacy v1
-images read-only. Flashing remains a separate explicitly targeted operation.
+selector/rescue structure and hashes, both bounded FAT32 slots, packaged file
+hashes, duplicate data superblocks, and the seeded CRC-protected boot-control
+replicas. Fresh builds must have canonical raw slot equality; transaction-aware
+inspection accepts and reports valid divergence during staging, rollback, or
+peer convergence. It can still inspect legacy v1 images read-only. Flashing
+remains a separate explicitly targeted operation.
 Do not add Raspberry Pi 4 firmware blobs. `sha256=1` asks the EEPROM firmware
 to log the hashes of loaded files; it does not replace checking `SHA256SUMS`
 before writing media.

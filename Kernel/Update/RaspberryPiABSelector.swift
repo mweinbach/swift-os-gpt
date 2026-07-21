@@ -518,6 +518,19 @@ enum RaspberryPiABSelector {
             }
             index += 1
         }
+        // The builder keeps every unallocated selector cluster zero. Scan it
+        // too so selector-write authority cannot be gained from a volume whose
+        // declared rescue files are intact but whose supposedly immutable free
+        // area carries untracked bytes.
+        var cluster = layout.deviceTree.lastCluster + 1
+        while cluster <= 2_033 {
+            let block = autobootDataBlock + cluster - 2
+            if let failure = read(&device, block: block, into: scratch) {
+                return failure
+            }
+            guard allZero(scratch) else { return .corruptRescuePayload }
+            cluster += 1
+        }
         return nil
     }
 

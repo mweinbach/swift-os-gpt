@@ -55,6 +55,25 @@ struct RaspberryPiABSelectorTests {
                 "corrupt rescue payload was modified"
             )
         }
+
+        var badFreeSpace = makeSelector(defaultPolicy: policyA)
+        let finalBlock = Int(RaspberryPiABSelector.partitionBlockCount - 1)
+        badFreeSpace.bytes[finalBlock * 512] = 0x5a
+        let badFreeSpaceBefore = badFreeSpace.bytes
+        withScratch { scratch in
+            expect(
+                RaspberryPiABSelector.commit(
+                    defaultSlot: .b,
+                    to: &badFreeSpace,
+                    scratch: scratch
+                ) == .failure(.corruptRescuePayload),
+                "nonzero selector free space gained write authority"
+            )
+            expect(
+                badFreeSpace.bytes == badFreeSpaceBefore,
+                "corrupt selector free space was modified"
+            )
+        }
     }
 
     private static func inspectsAndCommitsOnlyTheSelectorPolicyCluster() {

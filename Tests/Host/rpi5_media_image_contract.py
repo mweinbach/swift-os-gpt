@@ -62,12 +62,18 @@ def extent_digest(path: Path, start_block: int, block_count: int) -> str:
     return value.hexdigest()
 
 
-def package_fixture(root: Path) -> Path:
+def package_fixture(root: Path, *, mutate_kernel: bool = False) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
     firmware = root / "firmware"
     firmware.mkdir()
     make_firmware_checkout(firmware)
     kernel = root / "kernel8.img"
     write_image(kernel)
+    if mutate_kernel:
+        contents = bytearray(kernel.read_bytes())
+        require(bool(contents), "alternate kernel fixture is empty")
+        contents[-1] ^= 0x01
+        kernel.write_bytes(contents)
     package = root / "package"
     result = run(str(PACKAGER), str(kernel), str(firmware), str(package))
     require(result.returncode == 0, f"package fixture failed: {result.stdout}")
@@ -315,12 +321,18 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="swiftos-rpi5-media-") as temporary:
         root = Path(temporary)
         package = package_fixture(root)
+        alternate_package = package_fixture(
+            root / "alternate-source",
+            mutate_kernel=True,
+        )
         first = root / "first.img"
         second = root / "second.img"
+        alternate = root / "alternate.img"
         exact = root / "exact-block-count.img"
         default = root / "default-layout.img"
         build(package, first)
         build(package, second)
+        build(alternate_package, alternate)
         exact_block_count = 327_681
         build_with_block_count(package, exact, exact_block_count)
         default_result = run(
@@ -573,12 +585,20 @@ def main() -> int:
         # longer causes returned-card troubleshooting to abort.
         divergent = root / "divergent-stable.img"
         shutil.copyfile(first, divergent)
-        with divergent.open("r+b") as target:
-            target.seek((slot_b[0] + slot_b[1]) * 512 - 1)
-            original = target.read(1)
-            require(len(original) == 1, "divergent slot fixture is truncated")
-            target.seek((slot_b[0] + slot_b[1]) * 512 - 1)
-            target.write(bytes([original[0] ^ 0x80]))
+        _, _, alternate_a, _, _ = read_mbr(alternate)
+        require(alternate_a[1] == slot_b[1],
+                "alternate valid release has different slot geometry")
+        require(extent_digest(alternate, *alternate_a) != slot_digest,
+                "alternate valid release did not change raw slot identity")
+        with alternate.open("rb") as source, divergent.open("r+b") as target:
+            source.seek(alternate_a[0] * 512)
+            target.seek(slot_b[0] * 512)
+            remaining = slot_b[1] * 512
+            while remaining:
+                chunk = source.read(min(remaining, 1_024 * 1_024))
+                require(bool(chunk), "alternate slot fixture is truncated")
+                target.write(chunk)
+                remaining -= len(chunk)
         divergent_report = inspect(divergent)
         require(
             divergent_report["ab_transaction"]["raw_slots_converged"] is False
