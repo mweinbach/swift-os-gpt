@@ -1,9 +1,7 @@
-/// Swift constants paired with `rpi5_ab_slot_digest_revision3.json`.
-///
-/// The Python golden checks these declarations against the JSON fixture before
-/// invoking the production media builder. Keeping the Swift half free of host
-/// SDK imports also exercises the same freestanding compilation boundary as
-/// the update port.
+/// Generated test constants mirrored from
+/// `rpi5_ab_slot_digest_revision3.json`. The Python golden test validates every
+/// value before invoking the production media normalizer, so the host Swift
+/// test remains independent of Foundation and JSON decoding.
 enum RaspberryPiABSlotDigestRevision3Golden {
     static let fixtureVersion = 1
     static let mediaLayoutFingerprint: UInt64 = 0x5357_4142_0000_0003
