@@ -28,7 +28,8 @@ private struct TestBootUpdateRuntimePort: BootUpdateRuntimePort {
     var failNextJournalCommitAfterWrite = false
     var candidateStageSucceeds = true
     var selectorCommitSucceeds = true
-    var recoverySelectorRepairSucceeds = true
+    var recoverySelectorRepair:
+        BootUpdateRuntimeRecoverySelectorRepairResult = .repaired
     var peerMirrorSucceeds = true
     var candidateVerification:
         BootUpdateRuntimeCandidateVerificationResult = .inProgress
@@ -99,10 +100,10 @@ private struct TestBootUpdateRuntimePort: BootUpdateRuntimePort {
 
     mutating func repairSelectorFromRecovery(
         _ action: BootRecoverySelectorRepairAction
-    ) -> Bool {
+    ) -> BootUpdateRuntimeRecoverySelectorRepairResult {
         expect(leaseHeld, "recovery selector repair escaped the media lease")
         events.append(.recoverySelector(action))
-        return recoverySelectorRepairSucceeds
+        return recoverySelectorRepair
     }
 
     mutating func mirrorPeer(_ action: BootPeerMirrorAction) -> Bool {
@@ -421,6 +422,20 @@ struct BootUpdateRuntimeExecutorTests {
         let pending = selectorCommitPendingRecord()
         var port = TestBootUpdateRuntimePort(record: pending)
         var recovery = BootUpdateRuntimeExecutor()
+        port.recoverySelectorRepair = .inProgress
+
+        expect(
+            recovery.recoverSelectorFromRecovery(
+                through: &port,
+                context: .recovery,
+                layout: layout
+            ) == .verificationInProgress(.recoverySelector(.b)),
+            "cooperative recovery selector verification was not resumable"
+        )
+        expect(port.record == pending,
+               "in-progress recovery selector verification changed journal")
+        port.events = []
+        port.recoverySelectorRepair = .repaired
 
         let reset = BootConfirmedSlotRebootAction(
             expectedSlot: .b,
@@ -471,7 +486,7 @@ struct BootUpdateRuntimeExecutorTests {
                "unauthorized recovery performed a selector effect")
 
         port.events = []
-        port.recoverySelectorRepairSucceeds = false
+        port.recoverySelectorRepair = .failed
         var failingRecovery = BootUpdateRuntimeExecutor()
         expect(
             failingRecovery.recoverSelectorFromRecovery(
@@ -485,7 +500,7 @@ struct BootUpdateRuntimeExecutorTests {
                "failed recovery selector repair changed the journal")
 
         port.events = []
-        port.recoverySelectorRepairSucceeds = true
+        port.recoverySelectorRepair = .repaired
         var payloadExecutor = BootUpdateRuntimeExecutor()
         expect(
             payloadExecutor.recoverSelectorFromRecovery(

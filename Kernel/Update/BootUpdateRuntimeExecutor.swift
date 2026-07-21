@@ -10,6 +10,13 @@ enum BootUpdateRuntimeJournalLoadResult: Equatable {
 enum BootUpdateRuntimeVerificationKind: Equatable {
     case candidate(BootSlot)
     case mirror(BootSlot)
+    case recoverySelector(BootSlot)
+}
+
+enum BootUpdateRuntimeRecoverySelectorRepairResult: Equatable {
+    case inProgress
+    case repaired
+    case failed
 }
 
 /// Full-slot verification is cooperative. A port may hash a bounded number of
@@ -66,7 +73,7 @@ protocol BootUpdateRuntimePort {
     /// the repaired selector. It must not modify the journal or either slot.
     mutating func repairSelectorFromRecovery(
         _ action: BootRecoverySelectorRepairAction
-    ) -> Bool
+    ) -> BootUpdateRuntimeRecoverySelectorRepairResult
 
     /// Copies exactly one bounded, synchronized, read-back-verified chunk from
     /// the confirmed slot into its peer. It must preserve the action's
@@ -162,14 +169,20 @@ struct BootUpdateRuntimeExecutor {
         case .failure(let failure):
             return .failure(.orchestrator(failure))
         case .action(let action):
-            guard port.repairSelectorFromRecovery(action) else {
+            switch port.repairSelectorFromRecovery(action) {
+            case .inProgress:
+                return .verificationInProgress(
+                    .recoverySelector(action.defaultSlot)
+                )
+            case .failed:
                 return .failure(.recoverySelectorRepairFailed)
+            case .repaired:
+                return .recoveryResetRequired(BootConfirmedSlotRebootAction(
+                    expectedSlot: action.candidateSlot,
+                    generation: action.candidateGeneration,
+                    digest: action.candidateDigest
+                ))
             }
-            return .recoveryResetRequired(BootConfirmedSlotRebootAction(
-                expectedSlot: action.candidateSlot,
-                generation: action.candidateGeneration,
-                digest: action.candidateDigest
-            ))
         }
     }
 
