@@ -5,19 +5,23 @@ struct BootSlotLayout: Equatable {
     let slotA: BlockDeviceRange
     let slotB: BlockDeviceRange
     let mediaLayoutFingerprint: UInt64
+    let writePolicy: BootSlotWritePolicy
 
     init?(
         slotA: BlockDeviceRange,
         slotB: BlockDeviceRange,
-        mediaLayoutFingerprint: UInt64
+        mediaLayoutFingerprint: UInt64,
+        writePolicy: BootSlotWritePolicy = .direct
     ) {
         guard slotA.blockCount == slotB.blockCount,
               !slotA.overlaps(slotB),
-              mediaLayoutFingerprint != 0
+              mediaLayoutFingerprint != 0,
+              writePolicy.isValid(blockCount: slotA.blockCount)
         else { return nil }
         self.slotA = slotA
         self.slotB = slotB
         self.mediaLayoutFingerprint = mediaLayoutFingerprint
+        self.writePolicy = writePolicy
     }
 
     var slotBlockCount: UInt64 { slotA.blockCount }
@@ -33,7 +37,8 @@ struct BootSlotLayout: Equatable {
         guard source != destination else { return nil }
         return VerifiedSlotCopyPlan(
             source: range(for: source),
-            destination: range(for: destination)
+            destination: range(for: destination),
+            writePolicy: writePolicy
         )
     }
 }
@@ -72,6 +77,7 @@ struct BootCandidateStageAction: Equatable {
     let generation: UInt64
     let digest: BootImageDigest
     let trialToken: UInt64
+    let writePolicy: BootSlotWritePolicy
     let nextBlock: UInt64
     let blockCount: UInt64
 }
@@ -98,6 +104,26 @@ struct BootCandidateHealthAction: Equatable {
 
 struct BootSelectorCommitAction: Equatable {
     let defaultSlot: BootSlot
+}
+
+/// Narrow recovery-environment authority for repairing a torn selector after
+/// candidate health was already durably recorded. A platform port must hash
+/// both complete raw slots against these identities and revalidate immutable
+/// recovery media before it writes the selector. The journal is deliberately
+/// left in `selectorCommitPending`; a subsequent normal payload boot is the
+/// evidence that confirms the candidate and starts peer convergence.
+struct BootRecoverySelectorRepairAction: Equatable {
+    let defaultSlot: BootSlot
+    let confirmedSlot: BootSlot
+    let confirmedRange: BlockDeviceRange
+    let confirmedGeneration: UInt64
+    let confirmedDigest: BootImageDigest
+    let candidateSlot: BootSlot
+    let candidateRange: BlockDeviceRange
+    let candidateGeneration: UInt64
+    let candidateDigest: BootImageDigest
+    let trialToken: UInt64
+    let mediaLayoutFingerprint: UInt64
 }
 
 /// A normal reset required after selector confirmation occurred while the CPU
@@ -159,11 +185,17 @@ enum BootUpdateOrchestratorFailure: Equatable {
     case invalidVerifiedProgress
     case missingCandidate
     case sequenceExhausted
+    case recoveryNotAuthorized
     case transitionRejected(BootControlTransitionRejection)
 }
 
 enum BootUpdateActionResult: Equatable {
     case action(BootUpdateOrchestratorAction)
+    case failure(BootUpdateOrchestratorFailure)
+}
+
+enum BootRecoverySelectorRepairResult: Equatable {
+    case action(BootRecoverySelectorRepairAction)
     case failure(BootUpdateOrchestratorFailure)
 }
 
@@ -185,6 +217,37 @@ enum BootUpdateTransitionDecision: Equatable {
 enum BootUpdateOrchestrator {
     static let maximumBlocksPerOperation =
         VerifiedSlotCopier.maximumBlocksPerChunk
+
+    /// Authorizes no payload or journal write. This is the sole operation a
+    /// non-payload recovery environment may request, and only the durable
+    /// post-health selector phase can produce it.
+    static func recoverySelectorRepair(
+        for record: BootControlRecord,
+        layout: BootSlotLayout
+    ) -> BootRecoverySelectorRepairResult {
+        if let failure = validate(record: record, layout: layout) {
+            return .failure(failure)
+        }
+        guard record.phase == .selectorCommitPending,
+              let candidateSlot = record.candidateSlot,
+              record.updateKind == .release,
+              record.nextCandidateBlock == record.slotBlockCount,
+              record.trialToken != 0
+        else { return .failure(.recoveryNotAuthorized) }
+        return .action(BootRecoverySelectorRepairAction(
+            defaultSlot: candidateSlot,
+            confirmedSlot: record.confirmedSlot,
+            confirmedRange: layout.range(for: record.confirmedSlot),
+            confirmedGeneration: record.confirmedGeneration,
+            confirmedDigest: record.confirmedDigest,
+            candidateSlot: candidateSlot,
+            candidateRange: layout.range(for: candidateSlot),
+            candidateGeneration: record.candidateGeneration,
+            candidateDigest: record.candidateDigest,
+            trialToken: record.trialToken,
+            mediaLayoutFingerprint: record.mediaLayoutFingerprint
+        ))
+    }
 
     static func beginRelease(
         from record: BootControlRecord,
@@ -257,15 +320,19 @@ enum BootUpdateOrchestrator {
             guard validOperationLimit(maximumBlockCount) else {
                 return .failure(.invalidOperationLimit)
             }
-            let remaining = record.slotBlockCount - record.nextCandidateBlock
-            let count = maximumBlockCount < remaining
-                ? maximumBlockCount : remaining
+            guard let count = layout.writePolicy.boundedOperationCount(
+                      atProgress: record.nextCandidateBlock,
+                      blockCount: record.slotBlockCount,
+                      requested: maximumBlockCount
+                  )
+            else { return .failure(.invalidOperationLimit) }
             return .action(.stageCandidate(BootCandidateStageAction(
                 slot: candidateSlot,
                 destination: layout.range(for: candidateSlot),
                 generation: record.candidateGeneration,
                 digest: record.candidateDigest,
                 trialToken: record.trialToken,
+                writePolicy: layout.writePolicy,
                 nextBlock: record.nextCandidateBlock,
                 blockCount: count
             )))
@@ -343,9 +410,12 @@ enum BootUpdateOrchestrator {
             guard validOperationLimit(maximumBlockCount) else {
                 return .failure(.invalidOperationLimit)
             }
-            let remaining = record.slotBlockCount - record.nextCandidateBlock
-            let count = maximumBlockCount < remaining
-                ? maximumBlockCount : remaining
+            guard let count = layout.writePolicy.boundedOperationCount(
+                      atProgress: record.nextCandidateBlock,
+                      blockCount: record.slotBlockCount,
+                      requested: maximumBlockCount
+                  )
+            else { return .failure(.invalidOperationLimit) }
             return .action(.mirrorPeer(BootPeerMirrorAction(
                 sourceSlot: record.confirmedSlot,
                 destinationSlot: destination,
@@ -380,7 +450,13 @@ enum BootUpdateOrchestrator {
               action.generation == record.candidateGeneration,
               action.digest == record.candidateDigest,
               action.trialToken == record.trialToken,
+              action.writePolicy == layout.writePolicy,
               action.nextBlock == record.nextCandidateBlock,
+              validPolicyProgress(
+                from: action.nextBlock,
+                count: action.blockCount,
+                layout: layout
+              ),
               validProgress(
                 from: action.nextBlock,
                 count: action.blockCount,
@@ -554,6 +630,11 @@ enum BootUpdateOrchestrator {
               action.destinationSlot == destinationSlot,
               action.plan == expectedPlan,
               action.nextBlock == record.nextCandidateBlock,
+              validPolicyProgress(
+                from: action.nextBlock,
+                count: action.blockCount,
+                layout: layout
+              ),
               validProgress(
                 from: action.nextBlock,
                 count: action.blockCount,
@@ -620,6 +701,22 @@ enum BootUpdateOrchestrator {
               count <= maximumBlocksPerOperation
         else { return false }
         return count <= limit - current
+    }
+
+    /// Completion evidence may be reconstructed after a crash, so validate
+    /// the write-policy boundary independently of the action producer. In
+    /// particular, neither of the two activation commits may be skipped by a
+    /// forged multi-block progress report.
+    private static func validPolicyProgress(
+        from current: UInt64,
+        count: UInt64,
+        layout: BootSlotLayout
+    ) -> Bool {
+        layout.writePolicy.boundedOperationCount(
+            atProgress: current,
+            blockCount: layout.slotBlockCount,
+            requested: count
+        ) == count
     }
 
     private static func releaseDescriptor(

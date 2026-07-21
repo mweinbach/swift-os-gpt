@@ -30,9 +30,12 @@ link against Darwin or any Apple framework.
 
 - Identify the on-card format before every operation. Legacy format v1 has one
   bootable FAT32 `SWIFTOS` partition followed by a type-`0xda` data partition.
-  Format v2 has the invariant FAT12 `SWIFTOS-CTL` selector, FAT32
-  `SWIFTOS-A` and `SWIFTOS-B` payload slots, and type-`0xda` data partition
-  four. New media images use v2. Copying files cannot turn a v1 card into v2.
+  Format v2 has the FAT12 `SWIFTOS-CTL` selector/rescue partition, two
+  canonical FAT32 `SWIFTOS-AB` payload slots at MBR entries two and three, and
+  type-`0xda` data partition four. The payload slots deliberately share their
+  FAT32 identity and must be distinguished by verified partition geometry and
+  firmware boot identity, never by volume label. New media images use v2.
+  Copying files cannot turn a v1 card into v2.
 - Treat first-time media initialization, v1-to-v2 migration, and routine v2
   slot updates as three different operations. Writing
   `swiftos-rpi5-media.img` to a whole card is destructive and creates the full
@@ -47,12 +50,30 @@ link against Darwin or any Apple framework.
 - A routine v2 update may write only the verified inactive payload slot. It
   must not rewrite the MBR, confirmed/active slot, partition-four extent, log
   arena, or SwiftFS data; only the reserved redundant boot-control journal
-  bytes may change. Stage, hash, synchronize, and read back the complete
-  candidate before a one-shot trial boot. The selector is immutable during
-  staging and trial; only the transactional update service may change its
-  confirmed default after the candidate proves its boot identity, release
-  digest, and health. Never direct developers to edit `autoboot.txt` or copy
-  files into `SWIFTOS-CTL` manually.
+  bytes may change. Before staging, invalidate and read back the inactive
+  FAT32 backup boot sector 6 and primary boot sector 0. Copy and verify every
+  other sector, then commit sector 6 and sector 0 separately in that order;
+  hash, synchronize, and read back the complete raw slot before a one-shot
+  trial boot. The selector/rescue partition is immutable during staging and
+  trial. Only the transactional update service may rewrite its sole mutable
+  partition-relative sector 15 after validating both FAT copies, the root
+  directory, rescue manifest, and every rescue-file digest and after the
+  candidate proves its boot identity, release digest, trial token, and health.
+  Never direct developers to edit `autoboot.txt` or copy files into
+  `SWIFTOS-CTL` manually.
+- After selector commit, boot the newly confirmed slot normally before copying
+  it back into the peer with the same activation-last policy. A failed or hung
+  one-shot trial is intended to return through partition zero and the unchanged
+  selector to the prior confirmed slot. Preserve the partition-one factory
+  rescue (`config.txt`, `kernel8.img`, and `rescue.dtb`) throughout routine
+  updates. It currently reuses the full release kernel and DTB; a future media
+  revision should pin a smaller rescue-specific build. Physical Pi tryboot,
+  watchdog rollback, rescue fallback, and microSD power-cut behavior remain
+  unverified, so never describe this design as unbrickable.
+  Rescue fallback also requires an exact, recorded EEPROM build/configuration
+  with `PARTITION_WALK=1`; physical acceptance must capture that setting, the
+  tryboot capability bits, and the observed fallback order rather than
+  inferring them from the microSD layout.
 - Legacy v1 media remains valid for read-only inspection and historical
   evidence, but its single payload has no A/B rollback. Do not install a v2
   package into that sole FAT32 partition and call it migrated. A dedicated,

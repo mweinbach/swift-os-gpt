@@ -822,11 +822,30 @@ enum BootControlJournal {
             }
             let current = existing0.sequence >= existing1.sequence
                 ? existing0 : existing1
+            let currentBlock: UInt64 = existing0.sequence >= existing1.sequence
+                ? 0 : 1
+            if record == current {
+                return synchronizeAndVerifyExisting(
+                    record,
+                    at: currentBlock,
+                    on: &device,
+                    scratch: scratch
+                )
+            }
             guard current.sequence != UInt64.max,
                   record.sequence == current.sequence + 1
             else { return .failure(.sequenceMismatch) }
             target = existing0.sequence <= existing1.sequence ? 0 : 1
         } else if let existing = existing0 ?? existing1 {
+            let existingBlock: UInt64 = existing0 == nil ? 1 : 0
+            if record == existing {
+                return synchronizeAndVerifyExisting(
+                    record,
+                    at: existingBlock,
+                    on: &device,
+                    scratch: scratch
+                )
+            }
             guard existing.sequence != UInt64.max,
                   record.sequence == existing.sequence + 1
             else { return .failure(.sequenceMismatch) }
@@ -891,6 +910,29 @@ enum BootControlJournal {
             return .failure(.readbackMismatch)
         }
         return .committed(block: target, sequence: record.sequence)
+    }
+
+    /// Retry the exact newest record after an earlier synchronization result
+    /// was uncertain. This never advances sequence; it establishes a fresh
+    /// media barrier and proves the already-written bytes by readback.
+    private static func synchronizeAndVerifyExisting<Device: BlockDevice>(
+        _ record: BootControlRecord,
+        at block: UInt64,
+        on device: inout Device,
+        scratch: UnsafeMutableRawBufferPointer
+    ) -> BootControlJournalCommitResult {
+        let synchronized = device.synchronize()
+        guard synchronized == .success else {
+            return .failure(.synchronizeFailed(synchronized))
+        }
+        let readback = device.readBlock(at: block, into: scratch)
+        guard readback == .success else {
+            return .failure(.readFailed(block: block, result: readback))
+        }
+        guard validDataVolumePrefix(scratch, geometry: device.geometry),
+              BootControlRecord.decode(scratch, at: recordOffset) == record
+        else { return .failure(.readbackMismatch) }
+        return .committed(block: block, sequence: record.sequence)
     }
 
     private static func recordAreaIsZero(

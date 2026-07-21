@@ -111,12 +111,14 @@ def verify_stream(
         }
         selector = None
         validate_hidden_sectors = False
+        canonical_hidden_sectors = False
     else:
         entries, slots, selector = read_mbr_boot_partitions(
             image,
             geometry.logical_block_count,
         )
         validate_hidden_sectors = True
+        canonical_hidden_sectors = selector is not None
 
     requested = (
         sorted(slots)
@@ -131,6 +133,7 @@ def verify_stream(
             image,
             slots[slot],
             validate_hidden_sectors=validate_hidden_sectors,
+            canonical_hidden_sectors=canonical_hidden_sectors,
             expected_manifest=expected_manifest,
         )
         slot_results[slot]["partition"] = slots[slot]

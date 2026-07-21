@@ -3,10 +3,12 @@ struct BootUpdateControlTests {
     static func main() {
         drivesReleaseTrialRollbackAndReplication()
         journalsAcrossRedundantDataSuperblocks()
+        reestablishesUncertainJournalDurability()
         repairsOneTornJournalReplica()
         rejectsNonzeroJournalGarbage()
         copiesDisjointSlotChunksDurably()
-        print("boot update control host tests: 5 groups passed")
+        defersBootabilityUntilPayloadCopyCompletes()
+        print("boot update control host tests: 7 groups passed")
     }
 
     private static let oldDigest = BootImageDigest(
@@ -220,6 +222,57 @@ struct BootUpdateControlTests {
         }
     }
 
+    private static func reestablishesUncertainJournalDurability() {
+        var device = formattedDataDevice()
+        withScratch(byteCount: 512) { scratch in
+            let initial = BootControlRecord.initial(
+                confirmedSlot: .a,
+                generation: 1,
+                digest: oldDigest,
+                slotBlockCount: 8,
+                mediaLayoutFingerprint: 0x2233
+            )!
+            expect(
+                BootControlJournal.commit(
+                    initial,
+                    to: &device,
+                    scratch: scratch
+                ) == .committed(block: 0, sequence: 1),
+                "uncertain durability initial commit"
+            )
+            let writing = take(initial.beginCandidateWrite(
+                to: .b,
+                generation: 2,
+                digest: newDigest,
+                blockCount: 8,
+                trialToken: 7
+            ))
+            device.failSynchronization = true
+            expect(
+                BootControlJournal.commit(
+                    writing,
+                    to: &device,
+                    scratch: scratch
+                ) == .failure(.synchronizeFailed(.transportFailure)),
+                "failed journal barrier was not reported"
+            )
+            device.failSynchronization = false
+            expect(
+                BootControlJournal.commit(
+                    writing,
+                    to: &device,
+                    scratch: scratch
+                ) == .committed(block: 1, sequence: 2),
+                "exact journal retry did not establish a fresh barrier"
+            )
+            expect(
+                BootControlJournal.open(&device, scratch: scratch)
+                    == .record(writing, .twoValidReplicas),
+                "durability retry changed the newest journal record"
+            )
+        }
+    }
+
     private static func rejectsNonzeroJournalGarbage() {
         var device = formattedDataDevice()
         device.bytes[BootControlJournal.recordOffset + 3] = 0x7f
@@ -303,6 +356,133 @@ struct BootUpdateControlTests {
                 && device.bytes[16 * 512] == 0xbb,
             "copy escaped the destination slot"
         )
+    }
+
+    private static func defersBootabilityUntilPayloadCopyCompletes() {
+        var device = MemoryBlockDevice(blockCount: 40)
+        let source = BlockDeviceRange(
+            startBlock: 2,
+            blockCount: 10,
+            within: 40
+        )!
+        let destination = BlockDeviceRange(
+            startBlock: 20,
+            blockCount: 10,
+            within: 40
+        )!
+        let policy = BootSlotWritePolicy.deferredActivation(
+            firstCommitBlock: 6,
+            lastCommitBlock: 0
+        )
+        let plan = VerifiedSlotCopyPlan(
+            source: source,
+            destination: destination,
+            writePolicy: policy
+        )!
+        var relative = 0
+        while relative < 10 {
+            device.bytes[(2 + relative) * 512] = UInt8(0x40 + relative)
+            device.bytes[(20 + relative) * 512] = 0xee
+            relative += 1
+        }
+        withScratch(byteCount: 1_024) { scratch in
+            expect(
+                VerifiedSlotCopier.copyNextChunk(
+                    on: &device,
+                    plan: plan,
+                    nextBlock: 0,
+                    maximumBlockCount: 8,
+                    scratch: scratch
+                ) == .advanced(nextBlock: 8, isComplete: false),
+                "payload stage did not stop before activation blocks"
+            )
+            expect(
+                device.bytes[20 * 512] == 0
+                    && device.bytes[26 * 512] == 0,
+                "partial destination remained firmware-bootable"
+            )
+            relative = 1
+            while relative < 10 {
+                if relative != 6 {
+                    expect(
+                        device.bytes[(20 + relative) * 512]
+                            == device.bytes[(2 + relative) * 512],
+                        "deferred payload block mapping changed"
+                    )
+                }
+                relative += 1
+            }
+
+            device.bytes[20 * 512] = 0xaa
+            expect(
+                VerifiedSlotCopier.copyNextChunk(
+                    on: &device,
+                    plan: plan,
+                    nextBlock: 8,
+                    maximumBlockCount: 8,
+                    scratch: scratch
+                ) == .failure(.activationStateMismatch(block: 20)),
+                "unexpected boot-sector restoration was ignored"
+            )
+            device.bytes[20 * 512] = 0
+            device.bytes[26 * 512] = 0x7a
+
+            expect(
+                VerifiedSlotCopier.copyNextChunk(
+                    on: &device,
+                    plan: plan,
+                    nextBlock: 8,
+                    maximumBlockCount: 8,
+                    scratch: scratch
+                ) == .advanced(nextBlock: 9, isComplete: false),
+                "backup boot sector was not its own durable commit"
+            )
+            expect(
+                device.bytes[26 * 512] == device.bytes[8 * 512]
+                    && device.bytes[20 * 512] == 0,
+                "torn backup was not repaired before primary activation"
+            )
+            expect(
+                VerifiedSlotCopier.copyNextChunk(
+                    on: &device,
+                    plan: plan,
+                    nextBlock: 8,
+                    maximumBlockCount: 8,
+                    scratch: scratch
+                ) == .advanced(nextBlock: 9, isComplete: false),
+                "backup activation replay dead-ended before cursor commit"
+            )
+            device.bytes[20 * 512] = 0x7b
+            expect(
+                VerifiedSlotCopier.copyNextChunk(
+                    on: &device,
+                    plan: plan,
+                    nextBlock: 9,
+                    maximumBlockCount: 8,
+                    scratch: scratch
+                ) == .advanced(nextBlock: 10, isComplete: true),
+                "torn primary boot-sector commit did not recover"
+            )
+            expect(
+                VerifiedSlotCopier.copyNextChunk(
+                    on: &device,
+                    plan: plan,
+                    nextBlock: 9,
+                    maximumBlockCount: 8,
+                    scratch: scratch
+                ) == .advanced(nextBlock: 10, isComplete: true),
+                "primary activation replay dead-ended before cursor commit"
+            )
+        }
+        relative = 0
+        while relative < 10 {
+            expect(
+                device.bytes[(20 + relative) * 512]
+                    == device.bytes[(2 + relative) * 512],
+                "activation-last copy did not converge byte-for-byte"
+            )
+            relative += 1
+        }
     }
 
     private static func formattedDataDevice() -> MemoryBlockDevice {

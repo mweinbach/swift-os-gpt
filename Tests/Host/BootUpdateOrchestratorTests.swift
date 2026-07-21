@@ -28,7 +28,8 @@ struct BootUpdateOrchestratorTests {
         confirmsHealthThenDurablyMirrorsThePeer()
         recoversSelectorCommitAndRejectsInvalidTransitions()
         journalsAtomicConfirmationAndMirrorIntent()
-        print("boot update orchestrator host tests: 5 groups passed")
+        mapsPiFATBootabilityAfterPayloadProgress()
+        print("boot update orchestrator host tests: 6 groups passed")
     }
 
     private static func stagesOnlyTheInactiveSlotBeforeTrialAuthorization() {
@@ -507,6 +508,7 @@ struct BootUpdateOrchestratorTests {
                     generation: 2,
                     digest: newDigest,
                     trialToken: 99,
+                    writePolicy: .direct,
                     nextBlock: 0,
                     blockCount: 1
                 )
@@ -630,6 +632,136 @@ struct BootUpdateOrchestratorTests {
             expect(record.phase == .replicatingPeer,
                    "journal lost mirror intent")
         }
+    }
+
+    private static func mapsPiFATBootabilityAfterPayloadProgress() {
+        let slotA = BlockDeviceRange(
+            startBlock: 10,
+            blockCount: 10,
+            within: 64
+        )!
+        let slotB = BlockDeviceRange(
+            startBlock: 30,
+            blockCount: 10,
+            within: 64
+        )!
+        let layout = RaspberryPiABUpdateLayout.make(
+            deviceGeometry: BlockDeviceGeometry(
+                logicalBlockByteCount: 512,
+                logicalBlockCount: 64
+            )!,
+            slotA: slotA,
+            slotB: slotB
+        )!
+        expect(
+            RaspberryPiABUpdateLayout.make(
+                deviceGeometry: BlockDeviceGeometry(
+                    logicalBlockByteCount: 4_096,
+                    logicalBlockCount: 64
+                )!,
+                slotA: slotA,
+                slotB: slotB
+            ) == nil,
+            "Pi sector policy accepted non-512-byte logical media"
+        )
+        expect(
+            layout.mediaLayoutFingerprint
+                == RaspberryPiABUpdateLayout.mediaLayoutFingerprint,
+            "Pi media fingerprint was not attached to the shared layout"
+        )
+        var record = BootControlRecord.initial(
+            confirmedSlot: .a,
+            generation: 1,
+            digest: oldDigest,
+            slotBlockCount: 10,
+            mediaLayoutFingerprint:
+                RaspberryPiABUpdateLayout.mediaLayoutFingerprint
+        )!
+        let descriptor = BootReleaseDescriptor(
+            generation: 2,
+            digest: newDigest,
+            blockCount: 10,
+            trialToken: 99
+        )!
+        record = takePersist(BootUpdateOrchestrator.beginRelease(
+            from: record,
+            observation: normal(.a),
+            layout: layout,
+            descriptor: descriptor
+        ))
+        let payload = candidateStageAction(
+            for: record,
+            observation: normal(.a),
+            layout: layout,
+            maximumBlockCount: 10
+        )
+        expect(
+            payload.writePolicy == RaspberryPiABUpdateLayout.writePolicy
+                && payload.nextBlock == 0 && payload.blockCount == 8,
+            "Pi payload action crossed into FAT activation blocks"
+        )
+        record = takePersist(
+            BootUpdateOrchestrator.recordVerifiedCandidateProgress(
+                in: record,
+                observation: normal(.a),
+                layout: layout,
+                completed: payload
+            )
+        )
+        let backupBoot = candidateStageAction(
+            for: record,
+            observation: normal(.a),
+            layout: layout,
+            maximumBlockCount: 10
+        )
+        expect(
+            backupBoot.nextBlock == 8 && backupBoot.blockCount == 1
+                && backupBoot.writePolicy.relativeBlock(
+                    atProgress: 8,
+                    blockCount: 10
+                ) == 6,
+            "Pi backup boot sector was not a separate penultimate commit"
+        )
+        expect(
+            BootUpdateOrchestrator.recordVerifiedCandidateProgress(
+                in: record,
+                observation: normal(.a),
+                layout: layout,
+                completed: BootCandidateStageAction(
+                    slot: backupBoot.slot,
+                    destination: backupBoot.destination,
+                    generation: backupBoot.generation,
+                    digest: backupBoot.digest,
+                    trialToken: backupBoot.trialToken,
+                    writePolicy: backupBoot.writePolicy,
+                    nextBlock: backupBoot.nextBlock,
+                    blockCount: 2
+                )
+            ) == .failure(.invalidVerifiedProgress),
+            "one progress report skipped both Pi activation commits"
+        )
+        record = takePersist(
+            BootUpdateOrchestrator.recordVerifiedCandidateProgress(
+                in: record,
+                observation: normal(.a),
+                layout: layout,
+                completed: backupBoot
+            )
+        )
+        let primaryBoot = candidateStageAction(
+            for: record,
+            observation: normal(.a),
+            layout: layout,
+            maximumBlockCount: 10
+        )
+        expect(
+            primaryBoot.nextBlock == 9 && primaryBoot.blockCount == 1
+                && primaryBoot.writePolicy.relativeBlock(
+                    atProgress: 9,
+                    blockCount: 10
+                ) == 0,
+            "Pi primary boot sector was not the final bootability commit"
+        )
     }
 
     private static func initialRecord() -> BootControlRecord {

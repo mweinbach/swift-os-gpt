@@ -67,12 +67,12 @@ def whole_record(
             partition(
                 f"{identifier}s2",
                 "DOS_FAT_32",
-                volume_name="SWIFTOS-A",
+                volume_name="SWIFTOS-AB",
             ),
             partition(
                 f"{identifier}s3",
                 "DOS_FAT_32",
-                volume_name="SWIFTOS-B",
+                volume_name="SWIFTOS-AB",
             ),
             partition(f"{identifier}s4", "DA"),
         ]

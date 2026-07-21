@@ -1,4 +1,4 @@
-SwiftOS Raspberry Pi 5 boot-slot manifest, format 4
+SwiftOS Raspberry Pi 5 boot-slot manifest, format 5
 HARDWARE STATUS: UNVERIFIED. This manifest does not claim board support.
 
 Firmware-consumed files:
@@ -11,6 +11,7 @@ Provenance files ignored by firmware:
   BOOT-MANIFEST.txt          this file
   BUILD-METADATA.txt         input hashes and SwiftOS/firmware Git revisions
   MEDIA-LAYOUT.txt           selector, A/B payload, and signed data contract
+  RESCUE-CONFIG.txt          source for partition-one rescue config.txt
   SHA256SUMS                 hashes of every other file in this manifest
 
 Raspberry Pi 5 firmware is self-contained in EEPROM. Do not add bootcode.bin,
@@ -70,7 +71,31 @@ repository revision is not the EEPROM bootloader version. The DTB and overlay
 must both match that recorded revision.
 
 tools/build_rpi5_media.py converts this validated directory into a sparse,
-deterministic MBR image with an invariant FAT12 selector, complete 128 MiB
-FAT32 A and B payload slots, and a type-0xda SwiftOS data partition. The data
-partition retains duplicate signed volume headers, the compatible redundant
-A/B journal extension, the bounded kernel log, and SwiftFS user data.
+deterministic MBR image with a FAT12 selector/rescue partition, complete 128 MiB
+FAT32 A and B payload slots, and a type-0xda SwiftOS data partition. Fresh A/B
+slots share the canonical SWIFTOS-AB volume identity and are byte-identical so
+they can be copied and verified as raw extents. The data partition retains
+duplicate signed volume headers, an initially seeded redundant A/B journal, the
+bounded kernel log, and SwiftFS user data.
+
+Partition one contains autoboot.txt plus a factory rescue config.txt,
+kernel8.img, and rescue.dtb. A CRC-protected manifest integrity-checks the rescue
+file sizes and SHA-256 values. Transactional selector code validates the entire
+fixed FAT12 structure and rescue payload before it may rewrite only
+autoboot.txt's partition-relative sector 15. The rescue currently reuses this
+release's full kernel and DTB under a no-overlay recovery config; it is a
+capacity-constrained, hardware-unverified factory snapshot, not yet a separately
+pinned minimal rescue image.
+
+Rescue fallback depends on the installed EEPROM bootloader configuration, not
+only these SD bytes. Physical acceptance must retain the exact EEPROM build,
+prove PARTITION_WALK=1, capture tryboot capability bits, and exercise the
+candidate/default/rescue fallback order. This package neither changes nor
+certifies the EEPROM configuration.
+
+Persistent candidate and peer copies use activation-last FAT32 ordering: zero
+and read back destination sectors 6 and 0, copy and verify all other sectors,
+then synchronize backup boot sector 6 and primary boot sector 0 separately in
+that order. This host-tested policy reduces exposure to torn updates but has not
+yet been exercised with physical Pi firmware, real microSD power cuts, or the
+watchdog/tryboot rollback path. It is not an unbrickability claim.

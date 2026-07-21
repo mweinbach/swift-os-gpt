@@ -78,6 +78,7 @@ def validate_successful_package(
         "BOOT-MANIFEST.txt",
         "BUILD-METADATA.txt",
         "MEDIA-LAYOUT.txt",
+        "RESCUE-CONFIG.txt",
         "SHA256SUMS",
         "bcm2712-rpi-5-b.dtb",
         "config.txt",
@@ -108,6 +109,10 @@ def validate_successful_package(
             "config does not disable Linux-specific firmware image checks")
     require("bootloader_update=0\n" in config,
             "config does not isolate EEPROM updates from SD slot updates")
+    require("kernel_watchdog_timeout=15\n" in config,
+            "config does not arm the kernel rollback watchdog")
+    require("kernel_watchdog_partition=0\n" in config,
+            "watchdog reset does not return through the A/B selector")
     require("enable_uart=1\n" in config,
             "config does not retain the UART10 early console")
     require("uart_2ndstage=1\n" in config,
@@ -124,11 +129,21 @@ def validate_successful_package(
     require("overlays/dwc2.dtbo" in manifest,
             "human-readable manifest omits the DWC2 overlay")
 
+    rescue_config = (output / "RESCUE-CONFIG.txt").read_text()
+    require("kernel=kernel8.img\n" in rescue_config,
+            "rescue config does not select the invariant kernel name")
+    require("device_tree=rescue.dtb\n" in rescue_config,
+            "rescue config does not select the invariant DTB name")
+    require("bootloader_update=0\n" in rescue_config,
+            "rescue config does not isolate EEPROM updates")
+    require("dtoverlay=" not in rescue_config,
+            "rescue config unexpectedly depends on an overlay directory")
+
     metadata = dict(
         line.split("=", 1)
         for line in (output / "BUILD-METADATA.txt").read_text().splitlines()
     )
-    require(metadata["format"] == "swiftos-rpi5-boot-v4",
+    require(metadata["format"] == "swiftos-rpi5-boot-v5",
             "package format was not advanced")
     require(metadata["firmware_repository_revision"] == revision,
             "firmware revision was not recorded")
@@ -138,12 +153,16 @@ def validate_successful_package(
     require(metadata["media_layout_sha256"] == sha256(
         REPOSITORY / "Boards/RaspberryPi5/media-layout.txt"),
         "media-layout hash mismatch")
+    require(metadata["rescue_config_sha256"] == sha256(
+        REPOSITORY / "Boards/RaspberryPi5/rescue-config.txt"),
+        "rescue-config hash mismatch")
 
     checksum_lines = (output / "SHA256SUMS").read_text().splitlines()
     expected_checksum_files = [
         "BOOT-MANIFEST.txt",
         "BUILD-METADATA.txt",
         "MEDIA-LAYOUT.txt",
+        "RESCUE-CONFIG.txt",
         "bcm2712-rpi-5-b.dtb",
         "config.txt",
         "kernel8.img",

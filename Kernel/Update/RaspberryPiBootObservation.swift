@@ -16,6 +16,22 @@ enum PlatformFirmwareBootContext: Equatable {
     case unsupportedPartition(UInt32)
 }
 
+extension PlatformFirmwareBootContext {
+    /// Map only firmware partition one to recovery authority. A payload or an
+    /// unsupported partition can never enter the selector-repair API merely
+    /// because its runtime executor has not yet observed the current boot.
+    var bootUpdateRuntimeContext: BootUpdateRuntimeBootContext {
+        switch self {
+        case .rescue:
+            return .recovery
+        case .payload(let observation):
+            return .payload(observation)
+        case .unsupportedPartition:
+            return .unsupported
+        }
+    }
+}
+
 enum RaspberryPiBootObservationDiscovery {
     static func context(
         from selection: FirmwareBootSelection

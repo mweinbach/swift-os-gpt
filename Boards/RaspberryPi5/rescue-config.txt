@@ -1,0 +1,36 @@
+# SwiftOS Raspberry Pi 5 invariant rescue boot.
+#
+# The A/B selector normally redirects firmware to payload partition 2 or 3.
+# If that selector is absent or cannot be parsed, this configuration keeps
+# partition 1 independently bootable for UART and HDMI diagnosis. The rescue
+# filesystem intentionally has no overlay directory or ordinary update path.
+# Current images embed the release's full kernel and DTB as a factory snapshot.
+# This is hardware-unverified and capacity-constrained; a future media revision
+# should pin a smaller rescue-specific build instead of growing this partition.
+[pi5]
+arm_64bit=1
+kernel=kernel8.img
+device_tree=rescue.dtb
+
+# SwiftOS is bare metal and microSD recovery must never update SPI EEPROM.
+os_check=0
+bootloader_update=0
+
+# Keep the expanded rescue DTB outside the live-update destination/workspace.
+device_tree_address=0x03000000
+device_tree_end=0x03200000
+
+# Preserve firmware setup for RP1 until SwiftOS owns the root complex.
+pciex4_reset=0
+
+# Retain a firmware-selected HDMI framebuffer for visible recovery output.
+disable_fw_kms_setup=0
+framebuffer_depth=32
+framebuffer_ignore_alpha=1
+
+# The dedicated debug connector is the invariant rescue console.
+enable_uart=1
+uart_2ndstage=1
+sha256=1
+
+[all]

@@ -5,18 +5,23 @@ Partition table: MBR
 Payload-slot alignment: 2048 logical blocks (1 MiB)
 
 Partition 1:
-  role: invariant A/B selector
+  role: invariant A/B selector and factory rescue environment
   bootable: yes (SwiftOS MBR convention)
   type: 0x01 (FAT12)
   start block: 1
   block count: 2047
-  contents: autoboot.txt only
+  volume label: SWIFTOS-CTL
+  contents: autoboot.txt, config.txt, kernel8.img, rescue.dtb
+  rescue manifest: CRC-protected SWRSQ001 record in boot-sector bytes 64...191
+  sole update-writable sector: partition-relative block 15 (autoboot.txt)
 
 Partition 2:
   role: boot payload slot A
   bootable: no
   type: 0x0c (FAT32 LBA)
   default size: 128 MiB
+  volume label: SWIFTOS-AB
+  hidden-sector field: 0 (partition-location independent)
   contents: every file covered by the slot's SHA256SUMS
 
 Partition 3:
@@ -24,6 +29,8 @@ Partition 3:
   bootable: no
   type: 0x0c (FAT32 LBA)
   default size: 128 MiB
+  volume label: SWIFTOS-AB
+  hidden-sector field: 0 (partition-location independent)
   contents: every file covered by the slot's SHA256SUMS
 
 Partition 4:
@@ -34,21 +41,61 @@ Partition 4:
   size: remaining image blocks
   blocks 0 and 1, bytes 0...63: SwiftOS data-volume v1 superblocks
   blocks 0 and 1, bytes 64...223: redundant A/B boot-control records
+  initial boot-control state: sequence 1, stable A, generation 1, raw-slot SHA-256
   default kernel-log arena: blocks 2 through 4097 (2 MiB)
   remaining blocks: SwiftFS user/system data
 
+Fresh media gives both payload slots the same FAT32 identity and byte-for-byte
+contents so a full raw-slot SHA-256 describes either slot. Slot identity comes
+from the MBR entry and the firmware-reported boot partition, never the common
+volume label. Slots may temporarily differ during a transaction and converge
+again only after the new release is confirmed and mirrored.
+
 The selector normally points to partition 2 and uses Raspberry Pi tryboot to
-select partition 3 once. After slot B proves its firmware-reported partition,
-tryboot state, release digest, and health, SwiftOS may switch the selector to B.
-A failed or hung trial must reset through the selector and return to the still-
-confirmed slot. Mirroring the confirmed payload into its peer is allowed only
-while the selector continues to boot the confirmed source.
+select partition 3 once. The reverse mapping applies after B becomes confirmed.
+Before changing the selector, the kernel validates its exact boot sector, both
+FAT copies, root directory, rescue manifest, and SHA-256 of config.txt,
+kernel8.img, and rescue.dtb. It can then synchronize and read back only the
+single 512-byte autoboot.txt sector; no selector FAT, directory, rescue file,
+MBR, payload, log, or SwiftFS write is expressible through that writer.
+
+Candidate and convergence copies first zero and verify the destination FAT32
+backup boot sector 6 and primary boot sector 0. Every other sector is copied,
+synchronized, and read back before sector 6 is committed alone and sector 0 is
+committed last. Only a complete full-slot digest may advance the journal to a
+trial. This activation-last ordering narrows power-loss exposure; it is not an
+absolute guarantee against every firmware, controller, or media failure.
+
+After a one-shot candidate proves its firmware-reported partition, tryboot
+state, release digest, trial token, and health, SwiftOS may commit the selector.
+It then reboots normally into that confirmed source before mirroring it into its
+peer with the same activation-last order. A failed or hung trial is intended to
+reset through partition zero and the unchanged selector to the prior confirmed
+slot. This tryboot, watchdog, rollback, rescue, and power-cut behavior remains
+unverified on physical Raspberry Pi 5 hardware.
+
+The partition-one fallback also requires a recorded EEPROM build/configuration
+with PARTITION_WALK=1. The on-card format does not prove that firmware policy;
+physical acceptance must capture it and the observed fallback order.
+
+Partition 1 currently embeds a factory snapshot of the complete SwiftOS kernel
+and DTB under a rescue-only config without overlays. It is capacity-constrained
+and hardware-unverified. A future media revision should replace it with a
+smaller, separately pinned rescue build instead of allowing the full GUI kernel
+to grow indefinitely inside the invariant control partition.
 
 The selector occupies the alignment gap that format 1 left unused. Slots A and
 B subdivide format 1's 256 MiB boot extent, so the default type-0xda partition
 retains exact block 526336 and can be preserved by a deliberate migration. A
-routine slot update must never rewrite the MBR, selector, active slot, or data
-partition.
+routine slot update must preserve the MBR, partition-one rescue bytes, confirmed
+slot, log arena, and SwiftFS data. Its only selector write is the transactional
+autoboot.txt sector after candidate health succeeds, and its only data-partition
+writes are the reserved redundant boot-control journal records.
+
+Those two journal records currently share adjacent logical sectors. They
+survive one independently torn sector under the block-device contract but are
+not separate SD flash failure domains; physical power-cut qualification must
+test that controller-level limitation.
 
 Pi SPI EEPROM A/B updates are a separate transaction. Slot packages set
 bootloader_update=0 and must not contain recovery.bin or pieeprom update files.

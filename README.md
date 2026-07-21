@@ -231,15 +231,19 @@ requires the timer's non-secure physical PPI and the removable SD controller's
 SPI to resolve through their inherited or explicit interrupt parent before it
 adds the DTB and official `dwc2.dtbo` from that revision with byte hashes. It also
 produces a sparse format-v2 MBR media image with a small invariant FAT12
-selector, complete 128 MiB FAT32 A and B payload slots, and a signed type-`0xda`
-data partition. Set `RPI5_MEDIA_BLOCK_COUNT` to the exact target-card block count
-when the data partition should consume the remaining card. The packaged
-`config.txt` disables Linux-specific firmware image checking and implicit Pi
-SPI EEPROM updates, enables DWC2 peripheral mode for USB-C debugging, and asks
-Pi firmware to select an HDMI mode from EDID and retain a 32-bit boot
-framebuffer. It also pins the expanded DTB to a bounded 48 MiB window, outside
-both the reserved restart destination and the high-memory upload workspace. The
-kernel discovers and maps
+selector/rescue environment, complete 128 MiB FAT32 A and B payload slots, and
+a signed type-`0xda` data partition. Fresh slots have one canonical
+`SWIFTOS-AB` FAT32 identity and byte-identical raw contents; logical A/B
+identity comes from verified partition geometry and the firmware-reported boot
+partition. The data superblocks seed two CRC-protected replicas of the initial
+stable-A boot-control record. Set `RPI5_MEDIA_BLOCK_COUNT` to the exact target-
+card block count when the data partition should consume the remaining card.
+The packaged `config.txt` disables Linux-specific firmware image checking and
+implicit Pi SPI EEPROM updates, enables DWC2 peripheral mode for USB-C
+debugging, and asks Pi firmware to select an HDMI mode from EDID and retain a
+32-bit boot framebuffer. It also pins the expanded DTB to a bounded 48 MiB
+window, outside both the reserved restart destination and the high-memory
+upload workspace. The kernel discovers and maps
 the translated DWC2 and firmware-mailbox resources, powers the USB domain,
 initializes DWC2 in bounded polled device mode, and exposes a CDC ACM diagnostic
 display stream. It can mirror a firmware framebuffer or use a kernel-owned
@@ -271,8 +275,8 @@ contracts:
 
 | Media/operation | Persistence and data effect |
 | --- | --- |
-| New v2 whole-card initialization | Destructively writes `swiftos-rpi5-media.img`, creating `SWIFTOS-CTL`, `SWIFTOS-A`, `SWIFTOS-B`, and type-`0xda` partition four for the update journal, persistent logs, and SwiftFS. |
-| Routine v2 release update | Must write and verify only the inactive payload slot, trial it once, and change the selector only after the candidate proves its identity, digest, and health. The confirmed slot, logs, and SwiftFS remain intact; only partition four's reserved boot-control journal bytes change. |
+| New v2 whole-card initialization | Destructively writes `swiftos-rpi5-media.img`, creating the `SWIFTOS-CTL` selector/rescue, two MBR-positioned `SWIFTOS-AB` slots, and type-`0xda` partition four for the seeded update journal, persistent logs, and SwiftFS. |
+| Routine v2 release update | Must make only the inactive slot non-bootable, write and verify it with FAT32 sectors 6 then 0 committed last, trial it once, and change only the selector's dedicated sector after the candidate proves its identity, digest, token, and health. The confirmed slot, rescue payload, logs, and SwiftFS remain intact; only partition four's reserved boot-control journal bytes change. After a normal boot into the new default, the service converges the peer using the same ordering. |
 | Legacy v1 card | Has one `SWIFTOS` FAT32 payload plus type-`0xda` partition two. It remains readable and log-capable but has no A/B rollback. Copying a v2 package into it is not a migration. |
 | One-time v1-to-v2 migration | Changes the MBR and boot extents. The default v2 geometry deliberately retains the v1 data extent, but no physical card has been migrated and no supported migration command exists yet. Back up user data before any future migration. |
 | Live USB kernel update | Stages and chainloads a verified kernel in RAM. It is volatile; a power cycle returns to the selector's confirmed microSD slot. |
@@ -281,11 +285,20 @@ For every card operation, power the Pi off and re-resolve the current removable
 whole disk; never reuse an earlier `/dev/diskN` or touch an unrelated disk. On
 v2, the selector is immutable during candidate staging and trial; do not edit
 its `autoboot.txt` or use a manual file copy as a substitute for the
-transaction. The repository now has host-tested layout, journal, copy, and
-rollback policy foundations, but the device-integrated persistent slot
-installer and the physical Pi A/B boot path remain unverified. The repository
-also does not install a live USB update to microSD. Existing returned-card
-evidence describes legacy v1 media and does not imply that card was migrated.
+transaction. Partition one also holds a digest-checked rescue `config.txt`,
+`kernel8.img`, and `rescue.dtb`; only the 512-byte `autoboot.txt` data sector is
+writable through the strict selector service. The rescue is currently a
+capacity-constrained snapshot of the full release kernel and DTB, not a
+separately pinned minimal recovery image. The repository now has host-tested
+layout, journal, activation-last copy, selector, tryboot, watchdog, rollback,
+and convergence policy foundations, but the device-integrated persistent slot
+installer and the physical Pi power-cut, rescue, and A/B boot paths remain
+unverified. This reduces update risk; it is not an unbrickability claim. The
+repository also does not install a live USB update to microSD. Existing
+returned-card evidence describes legacy v1 media and does not imply that card
+was migrated. Raspberry Pi SPI EEPROM updates remain a separate recovery domain
+and are disabled and excluded from SwiftOS slot packages.
+
 See the
 [Pi media lifecycle and returned-card diagnostics](docs/raspberry-pi-5.md#physical-media-lifecycle-and-returned-card-diagnostics)
 for exact safety checks and the currently supported operations.

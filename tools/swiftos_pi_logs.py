@@ -136,6 +136,7 @@ def _has_swiftos_partition_sentinels(record: Mapping[str, Any]) -> bool:
     has_selector = False
     has_slot_a = False
     has_slot_b = False
+    canonical_ab_slot_count = 0
     has_data = False
     for partition in partitions:
         if not isinstance(partition, dict):
@@ -170,9 +171,18 @@ def _has_swiftos_partition_sentinels(record: Mapping[str, Any]) -> bool:
             "c",
         }:
             has_slot_b = True
+        if volume == "SWIFTOS-AB" and content in {
+            "dosfat32",
+            "windowsfat32",
+            "0c",
+            "c",
+        }:
+            canonical_ab_slot_count += 1
         if content in {"da", "0xda"}:
             has_data = True
-    has_ab_boot = has_selector and has_slot_a and has_slot_b
+    has_ab_boot = has_selector and (
+        (has_slot_a and has_slot_b) or canonical_ab_slot_count == 2
+    )
     return has_data and (has_legacy_boot or has_ab_boot)
 
 

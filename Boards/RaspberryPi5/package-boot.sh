@@ -42,6 +42,8 @@ SWIFTOS_REPOSITORY=$(git -C "$SCRIPT_DIRECTORY" rev-parse --show-toplevel 2>/dev
     fail "DWC2 overlay not found: $FIRMWARE_DWC2_OVERLAY"
 [ -s "$FIRMWARE_DWC2_OVERLAY" ] || fail "DWC2 overlay is empty"
 [ -f "$SCRIPT_DIRECTORY/config.txt" ] || fail "board config.txt is missing"
+[ -f "$SCRIPT_DIRECTORY/rescue-config.txt" ] || \
+    fail "board rescue-config.txt is missing"
 [ -f "$SCRIPT_DIRECTORY/boot-manifest.txt" ] || fail "board manifest is missing"
 [ -f "$SCRIPT_DIRECTORY/media-layout.txt" ] || fail "media layout is missing"
 
@@ -117,6 +119,8 @@ OVERLAY_MAGIC_BYTES=$(dd if="$FIRMWARE_DWC2_OVERLAY" bs=1 count=4 2>/dev/null | 
 
 mkdir -p "$OUTPUT_DIRECTORY/overlays"
 cp "$SCRIPT_DIRECTORY/config.txt" "$OUTPUT_DIRECTORY/config.txt"
+cp "$SCRIPT_DIRECTORY/rescue-config.txt" \
+    "$OUTPUT_DIRECTORY/RESCUE-CONFIG.txt"
 cp "$KERNEL_IMAGE" "$OUTPUT_DIRECTORY/kernel8.img"
 cp "$FIRMWARE_DTB" "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb"
 cp "$FIRMWARE_DWC2_OVERLAY" "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo"
@@ -124,6 +128,7 @@ cp "$SCRIPT_DIRECTORY/boot-manifest.txt" "$OUTPUT_DIRECTORY/BOOT-MANIFEST.txt"
 cp "$SCRIPT_DIRECTORY/media-layout.txt" "$OUTPUT_DIRECTORY/MEDIA-LAYOUT.txt"
 chmod 0644 \
     "$OUTPUT_DIRECTORY/config.txt" \
+    "$OUTPUT_DIRECTORY/RESCUE-CONFIG.txt" \
     "$OUTPUT_DIRECTORY/kernel8.img" \
     "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb" \
     "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo" \
@@ -134,9 +139,10 @@ KERNEL_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/kernel8.img")
 DTB_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/bcm2712-rpi-5-b.dtb")
 DWC2_OVERLAY_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo")
 MEDIA_LAYOUT_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/MEDIA-LAYOUT.txt")
+RESCUE_CONFIG_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/RESCUE-CONFIG.txt")
 
 {
-    echo "format=swiftos-rpi5-boot-v4"
+    echo "format=swiftos-rpi5-boot-v5"
     echo "board=raspberry-pi-5-model-b"
     echo "hardware_verified=false"
     echo "swiftos_revision=$SWIFTOS_REVISION"
@@ -147,6 +153,7 @@ MEDIA_LAYOUT_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/MEDIA-LAYOUT.txt")
     echo "dtb_sha256=$DTB_SHA256"
     echo "dwc2_overlay_sha256=$DWC2_OVERLAY_SHA256"
     echo "media_layout_sha256=$MEDIA_LAYOUT_SHA256"
+    echo "rescue_config_sha256=$RESCUE_CONFIG_SHA256"
 } > "$OUTPUT_DIRECTORY/BUILD-METADATA.txt"
 chmod 0644 "$OUTPUT_DIRECTORY/BUILD-METADATA.txt"
 
@@ -155,6 +162,7 @@ chmod 0644 "$OUTPUT_DIRECTORY/BUILD-METADATA.txt"
         BOOT-MANIFEST.txt \
         BUILD-METADATA.txt \
         MEDIA-LAYOUT.txt \
+        RESCUE-CONFIG.txt \
         bcm2712-rpi-5-b.dtb \
         config.txt \
         kernel8.img \

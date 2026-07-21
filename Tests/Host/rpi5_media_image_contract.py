@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -14,6 +15,12 @@ import zlib
 REPOSITORY = Path(__file__).resolve().parents[2]
 PACKAGER = REPOSITORY / "Boards/RaspberryPi5/package-boot.sh"
 MEDIA_TOOL = REPOSITORY / "tools/build_rpi5_media.py"
+SELECTOR_AUTOBOOT_B = b"""[all]
+tryboot_a_b=1
+boot_partition=3
+[tryboot]
+boot_partition=2
+"""
 sys.path.insert(0, str(Path(__file__).parent))
 from rpi5_package_contract import make_firmware_checkout, write_image  # noqa: E402
 
@@ -39,6 +46,19 @@ def digest(path: Path) -> str:
     with path.open("rb") as source:
         while chunk := source.read(1_024 * 1_024):
             value.update(chunk)
+    return value.hexdigest()
+
+
+def extent_digest(path: Path, start_block: int, block_count: int) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as source:
+        source.seek(start_block * 512)
+        remaining = block_count * 512
+        while remaining:
+            chunk = source.read(min(remaining, 1_024 * 1_024))
+            require(bool(chunk), "slot digest extent is truncated")
+            value.update(chunk)
+            remaining -= len(chunk)
     return value.hexdigest()
 
 
@@ -129,6 +149,60 @@ def read_mbr(
     return mbr, selector, slot_a, slot_b, data
 
 
+def require_selector_rescue_layout(
+    image: Path,
+    selector: tuple[int, int],
+    package: Path,
+) -> dict[str, int]:
+    sources = {
+        "config.txt": package / "RESCUE-CONFIG.txt",
+        "kernel8.img": package / "kernel8.img",
+        "rescue.dtb": package / "bcm2712-rpi-5-b.dtb",
+    }
+    expected = [
+        ("autoboot.txt", b"AUTOBOOTTXT", None),
+        ("config.txt", b"CONFIG  TXT", sources["config.txt"]),
+        ("kernel8.img", b"KERNEL8 IMG", sources["kernel8.img"]),
+        ("rescue.dtb", b"RESCUE  DTB", sources["rescue.dtb"]),
+    ]
+    clusters: dict[str, int] = {}
+    with image.open("rb") as source:
+        root_block = selector[0] + 1 + 2 * 6
+        source.seek(root_block * 512)
+        root = source.read(2 * 512)
+        require(len(root) == 1_024, "selector root directory is truncated")
+        next_cluster = 2
+        for index, (name, short_name, path) in enumerate(expected):
+            entry = root[index * 32:(index + 1) * 32]
+            require(entry[:11] == short_name,
+                    f"selector short name changed: {name}")
+            require(entry[11] == 0x20,
+                    f"selector attributes changed: {name}")
+            first_cluster = struct.unpack_from("<H", entry, 26)[0]
+            byte_count = struct.unpack_from("<I", entry, 28)[0]
+            require(first_cluster == next_cluster,
+                    f"selector allocation is not sequential: {name}")
+            clusters[name] = first_cluster
+            cluster_count = max(1, (byte_count + 511) // 512)
+            if path is not None:
+                contents = path.read_bytes()
+                require(byte_count == len(contents),
+                        f"selector rescue size changed: {name}")
+                data_block = selector[0] + 15 + first_cluster - 2
+                source.seek(data_block * 512)
+                encoded = source.read(cluster_count * 512)
+                require(encoded[:byte_count] == contents,
+                        f"selector rescue content changed: {name}")
+                require(not any(encoded[byte_count:]),
+                        f"selector rescue padding is not zero: {name}")
+            next_cluster += cluster_count
+        require(not any(root[len(expected) * 32:]),
+                "selector root has an unexpected entry")
+    require(clusters["autoboot.txt"] == 2,
+            "autoboot.txt moved away from cluster 2")
+    return clusters
+
+
 def fat32_entry_cluster(entry: bytes) -> int:
     return (struct.unpack_from("<H", entry, 20)[0] << 16) | struct.unpack_from(
         "<H", entry, 26
@@ -209,6 +283,34 @@ def valid_record(sequence: int, timestamp: int, payload: bytes) -> bytes:
     return bytes(block)
 
 
+def writing_boot_control(
+    *,
+    confirmed_digest: str,
+    candidate_digest: str,
+    slot_block_count: int,
+    next_candidate_block: int,
+    phase: int = 1,
+) -> bytes:
+    record = bytearray(160)
+    record[0:8] = b"SWABCTL1"
+    struct.pack_into("<HH", record, 8, 1, len(record))
+    struct.pack_into("<Q", record, 16, 2)
+    record[24] = phase
+    record[25] = 1  # confirmed A
+    record[26] = 2  # candidate B
+    record[27] = 1  # release
+    struct.pack_into("<Q", record, 32, 1)
+    struct.pack_into("<Q", record, 40, 2)
+    struct.pack_into("<Q", record, 48, 0x1122_3344_5566_7788)
+    struct.pack_into("<Q", record, 56, next_candidate_block)
+    struct.pack_into("<Q", record, 64, slot_block_count)
+    record[72:104] = bytes.fromhex(confirmed_digest)
+    record[104:136] = bytes.fromhex(candidate_digest)
+    struct.pack_into("<Q", record, 136, 0x5357_4142_0000_0002)
+    struct.pack_into("<I", record, 156, zlib.crc32(record[:156]) & 0xFFFF_FFFF)
+    return bytes(record)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="swiftos-rpi5-media-") as temporary:
         root = Path(temporary)
@@ -262,6 +364,25 @@ def main() -> int:
         require(slot_a == (2_048, 131_072), "slot A LBA extent changed")
         require(slot_b == (133_120, 131_072), "slot B LBA extent changed")
         require(data == (264_192, 63_488), "data partition LBA extent changed")
+        slot_digest = extent_digest(first, *slot_a)
+        require(slot_digest == extent_digest(first, *slot_b),
+                "fresh A/B slots are not raw-byte mirrorable")
+        with first.open("rb") as source:
+            source.seek(slot_a[0] * 512)
+            slot_a_boot = source.read(512)
+            source.seek(slot_b[0] * 512)
+            slot_b_boot = source.read(512)
+        require(slot_a_boot == slot_b_boot,
+                "A/B boot sectors contain slot-specific metadata")
+        require(struct.unpack_from("<I", slot_a_boot, 28)[0] == 0,
+                "A/B FAT32 hidden sectors are not canonical")
+        require(slot_a_boot[71:82] == b"SWIFTOS-AB ",
+                "A/B FAT32 canonical volume label changed")
+        selector_clusters = require_selector_rescue_layout(
+            first,
+            selector,
+            package,
+        )
         require_root_child_parent_sentinel(first, slot_a, b"OVERLAYS   ")
         require_root_child_parent_sentinel(first, slot_b, b"OVERLAYS   ")
 
@@ -295,8 +416,46 @@ def main() -> int:
                 "media format did not advance")
         require(report["selector"]["default_slot"] == "A",
                 "fresh selector does not default to A")
+        require(report["selector"]["policy_valid"] is True,
+                "fresh selector policy was not accepted")
         require(report["selector"]["try_slot"] == "B",
                 "fresh selector does not trial B")
+        require(report["selector"]["autoboot_cluster"] == 2,
+                "inspector lost the selector-writer cluster")
+        require(report["selector"]["autoboot_partition_block"] == 15,
+                "inspector lost the selector-writer block")
+        rescue = report["selector"]["rescue"]
+        require(rescue["boot_partition"] == 1,
+                "inspector lost the rescue boot partition")
+        require(rescue["hardware_verified"] is False,
+                "unverified rescue fallback was presented as verified")
+        rescue_sources = {
+            "config.txt": package / "RESCUE-CONFIG.txt",
+            "kernel8.img": package / "kernel8.img",
+            "rescue.dtb": package / "bcm2712-rpi-5-b.dtb",
+        }
+        for name, path in rescue_sources.items():
+            require(
+                rescue["files"][name]["sha256"]
+                    == hashlib.sha256(path.read_bytes()).hexdigest(),
+                f"inspector rescue digest changed: {name}",
+            )
+
+        # Rescue payload bytes are immutable and must be the exact release
+        # bytes carried in both boot slots. Self-consistent FAT metadata is not
+        # enough to bless a mutated recovery kernel.
+        with second.open("r+b") as target:
+            kernel_block = (
+                selector[0] + 15 + selector_clusters["kernel8.img"] - 2
+            )
+            target.seek(kernel_block * 512)
+            original = target.read(1)
+            require(len(original) == 1, "rescue corruption fixture is truncated")
+            target.seek(kernel_block * 512)
+            target.write(bytes([original[0] ^ 0x80]))
+        rescue_error = inspect(second, should_succeed=False)
+        require("selector rescue kernel8.img digest is invalid" in rescue_error,
+                "mutated selector rescue kernel was not rejected")
         boot_files = report["boot_files"]
         expected_files = sorted(
             str(path.relative_to(package))
@@ -316,12 +475,160 @@ def main() -> int:
                 == report["boot_slots"]["B"]["files"],
             "fresh A/B slots do not contain the same release",
         )
+        require(
+            report["boot_slots"]["A"]["image_sha256"] == slot_digest
+                and report["boot_slots"]["B"]["image_sha256"] == slot_digest,
+            "inspector lost the complete mirrorable slot identity",
+        )
+        require(
+            report["ab_transaction"]["raw_slots_converged"] is True
+                and report["ab_transaction"]["both_slots_valid"] is True,
+            "fresh A/B transaction was not reported as converged",
+        )
+        journal = report["boot_control_journal"]
+        require(journal["status"] == "healthy"
+                and journal["valid_replicas"] == 2,
+                "fresh boot-control journal is not redundant")
+        initial = journal["newest"]
+        require(initial["sequence"] == 1 and initial["phase"] == "stable",
+                "fresh boot-control state is not stable sequence one")
+        require(initial["confirmed_slot"] == "A"
+                and initial["confirmed_generation"] == 1,
+                "fresh boot-control state does not confirm slot A")
+        require(initial["confirmed_digest"] == slot_digest,
+                "fresh boot-control digest does not identify the raw slot")
+        require(initial["slot_block_count"] == slot_a[1],
+                "fresh boot-control geometry differs from the slots")
+        require(initial["media_layout_fingerprint"]
+                == "0x5357414200000002",
+                "fresh boot-control layout fingerprint changed")
         require(report["data_superblock_status"] == "healthy",
                 "fresh superblocks are not healthy")
         layout = report["data_volume"]
         require(layout["kernel_log_start_block"] == 2, "log arena start")
         require(layout["kernel_log_block_count"] == 64, "log arena count")
         require(layout["user_data_start_block"] == 66, "user arena start")
+
+        torn_journal = root / "torn-journal.img"
+        shutil.copyfile(first, torn_journal)
+        with torn_journal.open("r+b") as target:
+            target.seek(data[0] * 512 + 64)
+            target.write(b"X")
+        torn_report = inspect(torn_journal)
+        require(torn_report["boot_control_journal"]["status"] == "degraded"
+                and torn_report["boot_control_journal"]["valid_replicas"] == 1,
+                "one torn boot-control replica did not recover from its peer")
+
+        # A torn one-sector selector commit must not hide the immutable rescue
+        # volume or the journal-authorized repair direction. The candidate was
+        # already fully verified and health-confirmed in this phase, so repair
+        # targets B while compatibility data remains sourced from confirmed A.
+        torn_selector = root / "torn-selector-policy.img"
+        shutil.copyfile(first, torn_selector)
+        pending = writing_boot_control(
+            confirmed_digest=slot_digest,
+            candidate_digest=slot_digest,
+            slot_block_count=slot_b[1],
+            next_candidate_block=slot_b[1],
+            phase=4,
+        )
+        with torn_selector.open("r+b") as target:
+            target.seek((selector[0] + 15) * 512)
+            target.write(b"X")
+            for replica in (0, 1):
+                target.seek((data[0] + replica) * 512 + 64)
+                target.write(pending)
+        torn_selector_report = inspect(torn_selector)
+        require(
+            torn_selector_report["selector"]["policy_valid"] is False
+                and torn_selector_report["selector"]["default_slot"] is None
+                and torn_selector_report["selector"]["try_slot"] is None
+                and torn_selector_report["selector"]["repair_target"] == "B"
+                and torn_selector_report["ab_transaction"]
+                    ["selector_requires_repair"] is True
+                and torn_selector_report["ab_transaction"]
+                    ["selector_repair_target"] == "B",
+            "torn selector policy lost its journal-derived repair target",
+        )
+        require(
+            torn_selector_report["ab_transaction"]
+                ["transaction_consistent"] is False,
+            "torn selector policy was reported as transaction-consistent",
+        )
+
+        wrong_selector = root / "wrong-valid-selector.img"
+        shutil.copyfile(first, wrong_selector)
+        with wrong_selector.open("r+b") as target:
+            target.seek((selector[0] + 15) * 512)
+            target.write(SELECTOR_AUTOBOOT_B.ljust(512, b"\0"))
+        wrong_selector_error = inspect(wrong_selector, should_succeed=False)
+        require(
+            "selector default disagrees with boot-control state"
+                in wrong_selector_error,
+            "valid but unauthorized selector policy passed reconciliation",
+        )
+
+        # Divergence is a valid durable state after a failed trial. The
+        # confirmed slot remains strict while an independently valid peer no
+        # longer causes returned-card troubleshooting to abort.
+        divergent = root / "divergent-stable.img"
+        shutil.copyfile(first, divergent)
+        with divergent.open("r+b") as target:
+            target.seek((slot_b[0] + slot_b[1]) * 512 - 1)
+            original = target.read(1)
+            require(len(original) == 1, "divergent slot fixture is truncated")
+            target.seek((slot_b[0] + slot_b[1]) * 512 - 1)
+            target.write(bytes([original[0] ^ 0x80]))
+        divergent_report = inspect(divergent)
+        require(
+            divergent_report["ab_transaction"]["raw_slots_converged"] is False
+                and divergent_report["ab_transaction"]["both_slots_valid"] is True
+                and divergent_report["ab_transaction"]["confirmed_slot"] == "A",
+            "valid stable slot divergence was not recoverably reported",
+        )
+
+        # Candidate boot sectors are deliberately invalid while a raw slot is
+        # staged. Journal reconciliation must keep the confirmed A slot usable
+        # and report B's bounded validation failure rather than rejecting all
+        # diagnostic access to the returned card.
+        staging = root / "writing-candidate.img"
+        shutil.copyfile(first, staging)
+        candidate_digest = extent_digest(staging, *slot_b)
+        writing = writing_boot_control(
+            confirmed_digest=slot_digest,
+            candidate_digest=candidate_digest,
+            slot_block_count=slot_b[1],
+            next_candidate_block=1,
+        )
+        with staging.open("r+b") as target:
+            target.seek(slot_b[0] * 512)
+            target.write(bytes(512))
+            target.seek((slot_b[0] + 6) * 512)
+            target.write(bytes(512))
+            for replica in (0, 1):
+                target.seek((data[0] + replica) * 512 + 64)
+                target.write(writing)
+        staging_report = inspect(staging)
+        require(
+            staging_report["ab_transaction"]["phase"] == "writing-candidate"
+                and staging_report["ab_transaction"]["confirmed_slot"] == "A"
+                and staging_report["ab_transaction"]["both_slots_valid"] is False
+                and staging_report["boot_slots"]["A"]["valid"] is True
+                and staging_report["boot_slots"]["B"]["valid"] is False,
+            "in-progress activation-last media was not recoverably reported",
+        )
+
+        backup_corrupt = root / "backup-boot-corrupt.img"
+        shutil.copyfile(first, backup_corrupt)
+        with backup_corrupt.open("r+b") as target:
+            target.seek((slot_a[0] + 6) * 512 + 10)
+            encoded = target.read(1)
+            require(len(encoded) == 1, "backup-boot fixture is truncated")
+            target.seek((slot_a[0] + 6) * 512 + 10)
+            target.write(bytes([encoded[0] ^ 0x40]))
+        backup_error = inspect(backup_corrupt, should_succeed=False)
+        require("boot-sector replicas disagree" in backup_error,
+                "confirmed slot accepted a mismatched FAT32 backup boot sector")
 
         data_offset = data[0] * 512
         with first.open("r+b") as target:
@@ -425,17 +732,24 @@ def main() -> int:
                 "failed forbidden-package build left an output image")
         forbidden.unlink()
 
-        # A self-looping root chain is bounded and rejected.
-        _, _, slot_a, _, _ = read_mbr(second)
-        with second.open("r+b") as target:
+        # A self-looping root chain is bounded and rejected. Corrupt both FAT
+        # replicas so the fixture reaches chain traversal after replica checks.
+        looped = root / "looped-fat.img"
+        shutil.copyfile(first, looped)
+        _, _, slot_a, _, _ = read_mbr(looped)
+        with looped.open("r+b") as target:
             boot_offset = slot_a[0] * 512
             target.seek(boot_offset)
             bpb = target.read(512)
             reserved = struct.unpack_from("<H", bpb, 14)[0]
-            fat_offset = (slot_a[0] + reserved) * 512
-            target.seek(fat_offset + 2 * 4)
-            target.write(struct.pack("<I", 2))
-        loop_error = inspect(second, should_succeed=False)
+            fat_sectors = struct.unpack_from("<I", bpb, 36)[0]
+            for fat_index in range(2):
+                fat_offset = (
+                    slot_a[0] + reserved + fat_index * fat_sectors
+                ) * 512
+                target.seek(fat_offset + 2 * 4)
+                target.write(struct.pack("<I", 2))
+        loop_error = inspect(looped, should_succeed=False)
         require("chain loops" in loop_error,
                 "malformed FAT chain was not bounded")
 

@@ -29,9 +29,10 @@ driver or the complete support gate.
 
 Raspberry Pi 5 keeps its boot firmware in EEPROM. It does not use
 `bootcode.bin`, `start*.elf`, or `fixup*.dat`; it does require a non-empty
-`config.txt`. On format-v2 media, partition one is a small invariant selector;
-the deterministic payload produced by `Boards/RaspberryPi5/package-boot.sh` is
-installed independently in both FAT32 boot slots, partitions two and three.
+`config.txt`. On format-v2 media, partition one is a small invariant selector
+and factory rescue environment; the deterministic payload produced by
+`Boards/RaspberryPi5/package-boot.sh` is installed independently in both FAT32
+boot slots, partitions two and three.
 The payload file set is:
 
 | File | Purpose |
@@ -43,7 +44,26 @@ The payload file set is:
 | `BOOT-MANIFEST.txt` | Human-readable, explicitly unverified manifest. |
 | `BUILD-METADATA.txt` | Input hashes, SwiftOS revision/dirty state, and firmware-repository revision. |
 | `MEDIA-LAYOUT.txt` | MBR selector, A/B payload, update-journal, and signed data-volume contract. |
+| `RESCUE-CONFIG.txt` | Source configuration for the partition-one factory rescue. |
 | `SHA256SUMS` | Stable byte-level hashes of all preceding files. |
+
+The FAT12 partition-one view contains `autoboot.txt`, a rescue `config.txt`,
+the release's `kernel8.img`, and the source DTB renamed `rescue.dtb`. A
+CRC-protected `SWRSQ001` record declares the three rescue sizes and SHA-256
+digests. The selector writer validates the exact boot sector, both FAT copies,
+the fixed root directory, the manifest, all three rescue payloads, and zeroed
+trailing space before it can write anything. Its authority is restricted to
+`autoboot.txt`'s single 512-byte cluster at partition-relative block 15; it
+cannot express a write to the MBR, selector metadata, rescue files, either
+payload slot, logs, or SwiftFS.
+
+This is currently a factory snapshot of the complete release kernel and DTB
+under a rescue-only configuration with no overlay directory. It is intended to
+provide UART and firmware-framebuffer diagnosis if the normal selector cannot
+be applied, but that fallback has not been exercised on physical Pi 5 hardware.
+The 2,047-sector FAT12 partition is capacity-constrained; a future media format
+should pin a smaller rescue-specific build rather than letting the full GUI
+kernel grow indefinitely inside the control partition.
 
 The firmware normally prefers `kernel_2712.img` on BCM2712 and falls back to
 `kernel8.img`. Raspberry Pi documents `kernel8.img` as a BCM2712-capable common
@@ -62,7 +82,11 @@ identical kernel bytes, firmware checkout, and board files, the listed file
 bytes and `SHA256SUMS` are reproducible. `tools/build_rpi5_media.py` gives the
 FAT allocation, timestamps, volume IDs, selector, MBR, and signed data headers
 deterministic values, so two builds with the same package and geometry are
-byte-identical. The payload sets `bootloader_update=0` and excludes
+byte-identical. Both fresh FAT32 slots use volume ID `0x53574142`, label
+`SWIFTOS-AB`, and a zero hidden-sector field, making the complete raw slot
+extents byte-identical. Logical A/B identity therefore comes from MBR entry and
+firmware-reported boot partition, never the common FAT label. The payload sets
+`bootloader_update=0` and excludes
 `recovery.bin` and `pieeprom` update files: SwiftOS payload A/B is not an A/B
 scheme for the Pi SPI EEPROM bootloader.
 
@@ -93,13 +117,16 @@ sparse 1 GiB format-v2 artifact with this MBR geometry:
 
 | Entry | Default extent | Volume/type | Role |
 | --- | --- | --- | --- |
-| 1 | blocks 1...2047 | FAT12 `SWIFTOS-CTL` | Invariant `autoboot.txt` selector only. |
-| 2 | block 2048, 262,144 blocks | FAT32 `SWIFTOS-A` | Complete payload slot A. |
-| 3 | block 264,192, 262,144 blocks | FAT32 `SWIFTOS-B` | Complete payload slot B. |
+| 1 | blocks 1...2047 | FAT12 `SWIFTOS-CTL` | Selector plus factory rescue; only `autoboot.txt` block 15 is transaction-writable. |
+| 2 | block 2048, 262,144 blocks | FAT32 `SWIFTOS-AB` | Complete payload slot A, identified by MBR entry two. |
+| 3 | block 264,192, 262,144 blocks | FAT32 `SWIFTOS-AB` | Complete payload slot B, identified by MBR entry three. |
 | 4 | block 526,336 through end of media | type `0xda` | Redundant update journal, persistent logs, and SwiftFS data. |
 
-The two payload slots are 128 MiB each by default. For physical media, pass
-the exact 512-byte block count so partition four spans the remainder:
+The two payload slots are 128 MiB each by default. Fresh media hashes their
+complete raw extents, requires them to match, and seeds both data-superblock
+journal replicas with sequence 1, stable slot A, generation 1, the raw-slot
+SHA-256, slot block count, and the format-v2 layout fingerprint. For physical
+media, pass the exact 512-byte block count so partition four spans the remainder:
 
 ```sh
 RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware \
@@ -110,23 +137,23 @@ python3 tools/build_rpi5_media.py inspect \
 
 The builder refuses existing outputs and every non-regular-file target; it does
 not select, unmount, or write a physical disk. Its inspector validates the
-selector policy, both bounded FAT32 slots, agreement between their manifests,
-every packaged file hash, duplicate data superblocks, and CRC-protected
-persistent records. It can still inspect legacy v1 images read-only. Flashing
-remains a separate explicitly targeted operation. Do not add Raspberry Pi 4
-firmware blobs. `sha256=1` asks the EEPROM firmware to log
-the hashes of loaded files; it does not replace checking `SHA256SUMS` before
-writing media.
+selector/rescue structure and hashes, both bounded FAT32 slots, their canonical
+raw equality and packaged file hashes, duplicate data superblocks, and the
+seeded CRC-protected boot-control replicas. It can still inspect legacy v1
+images read-only. Flashing remains a separate explicitly targeted operation.
+Do not add Raspberry Pi 4 firmware blobs. `sha256=1` asks the EEPROM firmware
+to log the hashes of loaded files; it does not replace checking `SHA256SUMS`
+before writing media.
 
 ## Physical media lifecycle and returned-card diagnostics
 
 SwiftOS recognizes two on-card formats. Legacy v1 has one bootable FAT32
 `SWIFTOS` payload at MBR entry one and a type-`0xda` data volume at entry two.
-Format v2 has `SWIFTOS-CTL`, `SWIFTOS-A`, `SWIFTOS-B`, and the type-`0xda`
-data volume at entry four. Whole-card initialization, a future v1-to-v2
-migration, routine v2 slot installation, and a volatile USB handoff are separate
-operations. Do not describe a file copy as migration or flashing, and do not
-describe a live USB update as installed.
+Format v2 has `SWIFTOS-CTL`, two canonical `SWIFTOS-AB` FAT32 volumes at MBR
+entries two and three, and the type-`0xda` data volume at entry four. Whole-card
+initialization, a future v1-to-v2 migration, routine v2 slot installation, and
+a volatile USB handoff are separate operations. Do not describe a file copy as
+migration or flashing, and do not describe a live USB update as installed.
 
 The physical traces and returned-card evidence linked from this document were
 captured from legacy v1 media. They remain valid evidence for the code and
@@ -147,10 +174,10 @@ ownership is ambiguous.
 ### First whole-card initialization: destructive
 
 This is the only current workflow that creates the complete media layout. It
-overwrites the whole card with the v2 MBR, invariant FAT12 selector, two complete
-FAT32 payload slots, and signed type-`0xda` data partition containing the update
-journal, persistent-log arena, and SwiftFS range. It destroys every previous
-partition and file on that card.
+overwrites the whole card with the v2 MBR, FAT12 selector/factory rescue, two
+complete canonical FAT32 payload slots, and signed type-`0xda` data partition
+containing the seeded redundant update journal, persistent-log arena, and
+SwiftFS range. It destroys every previous partition and file on that card.
 
 Build the image with that card's exact 512-byte block count, inspect it, and
 semantically verify both payload slots before flashing:
@@ -204,33 +231,75 @@ The transaction contract is:
 1. Validate the exact v2 geometry, firmware-reported current partition,
    confirmed journal state, equal slot sizes, release generation, and complete
    candidate digest.
-2. Record `writingCandidate`, copy only the inactive slot in bounded chunks,
-   then hash, synchronize, and read back the entire candidate. The selector is
-   unchanged throughout staging.
-3. Seal `trialPending` and request one Raspberry Pi `tryboot` reboot. The
-   invariant selector maps that one-shot boot to the candidate without changing
-   the confirmed default.
+2. Record `writingCandidate`, zero and read back the inactive FAT32 backup boot
+   sector 6 and primary boot sector 0, and keep both zero while every other
+   sector is copied in bounded synchronized/read-back-verified chunks. Commit
+   sector 6 alone, synchronize it, then commit sector 0 alone and synchronize
+   again. Independently hash and read back the complete raw candidate before
+   advancing. The selector is unchanged throughout staging.
+3. Seal `trialPending` and request one Raspberry Pi `tryboot` reboot only when
+   the exact runtime `/chosen/bootloader/capabilities` big-endian 32-bit value
+   proves both `TRYBOOT_A_B` (bit 2) and `TRYBOOT` (bit 3). Missing, malformed,
+   or partial capability evidence leaves ordinary boot identity available but
+   fails closed at trial authorization. The invariant selector maps that
+   one-shot boot to the candidate without changing the confirmed default. Pi
+   firmware arms a 15-second watchdog from `config.txt`; SwiftOS adopts it
+   early and services it only at cooperative progress checkpoints, not from a
+   timer IRQ that could conceal a wedged scheduler.
 4. Accept candidate health only when the running system proves the expected
    firmware partition, tryboot state, release generation and digest, trial
    token, and system health. Until then, the old slot remains confirmed.
-5. After health succeeds, commit the selector transaction, synchronize it, read
-   it back, and only then record the candidate as stable and confirmed. A failed
-   or reset trial returns through the unchanged selector to the prior slot; a
-   watchdog/reset policy is still required to escape a kernel that simply
-   hangs.
-6. Optionally copy the newly confirmed release back into its peer. This
-   convergence copy runs while the selector continues to boot the confirmed
-   source, and it never changes the selector. An interrupted mirror therefore
-   cannot replace the known-good default with a partial slot.
+5. After health succeeds, revalidate partition one's complete FAT12 and rescue
+   contract, write only `autoboot.txt`'s partition-relative block 15, synchronize
+   it, and read it back. The same durable journal transition confirms the new
+   default and records peer convergence as required work.
+6. Reset through firmware partition zero and boot the new default normally,
+   without tryboot, before copying it back into its old peer. The convergence
+   copy uses the same activation-last sectors 6 then 0, full raw digest, and
+   readback gates. It never changes the selector, logs, or SwiftFS, so a power
+   loss while mirroring leaves the selector aimed at the confirmed source.
+
+If the trial resets or hangs before health confirmation, the watchdog is
+intended to reset through firmware partition zero; because the selector still
+names the prior default, normal boot returns there and the journal records a
+failed trial. If selector policy itself cannot be applied, partition one's
+embedded rescue is intended to retain UART and HDMI diagnosis. These rollback,
+watchdog, rescue, and activation-last power-loss paths are host-tested as policy
+and media contracts only. They have not been exercised with Raspberry Pi 5
+firmware and real microSD power cuts, so they reduce risk but do not make the
+device unbrickable.
+
+Partition-one fallback additionally depends on the installed EEPROM
+bootloader's partition-walk policy; the SD layout alone cannot guarantee it.
+Physical acceptance must record the exact EEPROM build and configuration,
+prove `PARTITION_WALK=1`, capture the firmware tryboot capability bits, and
+exercise the expected candidate-to-default-to-rescue fallback order. The
+existing Pi evidence did not retain the EEPROM build, so it cannot satisfy
+that acceptance gate.
+
+The two boot-control replicas currently occupy adjacent 512-byte data-volume
+superblocks. They tolerate either independently torn logical sector under the
+kernel block-device contract, but they are not independent SD-controller
+erase-unit failure domains. Physical power-cut testing must include this case;
+a later media format may separate or add journal replicas if the card's failure
+behavior requires it.
 
 The repository has host-tested board-neutral journal transitions, redundant
-journal recovery, bounded slot copying, v2 image generation, and semantic
-verification of both slots. It does **not** yet integrate those pieces into a
-physical-device persistent installer or platform selector writer. Do not mount
-and copy `.build/raspberry-pi-5/boot/` into either slot, and never edit
+journal recovery, activation-last slot copying, v2 image generation, semantic
+verification of both slots, a strict Pi selector writer, firmware tryboot
+requests, and a continuously adopted PM watchdog. The transaction executor also
+has a narrow recovery-environment action for a torn selector: it is authorized
+only by `selectorCommitPending`, requires the port to revalidate immutable
+rescue media and independently hash both complete slot identities, leaves the
+journal unchanged, and requires a normal reboot before confirmation. It does
+**not** yet connect
+those pieces into the production SD service and persistent update transport as
+one end-to-end physical-device installer. Do not mount and copy
+`.build/raspberry-pi-5/boot/` into either slot, and never edit
 `SWIFTOS-CTL/autoboot.txt` manually. Those shortcuts bypass active-slot proof,
-durable candidate verification, rollback state, and selector readback. No
-physical v2 update or rollback is claimed yet.
+non-bootable staging, durable candidate verification, rollback state, rescue
+validation, and selector readback. No physical v2 update or rollback is claimed
+yet.
 
 ### Legacy v1 media and one-time migration
 
@@ -320,13 +389,17 @@ zero and one contain duplicate immutable volume-header bytes at offsets 0...63.
 On v2, bytes 64...223 of each block are reserved for redundant CRC-protected A/B
 boot-control records; update transactions have no authority to write elsewhere
 in the data partition except through the existing bounded log and SwiftFS
-services. Relative blocks 2 through 4097 form the default 2 MiB kernel-log
-arena; CRCs and deterministic sequence-to-slot placement permit bounded
-recovery after a torn write. The remaining user-data arena has a host-tested
-SwiftFS layout and provider. A pure range policy converts both relative arenas
-into disjoint, bounded absolute SD ranges before either service receives
-authority. The generic kernel exposes synchronous logical-block I/O and
-partition-bounded views, but never maps raw media into EL0.
+services. New v2 media seeds identical valid records in both replicas with
+sequence 1, stable slot A, generation 1, the complete canonical raw-slot
+SHA-256, slot block count, and layout fingerprint. Later journal commits use
+CRCs, monotonically increasing sequences, deterministic replica selection,
+synchronization, and readback so one valid copy can recover a torn peer.
+Relative blocks 2 through 4097 form the default 2 MiB kernel-log arena. The
+remaining user-data arena has a host-tested SwiftFS layout and provider. A pure
+range policy converts both relative arenas into disjoint, bounded absolute SD
+ranges before either service receives authority. The generic kernel exposes
+synchronous logical-block I/O and partition-bounded views, but never maps raw
+media into EL0.
 
 On Pi, the runtime binds the boot DT's removable `brcm,bcm2712-sdhci` node to a
 bounded, default-speed 3.3 V PIO transport. The live SD device, SwiftFS scratch,

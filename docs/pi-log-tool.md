@@ -21,8 +21,10 @@ The tool always takes another fresh `diskutil list -plist external physical`
 snapshot. It recognizes either of these complete layouts:
 
 - legacy v1: one `SWIFTOS` FAT32 payload and a type-`0xda` data partition;
-- v2: `SWIFTOS-CTL` FAT12 plus both `SWIFTOS-A` and `SWIFTOS-B` FAT32
-  payloads and a type-`0xda` data partition.
+- v2: the `SWIFTOS-CTL` FAT12 selector/rescue, exactly two canonical
+  `SWIFTOS-AB` FAT32 payloads at MBR entries two and three, and a type-`0xda`
+  data partition. The equal payload labels are sentinels only; A/B identity is
+  positional and must not be inferred from a mounted volume name.
 
 It then selects exactly one removable, external, physical whole disk.
 `--device /dev/diskN` is only a selector: it is checked against that fresh

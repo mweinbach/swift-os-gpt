@@ -260,8 +260,8 @@ def main() -> int:
         )
         require(partition_report["source"]["layout"] == "fat32-partition-image",
                 "partition-image mode was not reported")
-        require(partition_report["fat32"]["hidden_sectors"] == boot_start,
-                "partition capture lost its original hidden-sector metadata")
+        require(partition_report["fat32"]["hidden_sectors"] == 0,
+                "canonical A/B slot gained partition-specific metadata")
 
         corrupt = root / "corrupt-required-file.img"
         shutil.copyfile(pristine, corrupt)
