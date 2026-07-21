@@ -43,7 +43,7 @@ The payload file set is:
 | `overlays/dwc2.dtbo` | Official firmware overlay selecting the USB-C DWC2 controller. |
 | `BOOT-MANIFEST.txt` | Human-readable, explicitly unverified manifest. |
 | `BUILD-METADATA.txt` | Input hashes, SwiftOS revision/dirty state, and firmware-repository revision. |
-| `MEDIA-LAYOUT.txt` | MBR selector, A/B payload, update-journal, and signed data-volume contract. |
+| `MEDIA-LAYOUT.txt` | MBR selector, A/B payload, update-journal, and magic- and CRC-validated data-volume contract. |
 | `RESCUE-CONFIG.txt` | Source configuration for the partition-one factory rescue. |
 | `SHA256SUMS` | Stable byte-level hashes of all preceding files. |
 
@@ -79,10 +79,11 @@ individual hashes, and refuses to overwrite a non-empty directory. That value
 identifies the `raspberrypi/firmware` file set, not the board's EEPROM bootloader
 revision; physical evidence must record the EEPROM build separately. Given
 identical kernel bytes, firmware checkout, and board files, the listed file
-bytes and `SHA256SUMS` are reproducible. `tools/build_rpi5_media.py` gives the
-FAT allocation, timestamps, volume IDs, selector, MBR, and signed data headers
-deterministic values, so two builds with the same package and geometry are
-byte-identical. Both fresh FAT32 slots use volume ID `0x53574142`, label
+bytes and `SHA256SUMS` are reproducible. `tools/build_rpi5_media.py` assigns
+deterministic values to the FAT allocation, timestamps, volume IDs, selector,
+MBR, and the data headers' magic and CRC fields, so two builds with the same
+package and geometry are byte-identical. Both fresh FAT32 slots use volume ID
+`0x53574142`, label
 `SWIFTOS-AB`, and a zero hidden-sector field, making the complete raw slot
 extents byte-identical. Logical A/B identity therefore comes from MBR entry and
 firmware-reported boot partition, never the common FAT label. The payload sets
@@ -177,9 +178,10 @@ ownership is ambiguous.
 
 This is the only current workflow that creates the complete media layout. It
 overwrites the whole card with the v2 MBR, FAT12 selector/factory rescue, two
-complete canonical FAT32 payload slots, and signed type-`0xda` data partition
-containing the seeded redundant update journal, persistent-log arena, and
-SwiftFS range. It destroys every previous partition and file on that card.
+complete canonical FAT32 payload slots, and a type-`0xda` data partition with
+duplicate magic- and CRC-validated superblocks. That partition contains the
+seeded redundant update journal, persistent-log arena, and SwiftFS range. The
+operation destroys every previous partition and file on that card.
 
 Build the image with that card's exact 512-byte block count, inspect it, and
 semantically verify both payload slots before flashing:
@@ -220,13 +222,14 @@ This full initial write can be slow because the sparse image expands to the
 card's exact geometry. After ejection completes, remove the card, place it in
 the powered-off Pi, and only then apply power.
 
-### Transactional A/B persistent update: format v2
+### Transactional A/B persistent-update contract: format v2
 
 A v2 release transaction always targets the inactive payload. If A is
 confirmed, B is the candidate; if B is confirmed, A is the candidate. The
 update must never overwrite the confirmed payload, the MBR, the persistent-log
 arena, or SwiftFS data. Its only partition-four writes are bounded redundant
-boot-control journal records in the reserved superblock extension.
+boot-control journal records in the reserved superblock extension. This is the
+transaction contract, not a currently supported routine updater.
 
 The transaction contract is:
 
@@ -245,9 +248,12 @@ The transaction contract is:
    or partial capability evidence leaves ordinary boot identity available but
    fails closed at trial authorization. The invariant selector maps that
    one-shot boot to the candidate without changing the confirmed default. Pi
-   firmware arms a 15-second watchdog from `config.txt`; SwiftOS adopts it
-   early and services it only at cooperative progress checkpoints, not from a
-   timer IRQ that could conceal a wedged scheduler.
+   firmware arms a 15-second watchdog from `config.txt`; SwiftOS adopts and
+   services it once to start a known 15-second window. On a tryboot candidate,
+   probation then suppresses every later cooperative kick until three timer
+   IRQs have been proved and the exact candidate-health transition is durable
+   in the boot-control journal. Timer IRQ delivery alone can never extend the
+   rollback window.
 4. Accept candidate health only when the running system proves the expected
    firmware partition, tryboot state, release generation and digest, trial
    token, and system health. Until then, the old slot remains confirmed.
@@ -289,14 +295,24 @@ behavior requires it.
 The repository has host-tested board-neutral journal transitions, redundant
 journal recovery, activation-last slot copying, v2 image generation, semantic
 verification of both slots, a strict Pi selector writer, firmware tryboot
-requests, and a continuously adopted PM watchdog. The transaction executor also
-has a narrow recovery-environment action for a torn selector: it is authorized
-only by `selectorCommitPending`, requires the port to revalidate immutable
-rescue media and independently hash both complete slot identities, leaves the
-journal unchanged, and requires a normal reboot before confirmation. It does
-**not** yet connect
-those pieces into the production SD service and persistent update transport as
-one end-to-end physical-device installer. Do not mount and copy
+requests, and watchdog probation policy. The production Pi storage wiring
+compiles and gives boot-time journal recovery, cooperative verification,
+authorized rescue selector repair, health-gated selector commit/reset, and peer
+convergence priority before publishing SwiftFS or persistent-log aliases. A
+candidate or peer failure that leaves the confirmed selector safe may suspend
+the transaction for a later boot and then allow confirmed-data aliases. Journal
+or selector write/synchronize/readback ambiguity instead quarantines all later
+SD work before reset, and the shared firmware mailbox tail cannot be reused for
+tryboot after an indeterminate USB-power transaction.
+
+This is not yet an end-to-end release installer. The physical port refuses
+candidate staging until a separate persistent full-slot capsule and resumable
+USB or network ingress exist. No trusted capsule signature, signing-key policy,
+or authenticated-host policy has been implemented; current SHA-256 digests,
+CRCs, and journal identities provide integrity, not release authenticity. A
+future ingress must establish that trust before it receives raw inactive-slot
+write authority. `SUPD` remains a volatile 16 MiB RAM chainloader and is
+intentionally not reused for 128 MiB slot installation. Do not mount and copy
 `.build/raspberry-pi-5/boot/` into either slot, and never edit
 `SWIFTOS-CTL/autoboot.txt` manually. Those shortcuts bypass active-slot proof,
 non-bootable staging, durable candidate verification, rollback state, rescue
@@ -366,11 +382,12 @@ sudo python3 tools/inspect_rpi5_persistent_log.py /dev/rdiskN \
 
 The inspector rejects partition nodes and symlinks, opens the source
 `O_RDONLY`, verifies discovered geometry when the host exposes it, and reads
-only the MBR, the unique type-`0xda` partition's two signed superblocks, and its
-bounded log arena. It finds that data volume at MBR entry two on v1 or entry
-four on v2 and never reads or changes the selector or payload slots. Its JSON
-preserves structured records and reconstructs retained canonical console bytes
-in chronological order. Every initialized volatile log starts with a structured
+only the MBR, the unique type-`0xda` partition's two magic- and CRC-validated
+superblocks, and its bounded log arena. It finds that data volume at MBR entry
+two on v1 or entry four on v2 and never reads or changes the selector or payload
+slots. Its JSON preserves structured records and reconstructs retained canonical
+console bytes in chronological order. Every initialized volatile log starts
+with a structured
 `BOOT` epoch record containing its initial counter tick, processor affinity,
 DTB address, and counter frequency. The inspector reports these under
 `boot_epoch_markers` and describes an unused arena explicitly as
@@ -379,9 +396,10 @@ complete. The epoch and console records become durable only after the SD/log
 service recovers the arena and drains the retained ring. An empty arena means
 the boot never reached that crossing; use second-stage UART10 firmware output,
 kernel UART10 output, or HDMI evidence for the earlier failure.
-If the card never received a complete SwiftOS media initialization, the signed
-type-`0xda` partition does not exist and there are no persistent SwiftOS logs to
-inspect, regardless of how recently arbitrary FAT files were copied.
+If the card never received a complete SwiftOS media initialization, no
+recognized type-`0xda` partition with valid magic and CRC fields exists and
+there are no persistent SwiftOS logs to inspect, regardless of how recently
+arbitrary FAT files were copied.
 
 ## SwiftOS data partition
 
@@ -408,13 +426,13 @@ bounded, default-speed 3.3 V PIO transport. The live SD device, SwiftFS scratch,
 and provider records use stable classified allocations so borrowed block views
 cannot outlive movable stack state. After the local USB/HDMI observation window,
 the runtime initializes the card, requires an unambiguous MBR and at least one
-valid signed superblock, then serializes one cooperative owner across log
-recovery/appends and SwiftFS bootstrap. The resumable filesystem state machine
-performs at most one block read, write, synchronize, or CPU-only validation
-phase per pass. Returned media is never implicitly reformatted at the data-
-volume layer; the SwiftFS subrange may be formatted only through the same blank-
-volume policy used by QEMU. Any discovery,
-signature, bounds, or transport failure drops the relevant write authority and
+valid magic- and CRC-checked superblock, then serializes one cooperative owner
+across log recovery/appends and SwiftFS bootstrap. The resumable filesystem
+state machine performs at most one block read, write, synchronize, or CPU-only
+validation phase per pass. Returned media is never implicitly reformatted at
+the data-volume layer; the SwiftFS subrange may be formatted only through the
+same blank-volume policy used by QEMU. Any discovery, magic/CRC, bounds, or
+transport failure drops the relevant write authority and
 lets Ethernet troubleshooting continue. The published Pi provider has the same
 board-neutral identity and seam as the QEMU VirtIO-backed provider.
 

@@ -94,10 +94,10 @@ unless a guest implementation and a repeatable test sit behind it.
   teardown. Stable metadata, directory-cookie, and provider I/O contracts are
   host-tested.
 - A native modern VirtIO-MMIO block driver and crash-consistent SwiftFS user
-  volume on QEMU. The runtime initializes or opens the signed data volume,
-  isolates the kernel-log and user ranges, formats or remounts alternating
-  copy-on-write SwiftFS banks, seeds `Welcome.txt`, and publishes the concrete
-  provider from stable allocator-owned storage.
+  volume on QEMU. The runtime initializes or opens the magic- and CRC-validated
+  data volume, isolates the kernel-log and user ranges, formats or remounts
+  alternating copy-on-write SwiftFS banks, seeds `Welcome.txt`, and publishes
+  the concrete provider from stable allocator-owned storage.
 - A checked EL0 file-service crossing for the mounted `/Users` provider. Its
   versioned request/result records, whole-range user-copy validation, bounded
   per-process handle table, and policy checks support `open`, `read`, `write`,
@@ -372,14 +372,15 @@ configuration still require another physical boot.
 The Pi image also binds the boot-DT's removable `brcm,bcm2712-sdhci` controller
 to the shared synchronous block contract. After the local HDMI/USB observation
 window, it initializes the card in bounded PIO mode, accepts only an
-unambiguous MBR plus signed `SWOSDATA` volume, incrementally recovers the 2 MiB
-log arena, and durably appends at most one retained 48-byte kernel event per
-cooperative pass. It never rewrites an ambiguous MBR or signed data-volume
-layout; once those validate, the disjoint user subrange may be opened or
-formatted as blank SwiftFS. Discovery, signature, bounds, or transport failure
-drops the relevant write authority. Four returned-card epochs prove the
-physical controller, validated data volume, empty-arena initialization, initial
-SwiftFS format, three remounts, prior-boot recovery, and gap-free durable append.
+unambiguous MBR plus duplicate magic- and CRC-validated `SWOSDATA` superblocks,
+incrementally recovers the 2 MiB log arena, and durably appends at most one
+retained 48-byte kernel event per cooperative pass. It never rewrites an
+ambiguous MBR or data-volume layout; once those validate, the disjoint user
+subrange may be opened or formatted as blank SwiftFS. Discovery, magic/CRC,
+bounds, or transport failure drops the relevant write authority. Four
+returned-card epochs prove the physical controller, validated data volume,
+empty-arena initialization, initial SwiftFS format, three remounts, prior-boot
+recovery, and gap-free durable append.
 The SD controller record, SwiftFS scratch, and provider record use stable
 classified allocations. A host-tested policy derives disjoint absolute log and
 user-filesystem ranges. A resumable bootstrap performs at most one block
@@ -387,6 +388,24 @@ operation, synchronization, or CPU-only validation phase per cooperative pass,
 never concurrently with log work, and publishes the same SwiftFS provider seam
 as QEMU. The Pi provider mounted physically, while no Pi filesystem or raw block
 mapping is exposed directly to EL0.
+
+Format-v2 media additionally gives a boot-time A/B reconciliation phase priority
+before either SD alias is published. The same controller record opens the
+redundant journal, hashes at most 64 KiB per cooperative verification pass,
+repairs only the selector's authorized sector from rescue, and resumes
+activation-last peer mirroring. A safe candidate or peer failure can suspend the
+transaction for a later boot and then permit confirmed-data aliases; journal or
+selector durability ambiguity instead quarantines later SD work before reset.
+Watchdog adoption
+performs one initial service kick, after which tryboot probation suppresses all
+later kicks until the three-interrupt timer proof and exact journal health
+transition both succeed. Persistent release ingress and authenticity are still
+absent: the port rejects candidate staging, no trusted capsule signature,
+signing-key policy, or authenticated-host policy exists, and hashes/CRCs provide
+integrity only. `SUPD` remains volatile RAM chainload. The production wiring
+compiles, while its executor, port, and component policies are host-tested; none
+of this has completed a physical Pi trial, rollback, rescue, or power-cut
+matrix.
 
 This is a diagnostic firmware-configured scanout handoff, not a production
 graphics path, a native BCM2712 HVS/HDMI modesetting driver, or V3D VII
@@ -454,7 +473,8 @@ timer; that EL0 control path remains QEMU-only evidence.
 The kernel also contains a host-tested driver for the runtime-patched firmware
 simple framebuffer, a headless USB surface fallback, and a removable-SD binding
 that can persist the retained kernel log and bootstrap a disjoint SwiftFS user
-range only after signed-volume validation, using stable allocator-owned records.
+range only after magic/CRC volume validation, using stable allocator-owned
+records.
 Physical evidence now covers boot, firmware-patched memory/paging, GICv2 timers,
 PSCI startup and secondary work, SD transfer, the data volume, an empty-arena
 scan, current-boot persistence, and the initial SwiftFS mount. It does not cover

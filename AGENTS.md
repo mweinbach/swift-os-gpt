@@ -70,6 +70,9 @@ link against Darwin or any Apple framework.
   revision should pin a smaller rescue-specific build. Physical Pi tryboot,
   watchdog rollback, rescue fallback, and microSD power-cut behavior remain
   unverified, so never describe this design as unbrickable.
+  Tryboot watchdog probation begins after the required initial adoption/service
+  kick; no later cooperative kick is allowed until the exact candidate-health
+  transition is durable.
   Rescue fallback also requires an exact, recorded EEPROM build/configuration
   with `PARTITION_WALK=1`; physical acceptance must capture that setting, the
   tryboot capability bits, and the observed fallback order rather than
@@ -82,10 +85,20 @@ link against Darwin or any Apple framework.
   v1 card has yet been migrated or used to verify the v2 boot/rollback path.
 - A live USB `SUPD` kernel update is volatile. `COMMITTED` seals the RAM-staged
   image; it does not install that image to microSD. Re-enumeration and a new
-  boot identity verify the live handoff, while a persistent update still
-  requires the not-yet-integrated transactional slot installer.
-- Persistent-log claims require a card initialized with the signed type-`0xda`
-  partition. Inspect returned media read-only as documented in
+  boot identity verify the live handoff. Boot-time journal recovery and peer
+  convergence receive priority in the production SD owner. Candidate or peer
+  failures that leave the confirmed selector safe may suspend the transaction
+  for a later boot and permit confirmed-data aliases; journal or selector
+  durability ambiguity must quarantine later SD work before reset. No supported
+  routine v2 updater exists:
+  initiating a persistent release still requires a not-yet-integrated full-slot
+  capsule and resumable ingress. SHA-256, CRCs, and journal identities provide
+  integrity, not authenticity; future ingress must enforce a trusted capsule
+  signature, signing-key policy, and authenticated-host policy before granting
+  raw inactive-slot write authority.
+- Persistent-log claims require a card initialized with the type-`0xda`
+  partition's duplicate magic- and CRC-validated superblocks. Inspect returned
+  media read-only as documented in
   `docs/raspberry-pi-5.md`; it is partition two on v1 and partition four on v2.
 - Raspberry Pi SPI EEPROM bootloader updates are a separate recovery domain
   from SwiftOS microSD A/B payloads. Slot packages keep `bootloader_update=0`

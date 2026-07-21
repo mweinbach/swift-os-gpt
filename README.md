@@ -89,9 +89,10 @@ The verified QEMU path now includes:
    mailbox, strict production execution policy, and Pi V3D/HVS resource
    discovery and mapping; and
 8. a crash-consistent SwiftFS provider over a native Swift VirtIO block driver.
-   QEMU formats or remounts a signed data volume, publishes the provider through
-   a stable allocator-owned record, mounts it at `/Users`, and exposes checked
-   EL0 `open`, `read`, `write`, `stat`, `readdir`, and `close` operations. The
+   QEMU formats or remounts a magic- and CRC-validated data volume, publishes
+   the provider through a stable allocator-owned record, mounts it at `/Users`,
+   and exposes checked EL0 `open`, `read`, `write`, `stat`, `readdir`, and
+   `close` operations. The
    block smoke proves blank-media format and seed, remount, EL0 read/write while
    preemption continues, and another remount that observes the EL0 write; and
 9. a versioned input ABI, loss-aware queue, USB HID boot decoders, and a real
@@ -232,7 +233,8 @@ SPI to resolve through their inherited or explicit interrupt parent before it
 adds the DTB and official `dwc2.dtbo` from that revision with byte hashes. It also
 produces a sparse format-v2 MBR media image with a small invariant FAT12
 selector/rescue environment, complete 128 MiB FAT32 A and B payload slots, and
-a signed type-`0xda` data partition. Fresh slots have one canonical
+a type-`0xda` data partition with duplicate magic- and CRC-validated
+superblocks. Fresh slots have one canonical
 `SWIFTOS-AB` FAT32 identity and byte-identical raw contents; logical A/B
 identity comes from verified partition geometry and the firmware-reported boot
 partition. The data superblocks seed two CRC-protected replicas of the initial
@@ -276,7 +278,7 @@ contracts:
 | Media/operation | Persistence and data effect |
 | --- | --- |
 | New v2 whole-card initialization | Destructively writes `swiftos-rpi5-media.img`, creating the `SWIFTOS-CTL` selector/rescue, two MBR-positioned `SWIFTOS-AB` slots, and type-`0xda` partition four for the seeded update journal, persistent logs, and SwiftFS. |
-| Routine v2 release update | Must make only the inactive slot non-bootable, write and verify it with FAT32 sectors 6 then 0 committed last, trial it once, and change only the selector's dedicated sector after the candidate proves its identity, digest, token, and health. The confirmed slot, rescue payload, logs, and SwiftFS remain intact; only partition four's reserved boot-control journal bytes change. After a normal boot into the new default, the service converges the peer using the same ordering. |
+| Planned routine v2 release update (not yet supported) | No repository command can initiate this update yet. Its transaction contract must make only the inactive slot non-bootable, write and verify it with FAT32 sectors 6 then 0 committed last, trial it once, and change only the selector's dedicated sector after the candidate proves its identity, digest, token, and health. The confirmed slot, rescue payload, logs, and SwiftFS remain intact; only partition four's reserved boot-control journal bytes change. After a normal boot into the new default, the service converges the peer using the same ordering. |
 | Legacy v1 card | Has one `SWIFTOS` FAT32 payload plus type-`0xda` partition two. It remains readable and log-capable but has no A/B rollback. Copying a v2 package into it is not a migration. |
 | One-time v1-to-v2 migration | Changes the MBR and boot extents. The default v2 geometry deliberately retains the v1 data extent, but no physical card has been migrated and no supported migration command exists yet. Back up user data before any future migration. |
 | Live USB kernel update | Stages and chainloads a verified kernel in RAM. It is volatile; a power cycle returns to the selector's confirmed microSD slot. |
@@ -289,15 +291,26 @@ transaction. Partition one also holds a digest-checked rescue `config.txt`,
 `kernel8.img`, and `rescue.dtb`; only the 512-byte `autoboot.txt` data sector is
 writable through the strict selector service. The rescue is currently a
 capacity-constrained snapshot of the full release kernel and DTB, not a
-separately pinned minimal recovery image. The repository now has host-tested
-layout, journal, activation-last copy, selector, tryboot, watchdog, rollback,
-and convergence policy foundations, but the device-integrated persistent slot
-installer and the physical Pi power-cut, rescue, and A/B boot paths remain
-unverified. This reduces update risk; it is not an unbrickability claim. The
-repository also does not install a live USB update to microSD. Existing
-returned-card evidence describes legacy v1 media and does not imply that card
-was migrated. Raspberry Pi SPI EEPROM updates remain a separate recovery domain
-and are disabled and excluded from SwiftOS slot packages.
+separately pinned minimal recovery image. The production Pi SD owner now gives
+boot-control reconciliation priority before publishing SwiftFS or persistent-log
+aliases. It can recover the current boot, cooperatively hash slots, repair an
+authorized selector from rescue, enforce a health-gated tryboot watchdog, reset
+to the confirmed default, and resume activation-last peer convergence.
+Candidate or peer failures that leave the confirmed selector safe may suspend
+the transaction for a later boot and then permit confirmed-data aliases; journal
+or selector durability ambiguity instead quarantines later SD work before reset.
+The port deliberately
+refuses new candidate staging: no supported routine v2 updater exists, and the
+distinct persistent full-slot capsule plus resumable USB/network ingress have
+not been integrated. No trusted capsule signature, signing-key policy, or
+authenticated-host policy exists for that future path; SHA-256, CRCs, and
+journal identities provide integrity, not authenticity. The volatile `SUPD` RAM
+chainloader is not that installer. The physical Pi power-cut, rescue, and A/B
+boot paths also remain unverified. This reduces update risk; it is not an
+unbrickability claim. Existing returned-card evidence describes legacy v1 media
+and does not imply that card was migrated. Raspberry Pi SPI EEPROM updates
+remain a separate recovery domain and are disabled and excluded from SwiftOS
+slot packages.
 
 See the
 [Pi media lifecycle and returned-card diagnostics](docs/raspberry-pi-5.md#physical-media-lifecycle-and-returned-card-diagnostics)
@@ -369,11 +382,12 @@ keyboard/mouse decoders. In single-CPU monitor mode, modern VirtIO-MMIO keyboard
 and mouse devices feed that same queue; a QMP smoke proves A down/up, relative
 motion, and left-button transitions after guest DMA decoding. This polling path
 does not run in the default SMP/EL0 mode yet and is not Raspberry Pi input.
-The board-neutral block, MBR, signed data-volume, bounded persistent-log, and
-SwiftFS formats are host-tested. The Pi target now retains its removable,
-DT-discovered BCM2712 SDHCI controller in allocator-owned stable memory and
-retains its resolved GIC SPI route rather than assuming a board interrupt ID,
-derives disjoint kernel-log and user-filesystem ranges from the signed `0xda`
+The board-neutral block, MBR, magic/CRC-validated data-volume, bounded
+persistent-log, and SwiftFS formats are host-tested. The Pi target now retains
+its removable, DT-discovered BCM2712 SDHCI controller in allocator-owned stable
+memory and retains its resolved GIC SPI route rather than assuming a board
+interrupt ID,
+derives disjoint kernel-log and user-filesystem ranges from the validated `0xda`
 layout, and can publish the same SwiftFS provider seam used by QEMU. The log
 service and filesystem share one serialized SD owner; raw blocks are never
 exposed to EL0. Each initialized retained ring starts with a structured `BOOT`
