@@ -61,6 +61,7 @@ struct DeferredPersistentLogService<
     /// observations only: callers gain no storage authority from the values
     /// and must still create their own bounded `BlockDevice` view.
     private(set) var selectedDataPartitionRange: BlockDeviceRange?
+    private(set) var selectedABMediaPartitions: SwiftOSABMediaPartitions?
     private(set) var signedDataVolumeLayout: SwiftOSDataVolumeLayout?
 
     init?(
@@ -123,10 +124,12 @@ struct DeferredPersistentLogService<
             return disable(.partitionTable(failure))
         }
         let dataPartition: MBRPartition
+        let abMedia: SwiftOSABMediaPartitions?
         if table.partition(at: 3) != nil {
             switch SwiftOSABMediaLayout.select(from: table) {
             case .layout(let media):
                 dataPartition = media.data
+                abMedia = media
             case .failure(let failure):
                 return disable(.abMediaLayout(failure))
             }
@@ -134,6 +137,7 @@ struct DeferredPersistentLogService<
             switch SwiftOSMediaLayout.select(from: table) {
             case .layout(let media):
                 dataPartition = media.data
+                abMedia = nil
             case .failure(let failure):
                 return disable(.mediaLayout(failure))
             }
@@ -146,6 +150,7 @@ struct DeferredPersistentLogService<
         rawDevice = nil
         partitionDevice = partition
         selectedDataPartitionRange = dataPartition.range
+        selectedABMediaPartitions = abMedia
         stage = .signedVolume
         return .partitionReady(
             startBlock: dataPartition.range.startBlock,
@@ -269,6 +274,7 @@ struct DeferredPersistentLogService<
         recovery = nil
         store = nil
         selectedDataPartitionRange = nil
+        selectedABMediaPartitions = nil
         signedDataVolumeLayout = nil
         stage = .disabled
         return .disabled(failure)

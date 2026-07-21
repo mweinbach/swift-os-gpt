@@ -109,6 +109,10 @@ struct DeferredPersistentLogServiceTests {
                 "selected data range was not retained for sibling services"
             )
             expect(
+                service.selectedABMediaPartitions == nil,
+                "legacy two-partition media was presented as A/B capable"
+            )
+            expect(
                 service.serviceOnce(
                     allowRecovery: false,
                     maximumRecoveryBlockCount: 1,
@@ -287,6 +291,10 @@ struct DeferredPersistentLogServiceTests {
                 "strict A/B partition-four range was not retained"
             )
             expect(
+                service.selectedABMediaPartitions == expectedABMedia(),
+                "validated A/B topology was not retained as one identity"
+            )
+            expect(
                 service.serviceOnce(
                     allowRecovery: false,
                     maximumRecoveryBlockCount: 1,
@@ -295,6 +303,87 @@ struct DeferredPersistentLogServiceTests {
                 "strict A/B partition-four signed volume did not open"
             )
         }
+
+        let invalidBase = MemoryBlockDevice(blockCount: 160)
+        invalidBase.bytes = base.bytes
+        invalidBase.bytes[Int(dataRange.startBlock) * 512] ^= 0xff
+        invalidBase.bytes[Int(dataRange.startBlock + 1) * 512] ^= 0xff
+        let invalid = CountingBlockDevice(base: invalidBase)
+        withScratch { scratch in
+            var service = DeferredPersistentLogService(
+                device: invalid,
+                source: TestRetainedLogSource(entries: []),
+                scratch: scratch
+            )!
+            expect(
+                service.serviceOnce(
+                    allowRecovery: false,
+                    maximumRecoveryBlockCount: 1,
+                    maximumAppendCount: 1
+                ) == .partitionReady(startBlock: 90, blockCount: 60),
+                "invalid signed volume did not finish bounded MBR discovery"
+            )
+            expect(
+                service.selectedABMediaPartitions == expectedABMedia(),
+                "A/B discovery identity was missing before volume validation"
+            )
+            guard case .disabled = service.serviceOnce(
+                      allowRecovery: false,
+                      maximumRecoveryBlockCount: 1,
+                      maximumAppendCount: 1
+                  )
+            else { fatalError("invalid A/B signed volume remained active") }
+            expect(
+                service.selectedABMediaPartitions == nil
+                    && service.selectedDataPartitionRange == nil,
+                "failed signed volume retained A/B write authority"
+            )
+        }
+    }
+
+    private static func expectedABMedia() -> SwiftOSABMediaPartitions {
+        SwiftOSABMediaPartitions(
+            selector: MBRPartition(
+                index: 0,
+                type: .fat12,
+                isBootable: true,
+                range: BlockDeviceRange(
+                    startBlock: 1,
+                    blockCount: 9,
+                    within: 160
+                )!
+            ),
+            slotA: MBRPartition(
+                index: 1,
+                type: .fat32LBA,
+                isBootable: false,
+                range: BlockDeviceRange(
+                    startBlock: 10,
+                    blockCount: 40,
+                    within: 160
+                )!
+            ),
+            slotB: MBRPartition(
+                index: 2,
+                type: .fat32LBA,
+                isBootable: false,
+                range: BlockDeviceRange(
+                    startBlock: 50,
+                    blockCount: 40,
+                    within: 160
+                )!
+            ),
+            data: MBRPartition(
+                index: 3,
+                type: .swiftOSData,
+                isBootable: false,
+                range: BlockDeviceRange(
+                    startBlock: 90,
+                    blockCount: 60,
+                    within: 160
+                )!
+            )
+        )
     }
 
     private static func permanentlyDisablesDuplicateAndUnsignedMediaWithoutWrites() {
