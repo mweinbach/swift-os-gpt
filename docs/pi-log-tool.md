@@ -18,12 +18,17 @@ make rpi5-card-logs \
 ```
 
 The tool always takes another fresh `diskutil list -plist external physical`
-snapshot. It selects only one removable, external, physical whole disk with a
-`SWIFTOS` FAT32 boot partition and type-`0xda` data partition. `--device
-/dev/diskN` is only a selector: it is checked against that fresh snapshot and
-does not bypass discovery. Ambiguous candidates, partition paths, fixed disks,
-geometry changes, symlinks, missing SwiftOS sentinels, and any mounted child
-partition are refused.
+snapshot. It recognizes either of these complete layouts:
+
+- legacy v1: one `SWIFTOS` FAT32 payload and a type-`0xda` data partition;
+- v2: `SWIFTOS-CTL` FAT12 plus both `SWIFTOS-A` and `SWIFTOS-B` FAT32
+  payloads and a type-`0xda` data partition.
+
+It then selects exactly one removable, external, physical whole disk.
+`--device /dev/diskN` is only a selector: it is checked against that fresh
+snapshot and does not bypass discovery. Ambiguous candidates, incomplete A/B
+sentinels, partition paths, fixed disks, geometry changes, symlinks, and any
+mounted child partition are refused.
 
 Reading `/dev/rdiskN` can require administrator access on macOS. The tool never
 invokes `sudo`. If macOS denies the read, repeat the complete command through
@@ -44,8 +49,16 @@ and enable `noclobber` so redirection cannot replace an earlier capture:
 Do not add a cached disk number merely to the privileged rerun. Recheck the
 physical list after any reconnect. The tool opens the raw whole disk
 read-only, bounds the inspector to the independently reported exact byte size,
-and reads only the MBR, redundant SwiftOS data superblocks, and declared log
-arena. It does not mount, unmount, eject, format, repartition, or write media.
+and reads only the MBR, the unique type-`0xda` partition's redundant SwiftOS
+data superblocks, and its declared log arena. That data partition is MBR entry
+two on v1 and entry four on v2. The inspector does not read or modify the v2
+selector or either payload slot, and it does not mount, unmount, eject, format,
+repartition, migrate, commit an update, or write media.
+
+Historical returned-card captures and hardware-evidence documents produced
+from v1 remain valid. Recognizing v2 in this tool is not evidence that any
+physical card has been migrated or that the Pi A/B trial and rollback path has
+run on hardware.
 
 The default terminal view starts with capture health and sequence gaps/resets.
 When a retained console crosses kernel sequence resets, it labels the aggregate

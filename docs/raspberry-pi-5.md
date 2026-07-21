@@ -29,8 +29,10 @@ driver or the complete support gate.
 
 Raspberry Pi 5 keeps its boot firmware in EEPROM. It does not use
 `bootcode.bin`, `start*.elf`, or `fixup*.dat`; it does require a non-empty
-`config.txt`. The deterministic file set produced by
-`Boards/RaspberryPi5/package-boot.sh` is:
+`config.txt`. On format-v2 media, partition one is a small invariant selector;
+the deterministic payload produced by `Boards/RaspberryPi5/package-boot.sh` is
+installed independently in both FAT32 boot slots, partitions two and three.
+The payload file set is:
 
 | File | Purpose |
 | --- | --- |
@@ -40,7 +42,7 @@ Raspberry Pi 5 keeps its boot firmware in EEPROM. It does not use
 | `overlays/dwc2.dtbo` | Official firmware overlay selecting the USB-C DWC2 controller. |
 | `BOOT-MANIFEST.txt` | Human-readable, explicitly unverified manifest. |
 | `BUILD-METADATA.txt` | Input hashes, SwiftOS revision/dirty state, and firmware-repository revision. |
-| `MEDIA-LAYOUT.txt` | MBR, FAT32 boot, signed data-volume, and arena contract. |
+| `MEDIA-LAYOUT.txt` | MBR selector, A/B payload, update-journal, and signed data-volume contract. |
 | `SHA256SUMS` | Stable byte-level hashes of all preceding files. |
 
 The firmware normally prefers `kernel_2712.img` on BCM2712 and falls back to
@@ -58,8 +60,11 @@ identifies the `raspberrypi/firmware` file set, not the board's EEPROM bootloade
 revision; physical evidence must record the EEPROM build separately. Given
 identical kernel bytes, firmware checkout, and board files, the listed file
 bytes and `SHA256SUMS` are reproducible. `tools/build_rpi5_media.py` gives the
-FAT allocation, timestamps, volume ID, MBR, and signed data headers deterministic
-values, so two builds with the same package and geometry are byte-identical.
+FAT allocation, timestamps, volume IDs, selector, MBR, and signed data headers
+deterministic values, so two builds with the same package and geometry are
+byte-identical. The payload sets `bootloader_update=0` and excludes
+`recovery.bin` and `pieeprom` update files: SwiftOS payload A/B is not an A/B
+scheme for the Pi SPI EEPROM bootloader.
 
 `config.txt` applies `dwc2,dr_mode=peripheral`. The merged runtime DT can then
 publish an enabled `brcm,bcm2835-usb` node, which shared platform discovery
@@ -84,8 +89,17 @@ RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware make rpi5-package
 
 This writes both the validated boot directory and
 `.build/raspberry-pi-5/swiftos-rpi5-media.img`. The default image is a compact
-sparse 1 GiB artifact with a 256 MiB boot partition. For physical media, pass
-the exact 512-byte block count so partition two spans the remainder:
+sparse 1 GiB format-v2 artifact with this MBR geometry:
+
+| Entry | Default extent | Volume/type | Role |
+| --- | --- | --- | --- |
+| 1 | blocks 1...2047 | FAT12 `SWIFTOS-CTL` | Invariant `autoboot.txt` selector only. |
+| 2 | block 2048, 262,144 blocks | FAT32 `SWIFTOS-A` | Complete payload slot A. |
+| 3 | block 264,192, 262,144 blocks | FAT32 `SWIFTOS-B` | Complete payload slot B. |
+| 4 | block 526,336 through end of media | type `0xda` | Redundant update journal, persistent logs, and SwiftFS data. |
+
+The two payload slots are 128 MiB each by default. For physical media, pass
+the exact 512-byte block count so partition four spans the remainder:
 
 ```sh
 RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware \
@@ -95,18 +109,30 @@ python3 tools/build_rpi5_media.py inspect \
 ```
 
 The builder refuses existing outputs and every non-regular-file target; it does
-not select, unmount, or write a physical disk. Its inspector validates bounded
-partition/FAT extents, every packaged file hash, duplicate data superblocks, and
-CRC-protected persistent records. Flashing remains a separate explicitly
-targeted operation. Do not add Raspberry Pi 4 firmware blobs. `sha256=1` asks
-the EEPROM firmware to log
+not select, unmount, or write a physical disk. Its inspector validates the
+selector policy, both bounded FAT32 slots, agreement between their manifests,
+every packaged file hash, duplicate data superblocks, and CRC-protected
+persistent records. It can still inspect legacy v1 images read-only. Flashing
+remains a separate explicitly targeted operation. Do not add Raspberry Pi 4
+firmware blobs. `sha256=1` asks the EEPROM firmware to log
 the hashes of loaded files; it does not replace checking `SHA256SUMS` before
 writing media.
 
 ## Physical media lifecycle and returned-card diagnostics
 
-SwiftOS uses three separate media workflows. Do not describe a boot-partition
-copy as flashing a card, and do not describe a live USB update as installed.
+SwiftOS recognizes two on-card formats. Legacy v1 has one bootable FAT32
+`SWIFTOS` payload at MBR entry one and a type-`0xda` data volume at entry two.
+Format v2 has `SWIFTOS-CTL`, `SWIFTOS-A`, `SWIFTOS-B`, and the type-`0xda`
+data volume at entry four. Whole-card initialization, a future v1-to-v2
+migration, routine v2 slot installation, and a volatile USB handoff are separate
+operations. Do not describe a file copy as migration or flashing, and do not
+describe a live USB update as installed.
+
+The physical traces and returned-card evidence linked from this document were
+captured from legacy v1 media. They remain valid evidence for the code and
+layout named in those records, but they do not prove that a physical card has
+been migrated or that v2 trial boot, rollback, selector commit, or replication
+has run on a Pi.
 
 Before **every** card operation, power the Pi off, insert the card into the Mac,
 and run `diskutil list external physical`. Resolve the removable whole disk
@@ -121,21 +147,24 @@ ownership is ambiguous.
 ### First whole-card initialization: destructive
 
 This is the only current workflow that creates the complete media layout. It
-overwrites the whole card with an MBR, a FAT32 firmware boot partition, and a
-signed type-`0xda` data partition containing the persistent-log arena and
-SwiftFS range. It destroys every previous partition and file on that card.
+overwrites the whole card with the v2 MBR, invariant FAT12 selector, two complete
+FAT32 payload slots, and signed type-`0xda` data partition containing the update
+journal, persistent-log arena, and SwiftFS range. It destroys every previous
+partition and file on that card.
 
 Build the image with that card's exact 512-byte block count, inspect it, and
-independently check the default 256 MiB FAT32 boot partition before flashing:
+semantically verify both payload slots before flashing:
 
 ```sh
 RPI5_FIRMWARE=/path/to/pinned/raspberrypi-firmware \
 RPI5_MEDIA_BLOCK_COUNT=EXACT_CARD_BLOCK_COUNT make rpi5-package
 python3 tools/build_rpi5_media.py inspect \
   .build/raspberry-pi-5/swiftos-rpi5-media.img
-dd if=.build/raspberry-pi-5/swiftos-rpi5-media.img \
-  of=/private/tmp/swiftos-rpi5-boot-fat.img bs=512 skip=2048 count=524288
-/sbin/fsck_msdos -n /private/tmp/swiftos-rpi5-boot-fat.img
+python3 tools/verify_rpi5_boot_partition.py \
+  .build/raspberry-pi-5/swiftos-rpi5-media.img \
+  --expected-block-count EXACT_CARD_BLOCK_COUNT \
+  --expected-sha256sums .build/raspberry-pi-5/boot/SHA256SUMS \
+  --slot both
 ```
 
 The builder refuses an existing output, so move an earlier boot directory and
@@ -149,6 +178,12 @@ diskutil unmountDisk /dev/diskN
 sudo dd if=.build/raspberry-pi-5/swiftos-rpi5-media.img \
   of=/dev/rdiskN bs=4m
 sync
+sudo python3 tools/verify_rpi5_boot_partition.py /dev/diskN \
+  --expected-block-count EXACT_CARD_BLOCK_COUNT \
+  --expected-sha256sums .build/raspberry-pi-5/boot/SHA256SUMS \
+  --slot both
+sudo python3 tools/inspect_rpi5_persistent_log.py /dev/rdiskN \
+  --expected-block-count EXACT_CARD_BLOCK_COUNT > /dev/null
 diskutil eject /dev/diskN
 ```
 
@@ -156,61 +191,92 @@ This full initial write can be slow because the sparse image expands to the
 card's exact geometry. After ejection completes, remove the card, place it in
 the powered-off Pi, and only then apply power.
 
-### Normal boot-partition update: preserves user data
+### Transactional A/B persistent update: format v2
 
-Once the card has the complete SwiftOS layout, later persistent kernel and
-firmware updates normally replace files on partition one only. This procedure
-does not change the MBR or type-`0xda` partition, so existing SwiftFS files and
-persistent logs remain intact.
+A v2 release transaction always targets the inactive payload. If A is
+confirmed, B is the candidate; if B is confirmed, A is the candidate. The
+update must never overwrite the confirmed payload, the MBR, the persistent-log
+arena, or SwiftFS data. Its only partition-four writes are bounded redundant
+boot-control journal records in the reserved superblock extension.
 
-Power the Pi down and re-resolve the whole card as above. Mount its FAT32 boot
-partition and trace that mount back to the verified whole disk. Before copying,
-require the existing volume to contain `BOOT-MANIFEST.txt`,
-`MEDIA-LAYOUT.txt`, and `SHA256SUMS`; otherwise stop instead of guessing that an
-arbitrary FAT volume is SwiftOS media. Then copy the package contents without a
-deleting sync and verify every new packaged byte on the destination:
+The transaction contract is:
 
-```sh
-BOOT_PACKAGE=.build/raspberry-pi-5/boot
-BOOT_VOLUME=/Volumes/SWIFTOS
-test -f "$BOOT_VOLUME/BOOT-MANIFEST.txt"
-test -f "$BOOT_VOLUME/MEDIA-LAYOUT.txt"
-test -f "$BOOT_VOLUME/SHA256SUMS"
-(cd "$BOOT_PACKAGE" && shasum -a 256 -c SHA256SUMS)
-rsync -rt --checksum --exclude SHA256SUMS "$BOOT_PACKAGE/" "$BOOT_VOLUME/"
-rsync -t --checksum "$BOOT_PACKAGE/SHA256SUMS" "$BOOT_VOLUME/SHA256SUMS"
-(cd "$BOOT_VOLUME" && shasum -a 256 -c SHA256SUMS)
-sync
-diskutil unmountDisk /dev/diskN
-sudo python3 tools/verify_rpi5_boot_partition.py /dev/diskN \
-  --expected-block-count EXACT_CARD_BLOCK_COUNT \
-  --expected-sha256sums "$BOOT_PACKAGE/SHA256SUMS"
-diskutil eject /dev/diskN
-```
+1. Validate the exact v2 geometry, firmware-reported current partition,
+   confirmed journal state, equal slot sizes, release generation, and complete
+   candidate digest.
+2. Record `writingCandidate`, copy only the inactive slot in bounded chunks,
+   then hash, synchronize, and read back the entire candidate. The selector is
+   unchanged throughout staging.
+3. Seal `trialPending` and request one Raspberry Pi `tryboot` reboot. The
+   invariant selector maps that one-shot boot to the candidate without changing
+   the confirmed default.
+4. Accept candidate health only when the running system proves the expected
+   firmware partition, tryboot state, release generation and digest, trial
+   token, and system health. Until then, the old slot remains confirmed.
+5. After health succeeds, commit the selector transaction, synchronize it, read
+   it back, and only then record the candidate as stable and confirmed. A failed
+   or reset trial returns through the unchanged selector to the prior slot; a
+   watchdog/reset policy is still required to escape a kernel that simply
+   hangs.
+6. Optionally copy the newly confirmed release back into its peer. This
+   convergence copy runs while the selector continues to boot the confirmed
+   source, and it never changes the selector. An interrupted mirror therefore
+   cannot replace the known-good default with a partial slot.
 
-Substitute the actual verified mount and freshly resolved whole-disk number.
-Do not use `dd`, repartition, erase, or format during this workflow. A plain FAT
-copy is not a whole-card flash: it cannot create a missing type-`0xda`
-partition. A card that was previously prepared as FAT-only therefore still has
-no SwiftFS or persistent-log arena after this update; perform a deliberate
-whole-card initialization when preserving its old contents is no longer
-required. The semantic verifier follows only paths named by the package hash
-manifest, so unrelated `.Spotlight-V100`, `.fseventsd`, and AppleDouble files
-neither invalidate the boot payload nor expand the verifier's read scope.
-On macOS this FAT verifier deliberately uses the buffered whole-disk node:
-variable-length file reads can be rejected as unaligned on `/dev/rdiskN` even
-though the card is healthy. The persistent-log inspector below performs aligned
-block reads and continues to use the raw whole-disk node.
+The repository has host-tested board-neutral journal transitions, redundant
+journal recovery, bounded slot copying, v2 image generation, and semantic
+verification of both slots. It does **not** yet integrate those pieces into a
+physical-device persistent installer or platform selector writer. Do not mount
+and copy `.build/raspberry-pi-5/boot/` into either slot, and never edit
+`SWIFTOS-CTL/autoboot.txt` manually. Those shortcuts bypass active-slot proof,
+durable candidate verification, rollback state, and selector readback. No
+physical v2 update or rollback is claimed yet.
+
+### Legacy v1 media and one-time migration
+
+The inspectors retain read-only compatibility with v1 media so existing logs
+and historical evidence remain accessible. A v1 card's sole `SWIFTOS` FAT32
+payload is not an inactive slot and has no rollback peer. Installing the v2
+payload directory there does not create the selector or A/B topology and must
+not be described as migration.
+
+The default v2 layout deliberately places partition four at block 526,336, the
+same block where the default v1 type-`0xda` partition begins. That makes a
+future dedicated migration capable of preserving the complete data extent byte
+for byte while replacing the former 256 MiB boot extent with the selector and
+two 128 MiB slots. The MBR and boot extents still change, however: a wrong card,
+wrong geometry, interrupted metadata write, or partial slot population can make
+the media unbootable or lose access to user data. Back up SwiftFS data before
+any migration.
+
+No repository command currently performs this migration, and no physical card
+has been migrated. Do not improvise it with `fdisk`, `diskutil`, `dd`, manual
+selector edits, or FAT copies. Until a bounded migration tool, recovery plan,
+readback verification, and physical trial/rollback evidence exist, use v1 only
+for inspection or initialize a backed-up card destructively as v2.
+
+### Pi SPI EEPROM updates are separate
+
+The Raspberry Pi 5 executes its SPI EEPROM bootloader before it reads the
+microSD selector. The v2 slots protect SwiftOS's kernel, DTB, overlay, and
+configuration payload; they do not protect or update that EEPROM. Current slot
+packages force `bootloader_update=0` and reject EEPROM recovery/update files.
+
+If SwiftOS later manages EEPROM releases, that path must have an independent
+recoverable A/B or rescue transaction, its own compatibility and power-loss
+policy, and separate physical validation. It must not borrow the microSD
+selector commit as proof that an EEPROM update is safe or complete.
 
 ### Live USB kernel update: volatile
 
 The bounded USB updater can stage and chainload `kernel8.img` in RAM without
-rewriting either partition. A `COMMITTED` response proves sealed staging, not a
-microSD installation. Verify the disconnect, re-enumeration, and changed boot
-identity for the live handoff. A power cycle returns to the kernel already on
-the FAT32 partition. There is no supported guest-side command that installs the
-RAM image to microSD; use the normal boot-partition procedure after powering
-down when the update must persist.
+rewriting the MBR, selector, payload slots, journal, logs, or SwiftFS data. A
+`COMMITTED` response proves sealed staging, not a microSD installation. Verify
+the disconnect, re-enumeration, and changed boot identity for the live handoff.
+A power cycle returns to the selector's confirmed microSD payload (or the sole
+v1 payload). There is no supported guest-side command that persists the RAM
+image to a slot; wait for the transactional installer rather than substituting
+a manual FAT copy.
 
 ### Returned-card persistent logs
 
@@ -229,9 +295,11 @@ sudo python3 tools/inspect_rpi5_persistent_log.py /dev/rdiskN \
 
 The inspector rejects partition nodes and symlinks, opens the source
 `O_RDONLY`, verifies discovered geometry when the host exposes it, and reads
-only the MBR, two signed superblocks, and bounded log arena. Its JSON preserves
-structured records and reconstructs retained canonical console bytes in
-chronological order. Every initialized volatile log starts with a structured
+only the MBR, the unique type-`0xda` partition's two signed superblocks, and its
+bounded log arena. It finds that data volume at MBR entry two on v1 or entry
+four on v2 and never reads or changes the selector or payload slots. Its JSON
+preserves structured records and reconstructs retained canonical console bytes
+in chronological order. Every initialized volatile log starts with a structured
 `BOOT` epoch record containing its initial counter tick, processor affinity,
 DTB address, and counter frequency. The inspector reports these under
 `boot_epoch_markers` and describes an unused arena explicitly as
@@ -240,21 +308,25 @@ complete. The epoch and console records become durable only after the SD/log
 service recovers the arena and drains the retained ring. An empty arena means
 the boot never reached that crossing; use second-stage UART10 firmware output,
 kernel UART10 output, or HDMI evidence for the earlier failure.
-If the card never received a destructive whole-card initialization, the signed
+If the card never received a complete SwiftOS media initialization, the signed
 type-`0xda` partition does not exist and there are no persistent SwiftOS logs to
-inspect, regardless of how recently its FAT boot files were updated.
+inspect, regardless of how recently arbitrary FAT files were copied.
 
 ## SwiftOS data partition
 
-The second MBR entry uses type `0xda` and is accepted only when its `SWOSDATA`
-v1 superblock validates. Blocks zero and one are duplicate immutable headers.
-The next 4,096 512-byte blocks form the default 2 MiB kernel-log arena; CRCs and
-deterministic sequence-to-slot placement permit bounded recovery after a torn
-write. The remaining user-data arena now has a host-tested SwiftFS layout and
-provider. A pure range policy converts both relative arenas into disjoint,
-bounded absolute SD ranges before either service receives authority. The
-generic kernel exposes synchronous logical-block I/O and partition-bounded
-views, but never maps raw media into EL0.
+The unique MBR entry with type `0xda` is entry two on legacy v1 and entry four
+on v2. It is accepted only when its `SWOSDATA` v1 superblock validates. Blocks
+zero and one contain duplicate immutable volume-header bytes at offsets 0...63.
+On v2, bytes 64...223 of each block are reserved for redundant CRC-protected A/B
+boot-control records; update transactions have no authority to write elsewhere
+in the data partition except through the existing bounded log and SwiftFS
+services. Relative blocks 2 through 4097 form the default 2 MiB kernel-log
+arena; CRCs and deterministic sequence-to-slot placement permit bounded
+recovery after a torn write. The remaining user-data arena has a host-tested
+SwiftFS layout and provider. A pure range policy converts both relative arenas
+into disjoint, bounded absolute SD ranges before either service receives
+authority. The generic kernel exposes synchronous logical-block I/O and
+partition-bounded views, but never maps raw media into EL0.
 
 On Pi, the runtime binds the boot DT's removable `brcm,bcm2712-sdhci` node to a
 bounded, default-speed 3.3 V PIO transport. The live SD device, SwiftFS scratch,
