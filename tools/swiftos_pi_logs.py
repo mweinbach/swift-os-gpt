@@ -132,7 +132,10 @@ def _has_swiftos_partition_sentinels(record: Mapping[str, Any]) -> bool:
     partitions = record.get("Partitions")
     if not isinstance(partitions, list):
         return False
-    has_boot = False
+    has_legacy_boot = False
+    has_selector = False
+    has_slot_a = False
+    has_slot_b = False
     has_data = False
     for partition in partitions:
         if not isinstance(partition, dict):
@@ -145,10 +148,32 @@ def _has_swiftos_partition_sentinels(record: Mapping[str, Any]) -> bool:
             "0c",
             "c",
         }:
-            has_boot = True
+            has_legacy_boot = True
+        if volume == "SWIFTOS-CTL" and content in {
+            "dosfat12",
+            "windowsfat12",
+            "01",
+            "1",
+        }:
+            has_selector = True
+        if volume == "SWIFTOS-A" and content in {
+            "dosfat32",
+            "windowsfat32",
+            "0c",
+            "c",
+        }:
+            has_slot_a = True
+        if volume == "SWIFTOS-B" and content in {
+            "dosfat32",
+            "windowsfat32",
+            "0c",
+            "c",
+        }:
+            has_slot_b = True
         if content in {"da", "0xda"}:
             has_data = True
-    return has_boot and has_data
+    has_ab_boot = has_selector and has_slot_a and has_slot_b
+    return has_data and (has_legacy_boot or has_ab_boot)
 
 
 def _require_bool(
@@ -255,7 +280,8 @@ def _validate_candidate(
         raise PiLogToolError(f"{identifier} size is not block aligned")
     if not _has_swiftos_partition_sentinels(record):
         raise PiLogToolError(
-            f"{identifier} does not have the SWIFTOS FAT32 plus type-0xDA layout"
+            f"{identifier} does not have the SWIFTOS FAT32 plus type-0xDA "
+            "layout or A/B v2 layout"
         )
     partitions = record.get("Partitions")
     assert isinstance(partitions, list)
@@ -343,7 +369,8 @@ def discover_swiftos_card(
         )
     if not identifiers:
         raise PiLogToolError(
-            "no removable external disk has the SWIFTOS FAT32 plus type-0xDA layout"
+            "no removable external disk has the SWIFTOS FAT32 plus type-0xDA "
+            "layout or A/B v2 layout"
         )
 
     candidates: list[CardCandidate] = []

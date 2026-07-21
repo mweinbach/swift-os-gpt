@@ -22,10 +22,14 @@ import build_rpi5_media as media
 import inspect_rpi5_persistent_log as source_io
 
 
-def read_mbr_boot_partition(
+def read_mbr_boot_partitions(
     image: source_io.BoundedReadOnlyMedia,
     logical_block_count: int,
-) -> tuple[list[dict[str, int | bool]], dict[str, int | bool]]:
+) -> tuple[
+    list[dict[str, int | bool]],
+    dict[str, dict[str, int | bool]],
+    dict[str, int | bool] | None,
+]:
     mbr = media.read_exact(image, 0, media.SECTOR_SIZE, "MBR")
     if mbr[510:512] != b"\x55\xaa":
         raise media.MediaError("media has no valid MBR signature")
@@ -66,18 +70,15 @@ def read_mbr_boot_partition(
             if left_start < right_end and right_start < left_end:
                 raise media.MediaError("MBR partitions overlap")
 
-    boot_entries = [
-        entry for entry in entries
-        if entry["type"] == media.FAT32_LBA_TYPE
-    ]
-    if len(boot_entries) != 1:
-        raise media.MediaError(
-            "MBR must contain exactly one type-0x0C FAT32 boot partition"
-        )
-    boot = boot_entries[0]
-    if boot["index"] != 1 or not boot["bootable"]:
-        raise media.MediaError("FAT32 boot partition flags or index are invalid")
-    return entries, boot
+    version, layout = media.classify_media_layout(entries)
+    if version == "v1":
+        return entries, {"A": layout["boot"]}, None
+    selector = layout["selector"]
+    media.FAT12SelectorVolume.read_autoboot(image, selector)
+    return entries, {
+        "A": layout["slot_a"],
+        "B": layout["slot_b"],
+    }, selector
 
 
 def verify_stream(
@@ -87,6 +88,7 @@ def verify_stream(
     source_path: str,
     partition_image: bool,
     expected_manifest: bytes | None,
+    selected_slot: str,
 ) -> dict[str, object]:
     if partition_image:
         if geometry.kind != "regular-image":
@@ -94,27 +96,55 @@ def verify_stream(
                 "--partition-image accepts only a regular-file partition capture"
             )
         entries: list[dict[str, int | bool]] = []
-        boot: dict[str, int | bool] = {
-            "index": 1,
-            "bootable": True,
-            "type": media.FAT32_LBA_TYPE,
-            "start_block": 0,
-            "block_count": geometry.logical_block_count,
+        if selected_slot == "both":
+            raise media.MediaError(
+                "--partition-image requires --slot a or --slot b"
+            )
+        slots: dict[str, dict[str, int | bool]] = {
+            selected_slot.upper(): {
+                "index": 1,
+                "bootable": True,
+                "type": media.FAT32_LBA_TYPE,
+                "start_block": 0,
+                "block_count": geometry.logical_block_count,
+            }
         }
+        selector = None
         validate_hidden_sectors = False
     else:
-        entries, boot = read_mbr_boot_partition(
+        entries, slots, selector = read_mbr_boot_partitions(
             image,
             geometry.logical_block_count,
         )
         validate_hidden_sectors = True
 
-    result = media.verify_fat32_boot_manifest(
-        image,
-        boot,
-        validate_hidden_sectors=validate_hidden_sectors,
-        expected_manifest=expected_manifest,
+    requested = (
+        sorted(slots)
+        if selected_slot == "both"
+        else [selected_slot.upper()]
     )
+    if any(slot not in slots for slot in requested):
+        raise media.MediaError("requested boot slot is not present on this media")
+    slot_results: dict[str, dict[str, object]] = {}
+    for slot in requested:
+        slot_results[slot] = media.verify_fat32_boot_manifest(
+            image,
+            slots[slot],
+            validate_hidden_sectors=validate_hidden_sectors,
+            expected_manifest=expected_manifest,
+        )
+        slot_results[slot]["partition"] = slots[slot]
+    if len(slot_results) == 2 and (
+        slot_results["A"]["manifest"]["sha256"]
+        != slot_results["B"]["manifest"]["sha256"]
+    ):
+        raise media.MediaError("A/B boot-slot manifests disagree")
+
+    primary_slot = requested[0]
+    result = dict(slot_results[primary_slot])
+    result["format"] = "swiftos-rpi5-boot-verification-v2"
+    result["selected_slots"] = requested
+    result["boot_slots"] = slot_results
     result["source"] = {
         "path": source_path,
         "kind": geometry.kind,
@@ -125,7 +155,9 @@ def verify_stream(
         "layout": "fat32-partition-image" if partition_image else "whole-media",
     }
     result["partitions"] = entries
-    result["boot_partition"] = boot
+    result["boot_partition"] = slots[primary_slot]
+    if selector is not None:
+        result["selector_partition"] = selector
     return result
 
 
@@ -176,6 +208,7 @@ def verify_path(
     expected_block_count: int | None = None,
     partition_image: bool = False,
     expected_manifest_path: Path | None = None,
+    selected_slot: str = "both",
 ) -> dict[str, object]:
     expected_manifest: bytes | None = None
     if expected_manifest_path is not None:
@@ -191,6 +224,7 @@ def verify_path(
             source_path=str(path),
             partition_image=partition_image,
             expected_manifest=expected_manifest,
+            selected_slot=selected_slot,
         )
 
 
@@ -210,6 +244,12 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         help="also require byte equality with a trusted SHA256SUMS copy",
     )
+    root.add_argument(
+        "--slot",
+        choices=("a", "b", "both"),
+        default="both",
+        help="verify slot A, slot B, or both A/B payloads",
+    )
     return root
 
 
@@ -222,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_block_count=arguments.expected_block_count,
             partition_image=arguments.partition_image,
             expected_manifest_path=arguments.expected_sha256sums,
+            selected_slot=arguments.slot,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

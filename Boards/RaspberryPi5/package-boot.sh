@@ -136,7 +136,7 @@ DWC2_OVERLAY_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/overlays/dwc2.dtbo")
 MEDIA_LAYOUT_SHA256=$(sha256_file "$OUTPUT_DIRECTORY/MEDIA-LAYOUT.txt")
 
 {
-    echo "format=swiftos-rpi5-boot-v3"
+    echo "format=swiftos-rpi5-boot-v4"
     echo "board=raspberry-pi-5-model-b"
     echo "hardware_verified=false"
     echo "swiftos_revision=$SWIFTOS_REVISION"

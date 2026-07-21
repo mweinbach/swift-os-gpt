@@ -75,10 +75,11 @@ private final class TestRetainedLogSource: RetainedKernelLogSource {
 struct DeferredPersistentLogServiceTests {
     static func main() {
         stagesMediaValidationRecoveryAndBoundedFlushes()
+        selectsPersistentLogDataFromStrictABPartitionFour()
         permanentlyDisablesDuplicateAndUnsignedMediaWithoutWrites()
         permanentlyDropsWriteAuthorityAfterTransportFailure()
         advancesAcrossSnapshotOverwriteRacesWithoutStaleWrites()
-        print("deferred persistent log service: 4 groups passed")
+        print("deferred persistent log service: 5 groups passed")
     }
 
     private static func stagesMediaValidationRecoveryAndBoundedFlushes() {
@@ -212,6 +213,87 @@ struct DeferredPersistentLogServiceTests {
                 "new retained event was persisted more than once"
             )
             expect(device.writeBlocks == [10, 11, 12], "log slots were not bounded")
+        }
+    }
+
+    private static func selectsPersistentLogDataFromStrictABPartitionFour() {
+        let base = MemoryBlockDevice(blockCount: 160)
+        let dataRange = BlockDeviceRange(
+            startBlock: 90,
+            blockCount: 60,
+            within: base.geometry.logicalBlockCount
+        )!
+        withScratch { scratch in
+            var dataPartition = PartitionBlockDevice(
+                base: base,
+                partitionRange: dataRange
+            )!
+            guard case .formatted = SwiftOSDataVolume.initializeEmpty(
+                      &dataPartition,
+                      kernelLogBlockCount: 4,
+                      scratch: scratch
+                  )
+            else { fatalError("A/B fixture volume format failed") }
+        }
+        writePartition(
+            to: base,
+            index: 0,
+            type: MBRPartitionType.fat12.rawValue,
+            start: 1,
+            count: 9
+        )
+        base.bytes[446] = 0x80
+        writePartition(
+            to: base,
+            index: 1,
+            type: MBRPartitionType.fat32LBA.rawValue,
+            start: 10,
+            count: 40
+        )
+        writePartition(
+            to: base,
+            index: 2,
+            type: MBRPartitionType.fat32LBA.rawValue,
+            start: 50,
+            count: 40
+        )
+        writePartition(
+            to: base,
+            index: 3,
+            type: MBRPartitionType.swiftOSData.rawValue,
+            start: 90,
+            count: 60
+        )
+        base.bytes[510] = 0x55
+        base.bytes[511] = 0xaa
+
+        let device = CountingBlockDevice(base: base)
+        withScratch { scratch in
+            var service = DeferredPersistentLogService(
+                device: device,
+                source: TestRetainedLogSource(entries: []),
+                scratch: scratch
+            )!
+            expect(
+                service.serviceOnce(
+                    allowRecovery: false,
+                    maximumRecoveryBlockCount: 1,
+                    maximumAppendCount: 1
+                ) == .partitionReady(startBlock: 90, blockCount: 60),
+                "strict A/B media did not select partition four for logs"
+            )
+            expect(
+                service.selectedDataPartitionRange == dataRange,
+                "strict A/B partition-four range was not retained"
+            )
+            expect(
+                service.serviceOnce(
+                    allowRecovery: false,
+                    maximumRecoveryBlockCount: 1,
+                    maximumAppendCount: 1
+                ) == .superblockReady(kernelLogBlockCount: 4),
+                "strict A/B partition-four signed volume did not open"
+            )
         }
     }
 

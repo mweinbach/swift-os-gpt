@@ -7,6 +7,10 @@ device_tree=bcm2712-rpi-5-b.dtb
 # SwiftOS is bare metal, so skip firmware Linux compatibility checks.
 os_check=0
 
+# SD slot updates and Pi 5 EEPROM updates are independent transactions. Never
+# let an ordinary kernel/DT/config package trigger an EEPROM self-update.
+bootloader_update=0
+
 # Keep the firmware-expanded DTB outside both the 32 MiB live-update
 # destination and the >=64 MiB upload workspace. The kernel independently
 # validates and reserves the actual x0 span before enabling activation.

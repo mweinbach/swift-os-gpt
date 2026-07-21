@@ -8,6 +8,7 @@ protocol RetainedKernelLogSource {
 enum DeferredPersistentLogFailure: Equatable {
     case partitionTable(MBRPartitionDiscoveryFailure)
     case mediaLayout(SwiftOSMediaLayoutFailure)
+    case abMediaLayout(SwiftOSABMediaLayoutFailure)
     case partitionBounds
     case signedVolume(PersistentLogStoreOpenFailure)
     case retainedLogUnavailable
@@ -121,24 +122,34 @@ struct DeferredPersistentLogService<
         case .failure(let failure):
             return disable(.partitionTable(failure))
         }
-        let selected = SwiftOSMediaLayout.select(from: table)
-        let media: SwiftOSMediaPartitions
-        switch selected {
-        case .layout(let value): media = value
-        case .failure(let failure): return disable(.mediaLayout(failure))
+        let dataPartition: MBRPartition
+        if table.partition(at: 3) != nil {
+            switch SwiftOSABMediaLayout.select(from: table) {
+            case .layout(let media):
+                dataPartition = media.data
+            case .failure(let failure):
+                return disable(.abMediaLayout(failure))
+            }
+        } else {
+            switch SwiftOSMediaLayout.select(from: table) {
+            case .layout(let media):
+                dataPartition = media.data
+            case .failure(let failure):
+                return disable(.mediaLayout(failure))
+            }
         }
         guard let partition = PartitionBlockDevice(
                   base: device,
-                  partitionRange: media.data.range
+                  partitionRange: dataPartition.range
               )
         else { return disable(.partitionBounds) }
         rawDevice = nil
         partitionDevice = partition
-        selectedDataPartitionRange = media.data.range
+        selectedDataPartitionRange = dataPartition.range
         stage = .signedVolume
         return .partitionReady(
-            startBlock: media.data.range.startBlock,
-            blockCount: media.data.range.blockCount
+            startBlock: dataPartition.range.startBlock,
+            blockCount: dataPartition.range.blockCount
         )
     }
 

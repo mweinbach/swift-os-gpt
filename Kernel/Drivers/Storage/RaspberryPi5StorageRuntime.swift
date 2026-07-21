@@ -520,6 +520,9 @@ enum RaspberryPi5StorageRuntime {
         case .mediaLayout(let detail):
             console.write("SWIFTOS:STORAGE_DISABLED_LAYOUT=")
             writeLayoutFailure(detail, console: console)
+        case .abMediaLayout(let detail):
+            console.write("SWIFTOS:STORAGE_DISABLED_AB_LAYOUT=")
+            writeABLayoutFailure(detail, console: console)
         case .partitionBounds:
             console.write("SWIFTOS:STORAGE_DISABLED_PARTITION_BOUNDS\n")
         case .signedVolume(let detail):
@@ -560,6 +563,20 @@ enum RaspberryPi5StorageRuntime {
         case .missingDataPartition: console.write("DATA_MISSING\n")
         case .duplicateDataPartition: console.write("DATA_DUPLICATE\n")
         case .bootMustPrecedeData: console.write("ORDER\n")
+        }
+    }
+
+    private static func writeABLayoutFailure(
+        _ failure: SwiftOSABMediaLayoutFailure,
+        console: EarlyConsole
+    ) {
+        switch failure {
+        case .missingPartition: console.write("PARTITION_MISSING\n")
+        case .selectorMustBeBootableFAT: console.write("SELECTOR\n")
+        case .slotMustBeNonbootableFAT32: console.write("SLOT\n")
+        case .slotGeometryMismatch: console.write("SLOT_GEOMETRY\n")
+        case .dataMustBeNonbootableSwiftOSVolume: console.write("DATA\n")
+        case .partitionsMustBeOrdered: console.write("ORDER\n")
         }
     }
 

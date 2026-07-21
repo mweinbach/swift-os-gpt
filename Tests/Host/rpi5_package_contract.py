@@ -106,6 +106,8 @@ def validate_successful_package(
             "config does not retain bootloader RP1 PCIe configuration")
     require("os_check=0\n" in config,
             "config does not disable Linux-specific firmware image checks")
+    require("bootloader_update=0\n" in config,
+            "config does not isolate EEPROM updates from SD slot updates")
     require("enable_uart=1\n" in config,
             "config does not retain the UART10 early console")
     require("uart_2ndstage=1\n" in config,
@@ -126,7 +128,7 @@ def validate_successful_package(
         line.split("=", 1)
         for line in (output / "BUILD-METADATA.txt").read_text().splitlines()
     )
-    require(metadata["format"] == "swiftos-rpi5-boot-v3",
+    require(metadata["format"] == "swiftos-rpi5-boot-v4",
             "package format was not advanced")
     require(metadata["firmware_repository_revision"] == revision,
             "firmware revision was not recorded")

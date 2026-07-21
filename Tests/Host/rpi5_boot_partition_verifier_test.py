@@ -53,8 +53,8 @@ def build(package: Path, image: Path) -> None:
         str(package),
         str(image),
         "--total-size-mib",
-        "96",
-        "--boot-size-mib",
+        "160",
+        "--slot-size-mib",
         "64",
         "--kernel-log-block-count",
         "64",
@@ -66,12 +66,14 @@ def verify(
     image: Path,
     *,
     partition_image: bool = False,
+    slot: str = "both",
     expected_manifest: Path | None = None,
     should_succeed: bool = True,
 ) -> dict[str, object] | str:
     command = [sys.executable, str(VERIFIER), str(image)]
     if partition_image:
         command.append("--partition-image")
+    command.extend(("--slot", slot))
     if expected_manifest is not None:
         command.extend(("--expected-sha256sums", str(expected_manifest)))
     result = run(*command)
@@ -83,11 +85,12 @@ def verify(
     return result.stdout
 
 
-def boot_extent(image: Path) -> tuple[int, int]:
+def boot_extent(image: Path, slot: str = "a") -> tuple[int, int]:
     with image.open("rb") as source:
         mbr = source.read(512)
     require(mbr[510:512] == b"\x55\xaa", "fixture MBR is invalid")
-    return struct.unpack_from("<II", mbr, 454)
+    offset = 470 if slot == "a" else 486
+    return struct.unpack_from("<II", mbr, offset)
 
 
 def fat_geometry(image: Path, boot_start: int) -> tuple[int, int, int, int]:
@@ -226,6 +229,13 @@ def main() -> int:
                 "trusted manifest equality was not reported")
         require(report["unrelated_entries"] == "not-traversed",
                 "unrelated-entry policy changed")
+        require(report["selected_slots"] == ["A", "B"],
+                "whole-media verification did not cover both slots")
+        require(
+            report["boot_slots"]["A"]["manifest"]["matched_expected_copy"]
+            and report["boot_slots"]["B"]["manifest"]["matched_expected_copy"],
+            "trusted manifest was not checked against both slots",
+        )
 
         metadata = root / "host-metadata.img"
         shutil.copyfile(pristine, metadata)
@@ -243,7 +253,11 @@ def main() -> int:
             source.seek(boot_start * 512)
             shutil.copyfileobj(source, target, length=1_024 * 1_024)
             target.truncate(boot_count * 512)
-        partition_report = verify(partition, partition_image=True)
+        partition_report = verify(
+            partition,
+            partition_image=True,
+            slot="a",
+        )
         require(partition_report["source"]["layout"] == "fat32-partition-image",
                 "partition-image mode was not reported")
         require(partition_report["fat32"]["hidden_sectors"] == boot_start,
@@ -258,6 +272,22 @@ def main() -> int:
             "required-file corruption did not name the failed boot file",
         )
 
+        # A diagnostic may deliberately inspect the known-good slot even when
+        # its peer is damaged, while the default whole-media policy must cover
+        # and reject either broken slot.
+        corrupt_b = root / "corrupt-slot-b.img"
+        shutil.copyfile(pristine, corrupt_b)
+        slot_b_start, _ = boot_extent(corrupt_b, "b")
+        corrupt_kernel(corrupt_b, slot_b_start)
+        slot_a_report = verify(corrupt_b, slot="a")
+        require(slot_a_report["selected_slots"] == ["A"],
+                "slot-specific verification did not remain scoped to A")
+        error = verify(corrupt_b, should_succeed=False)
+        require(
+            "required-file checksum mismatch: kernel8.img" in error,
+            "slot B corruption passed whole-media verification",
+        )
+
         wrong_manifest = root / "wrong-SHA256SUMS"
         wrong_manifest.write_bytes(b"not the trusted manifest\n")
         error = verify(
@@ -268,7 +298,7 @@ def main() -> int:
         require("differs from the expected manifest" in error,
                 "trusted manifest mismatch was not rejected")
 
-    print("Raspberry Pi 5 boot partition verifier: 5 groups passed")
+    print("Raspberry Pi 5 boot partition verifier: 6 groups passed")
     return 0
 
 

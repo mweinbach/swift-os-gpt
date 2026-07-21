@@ -1,28 +1,54 @@
-SwiftOS Raspberry Pi 5 media layout, format 1
+SwiftOS Raspberry Pi 5 media layout, format 2
 
 Logical block size: 512 bytes
 Partition table: MBR
-Alignment: 2048 logical blocks (1 MiB)
+Payload-slot alignment: 2048 logical blocks (1 MiB)
 
 Partition 1:
-  role: firmware boot
-  bootable: yes
-  type: 0x0c (FAT32 LBA)
-  default size: 256 MiB
-  contents: every file covered by SHA256SUMS
+  role: invariant A/B selector
+  bootable: yes (SwiftOS MBR convention)
+  type: 0x01 (FAT12)
+  start block: 1
+  block count: 2047
+  contents: autoboot.txt only
 
 Partition 2:
-  role: SwiftOS user data
+  role: boot payload slot A
+  bootable: no
+  type: 0x0c (FAT32 LBA)
+  default size: 128 MiB
+  contents: every file covered by the slot's SHA256SUMS
+
+Partition 3:
+  role: boot payload slot B
+  bootable: no
+  type: 0x0c (FAT32 LBA)
+  default size: 128 MiB
+  contents: every file covered by the slot's SHA256SUMS
+
+Partition 4:
+  role: SwiftOS data, update journal, logs, and user files
   bootable: no
   type: 0xda (non-filesystem data; requires SWOSDATA superblock)
+  default start block: 526336
   size: remaining image blocks
-  blocks 0 and 1: identical SwiftOS data-volume v1 superblocks
+  blocks 0 and 1, bytes 0...63: SwiftOS data-volume v1 superblocks
+  blocks 0 and 1, bytes 64...223: redundant A/B boot-control records
   default kernel-log arena: blocks 2 through 4097 (2 MiB)
-  remaining blocks: reserved for a future user filesystem
+  remaining blocks: SwiftFS user/system data
 
-The persistent kernel-log arena is CRC-protected and power-loss recoverable.
-The kernel may access only that bounded arena. The remaining user-data blocks
-will be exposed through a future VFS/syscall boundary and must never be mapped
-raw into EL0. SwiftOS includes a DT-discovered BCM2712 SDHCI transport and a
-fail-closed Pi runtime for this log arena; both remain physical-hardware-
-unverified. No filesystem or general raw user-data API is claimed.
+The selector normally points to partition 2 and uses Raspberry Pi tryboot to
+select partition 3 once. After slot B proves its firmware-reported partition,
+tryboot state, release digest, and health, SwiftOS may switch the selector to B.
+A failed or hung trial must reset through the selector and return to the still-
+confirmed slot. Mirroring the confirmed payload into its peer is allowed only
+while the selector continues to boot the confirmed source.
+
+The selector occupies the alignment gap that format 1 left unused. Slots A and
+B subdivide format 1's 256 MiB boot extent, so the default type-0xda partition
+retains exact block 526336 and can be preserved by a deliberate migration. A
+routine slot update must never rewrite the MBR, selector, active slot, or data
+partition.
+
+Pi SPI EEPROM A/B updates are a separate transaction. Slot packages set
+bootloader_update=0 and must not contain recovery.bin or pieeprom update files.

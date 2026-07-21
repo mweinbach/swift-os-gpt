@@ -55,18 +55,39 @@ def whole_record(
     size: int,
     *,
     swiftos: bool,
+    ab: bool = False,
 ) -> dict[str, object]:
-    partitions = [
-        partition(
-            f"{identifier}s1",
-            "DOS_FAT_32",
-            volume_name="SWIFTOS" if swiftos else "OTHER",
-        ),
-        partition(
-            f"{identifier}s2",
-            "DA" if swiftos else "Apple_APFS",
-        ),
-    ]
+    if swiftos and ab:
+        partitions = [
+            partition(
+                f"{identifier}s1",
+                "DOS_FAT_12",
+                volume_name="SWIFTOS-CTL",
+            ),
+            partition(
+                f"{identifier}s2",
+                "DOS_FAT_32",
+                volume_name="SWIFTOS-A",
+            ),
+            partition(
+                f"{identifier}s3",
+                "DOS_FAT_32",
+                volume_name="SWIFTOS-B",
+            ),
+            partition(f"{identifier}s4", "DA"),
+        ]
+    else:
+        partitions = [
+            partition(
+                f"{identifier}s1",
+                "DOS_FAT_32",
+                volume_name="SWIFTOS" if swiftos else "OTHER",
+            ),
+            partition(
+                f"{identifier}s2",
+                "DA" if swiftos else "Apple_APFS",
+            ),
+        ]
     return {
         "DeviceIdentifier": identifier,
         "Content": "FDisk_partition_scheme",
@@ -141,7 +162,7 @@ def test_fresh_card_discovery_ignores_unrelated_fixed_disk() -> None:
     fixed_size = 2_000_398_934_016
     fake = FakeDiskutil(
         [
-            whole_record("disk4", card_size, swiftos=True),
+            whole_record("disk4", card_size, swiftos=True, ab=True),
             whole_record("disk6", fixed_size, swiftos=False),
         ],
         {
