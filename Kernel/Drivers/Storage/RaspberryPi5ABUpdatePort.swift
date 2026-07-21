@@ -30,7 +30,10 @@ private enum RaspberryPi5ABRecoveryVerificationPhase: UInt8 {
 /// selector repair/commit, and confirmed-slot mirroring are operational here.
 struct RaspberryPi5ABUpdatePort<Device: BlockDevice>:
     BootUpdateRuntimePort {
-    static var maximumHashBlocksPerPass: UInt64 { 4 }
+    /// Hash at most 64 KiB per cooperative pass. This keeps watchdog and USB
+    /// service responsive without turning a 128 MiB verification into tens of
+    /// thousands of scheduler round trips.
+    static var maximumHashBlocksPerPass: UInt64 { 128 }
 
     let media: SwiftOSABMediaPartitions
     let layout: BootSlotLayout
@@ -149,15 +152,21 @@ struct RaspberryPi5ABUpdatePort<Device: BlockDevice>:
 
     mutating func commitSelector(
         _ action: BootSelectorCommitAction
-    ) -> Bool {
-        guard leaseHeld, var selector = selectorDevice() else { return false }
+    ) -> BootUpdateRuntimeSelectorCommitResult {
+        guard leaseHeld, var selector = selectorDevice() else {
+            return .rejectedBeforeWrite
+        }
         switch RaspberryPiABSelector.commit(
             defaultSlot: action.defaultSlot,
             to: &selector,
             scratch: scratch
         ) {
-        case .committed, .unchanged: return true
-        case .failure: return false
+        case .committed, .unchanged:
+            return .committed
+        case .rejectedBeforeWrite:
+            return .rejectedBeforeWrite
+        case .durabilityUncertain:
+            return .durabilityUncertain
         }
     }
 
@@ -213,7 +222,7 @@ struct RaspberryPi5ABUpdatePort<Device: BlockDevice>:
             case .committed, .unchanged:
                 resetRecovery()
                 return .repaired
-            case .failure:
+            case .rejectedBeforeWrite, .durabilityUncertain:
                 return failRecovery()
             }
         }

@@ -15,8 +15,13 @@ enum RaspberryPi5WatchdogRuntime {
     private nonisolated(unsafe) static var lastServiceTicks: UInt64 = 0
     private nonisolated(unsafe) static var serviceIntervalTicks: UInt64 = 0
     private nonisolated(unsafe) static var console: EarlyConsole?
+    private nonisolated(unsafe) static var probation =
+        RaspberryPi5WatchdogProbationPolicy(isTryBootCandidate: false)
 
     static var isActive: Bool { activeWatchdog != nil }
+    static var isTrialProbationActive: Bool {
+        probation.isTrialProbationActive
+    }
 
     @discardableResult
     static func activate(console: EarlyConsole, platform: Platform) -> Bool {
@@ -48,6 +53,9 @@ enum RaspberryPi5WatchdogRuntime {
         }
         self.console = console
         activeWatchdog = watchdog
+        probation = RaspberryPi5WatchdogProbationPolicy(
+            isTryBootCandidate: platform.bootObservation?.wasTryBoot == true
+        )
         lastServiceTicks = AArch64.counterValue
         serviceIntervalTicks = interval.partialValue
         console.write("SWIFTOS:WATCHDOG_READY\n")
@@ -56,6 +64,9 @@ enum RaspberryPi5WatchdogRuntime {
 
     @discardableResult
     static func serviceNow() -> Bool {
+        if probation.serviceAction == .suppressDuringTrialProbation {
+            return activeWatchdog != nil
+        }
         guard var watchdog = activeWatchdog, watchdog.service() else {
             return false
         }
@@ -66,6 +77,7 @@ enum RaspberryPi5WatchdogRuntime {
 
     static func serviceIfDue() {
         guard activeWatchdog != nil, serviceIntervalTicks != 0 else { return }
+        guard probation.serviceAction == .programService else { return }
         let now = AArch64.counterValue
         guard now &- lastServiceTicks >= serviceIntervalTicks else { return }
         guard serviceNow() else {
@@ -73,6 +85,17 @@ enum RaspberryPi5WatchdogRuntime {
             console?.write("SWIFTOS:WATCHDOG_SERVICE_FAILED\n")
             return
         }
+    }
+
+    /// Releases probation only after the executor has durably moved the exact
+    /// running tryboot candidate into selector-commit-pending. The immediate
+    /// service starts a fresh window for selector commit and controlled reset.
+    @discardableResult
+    static func releaseAfterDurableCandidateHealth() -> Bool {
+        guard probation.releaseAfterDurableCandidateHealth() else {
+            return false
+        }
+        return serviceNow()
     }
 
     /// Irreversibly returns through firmware partition zero. All managed

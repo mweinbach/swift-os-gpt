@@ -3,8 +3,33 @@ struct RaspberryPi5CooperativePolicyTests {
     static func main() {
         selectsExactlyOneBlockingBootstrapPerPass()
         permitsSteadyNetworkAndOneStorageStepTogether()
+        suppressesWatchdogServiceUntilDurableTrialHealth()
         reportsFlushAndLossMarkersExactlyOnce()
-        print("Raspberry Pi 5 cooperative policy: 3 groups passed")
+        print("Raspberry Pi 5 cooperative policy: 4 groups passed")
+    }
+
+    private static func suppressesWatchdogServiceUntilDurableTrialHealth() {
+        var normal = RaspberryPi5WatchdogProbationPolicy(
+            isTryBootCandidate: false
+        )
+        expect(normal.serviceAction == .programService,
+               "normal boot entered watchdog probation")
+        expect(!normal.releaseAfterDurableCandidateHealth(),
+               "normal boot manufactured a trial-health release")
+
+        var trial = RaspberryPi5WatchdogProbationPolicy(
+            isTryBootCandidate: true
+        )
+        expect(
+            trial.serviceAction == .suppressDuringTrialProbation,
+            "tryboot candidate could extend its rollback window"
+        )
+        expect(trial.releaseAfterDurableCandidateHealth(),
+               "durable candidate health did not release probation")
+        expect(trial.serviceAction == .programService,
+               "healthy candidate remained rollback-bound")
+        expect(!trial.releaseAfterDurableCandidateHealth(),
+               "candidate health released probation more than once")
     }
 
     private static func selectsExactlyOneBlockingBootstrapPerPass() {

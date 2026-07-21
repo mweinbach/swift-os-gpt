@@ -242,10 +242,12 @@ func swiftOSMain(_ deviceTreeAddress: UInt64) {
                 for: platform.kind
             )
         )
-        proveTimerInterruptsCooperatively(
+        if proveTimerInterruptsCooperatively(
             console: console,
             service: &timerProofService
-        )
+        ) {
+            RaspberryPi5CooperativeRuntime.markKernelHealthReady()
+        }
         runScheduledOrPark(
             console: console,
             platform: platform,
@@ -894,10 +896,12 @@ private func runDesktopSession(
         // QEMU smoke requires all three IRQ markers and remains fail-stop.
         proveTimerInterrupts(console: console)
     case .raspberryPi5:
-        proveTimerInterruptsCooperatively(
+        if proveTimerInterruptsCooperatively(
             console: console,
             service: &monitor
-        )
+        ) {
+            RaspberryPi5CooperativeRuntime.markKernelHealthReady()
+        }
     }
     // QEMU currently hands its SMP BSP to the preemptive EL0 scheduler. A
     // single-CPU monitor boot instead owns bounded VirtIO-input polling. Until
@@ -1195,6 +1199,7 @@ private func powerOnRaspberryPiUSB(
         waitUntilStable: true,
         maximumPollCount: 100_000
     )
+    RaspberryPi5FirmwareMailboxScratchRuntime.recordPowerStateResult(result)
     switch RaspberryPi5USBPowerPolicy.disposition(for: result) {
     case .managed:
         console.write("SWIFTOS:USB_POWER_READY\n")
@@ -1446,7 +1451,7 @@ private func proveTimerInterruptsCooperatively<
 >(
     console: EarlyConsole,
     service: inout Service
-) {
+) -> Bool {
     let frequency = AArch64.counterFrequency
     let period = frequency / 100
     let startingInterruptCount = InterruptSubsystem.timerInterruptCount
@@ -1461,7 +1466,7 @@ private func proveTimerInterruptsCooperatively<
     else {
         InterruptSubsystem.stopPhysicalTimer()
         console.write("SWIFTOS:TIMER_DEFERRED\n")
-        return
+        return false
     }
 
     console.write(InterruptSubsystem.timerInterruptMarker)
@@ -1482,15 +1487,15 @@ private func proveTimerInterruptsCooperatively<
             }
             if policy.isComplete {
                 InterruptSubsystem.stopPhysicalTimer()
-                return
+                return true
             }
         case .complete:
             InterruptSubsystem.stopPhysicalTimer()
-            return
+            return true
         case .timedOut:
             InterruptSubsystem.stopPhysicalTimer()
             console.write("SWIFTOS:TIMER_DEFERRED\n")
-            return
+            return false
         }
     }
 }

@@ -8,14 +8,85 @@ struct PlatformBootObservation: Equatable {
 
 @main
 struct RaspberryPi5ABUpdatePortTests {
-    private static let totalBlockCount: UInt64 = 2_096
-    private static let slotBlockCount: UInt64 = 8
+    private static let totalBlockCount: UInt64 = 2_592
+    private static let slotBlockCount: UInt64 = 256
 
     static func main() {
         borrowsOneDeviceForJournalHashAndMirrorWork()
         failsClosedWithoutAFullSlotReleaseSource()
+        suspendsBeforeWritingAnInvalidImmutableRescue()
         rejectsIncompatibleGeometryAndScratch()
-        print("Raspberry Pi 5 A/B update port: 3 groups passed")
+        classifiesBootFailuresBeforePublishingStorageAliases()
+        print("Raspberry Pi 5 A/B update port: 5 groups passed")
+    }
+
+    private static func classifiesBootFailuresBeforePublishingStorageAliases() {
+        let normal = BootUpdateRuntimeBootContext.payload(
+            PlatformBootObservation(
+                slot: .a,
+                wasTryBoot: false,
+                trialCapability: .oneShotAlternateSlot
+            )
+        )
+        let trial = BootUpdateRuntimeBootContext.payload(
+            PlatformBootObservation(
+                slot: .b,
+                wasTryBoot: true,
+                trialCapability: .oneShotAlternateSlot
+            )
+        )
+        expect(
+            RaspberryPi5ABBootPolicy.disposition(
+                for: .mediaLeaseUnavailable,
+                context: normal
+            ) == .retry,
+            "transient owner conflict disabled A/B recovery"
+        )
+        expect(
+            RaspberryPi5ABBootPolicy.disposition(
+                for: .candidateStageFailed,
+                context: normal
+            ) == .suspendAndContinue,
+            "missing persistent release source quarantined confirmed media"
+        )
+        expect(
+            RaspberryPi5ABBootPolicy.disposition(
+                for: .journalCommitFailed,
+                context: normal
+            ) == .quarantineAndReset,
+            "uncertain journal durability allowed ordinary SD aliases"
+        )
+        expect(
+            RaspberryPi5ABBootPolicy.disposition(
+                for: .selectorCommitRejectedBeforeWrite,
+                context: normal
+            ) == .suspendAndContinue,
+            "pre-write selector rejection forced a confirmed-slot reset loop"
+        )
+        expect(
+            RaspberryPi5ABBootPolicy.disposition(
+                for: .selectorCommitDurabilityUncertain,
+                context: normal
+            ) == .quarantineAndReset,
+            "possibly written selector was allowed to publish SD aliases"
+        )
+        expect(
+            RaspberryPi5ABBootPolicy.disposition(
+                for: .orchestrator(.unexpectedBoot(
+                    slot: .b,
+                    wasTryBoot: true
+                )),
+                context: trial
+            ) == .quarantineAndReset,
+            "contradictory tryboot identity continued as healthy"
+        )
+        expect(
+            RaspberryPi5ABBootPolicy.disposition(
+                for: .orchestrator(.recoveryNotAuthorized),
+                context: .recovery
+            ) == .disableAndContinue,
+            "diagnostic rescue boot was forced into a reset loop"
+        )
     }
 
     private static func borrowsOneDeviceForJournalHashAndMirrorWork() {
@@ -173,9 +244,9 @@ struct RaspberryPi5ABUpdatePortTests {
                 )
                 let beforeSelector = pointer.pointee.bytes
                 expect(
-                    !port.commitSelector(BootSelectorCommitAction(
+                    port.commitSelector(BootSelectorCommitAction(
                         defaultSlot: .b
-                    )),
+                    )) == .rejectedBeforeWrite,
                     "malformed selector media gained write authority"
                 )
                 expect(
@@ -183,6 +254,85 @@ struct RaspberryPi5ABUpdatePortTests {
                     "failed selector validation mutated media"
                 )
                 port.releaseExclusiveMediaLease()
+            }
+        }
+    }
+
+    private static func suspendsBeforeWritingAnInvalidImmutableRescue() {
+        var device = MemoryBlockDevice(blockCount: totalBlockCount)
+        let media = makeMedia()
+        fillSlotA(on: device, media: media)
+        installSelectorBootSectorWithInvalidRescue(
+            on: device,
+            media: media
+        )
+        let digest = digestOfSlotA(on: device, media: media)
+        let journal = selectorCommitPendingHistory(digest: digest)
+
+        withScratch(byteCount: 1_024) { scratch in
+            withUnsafeMutablePointer(to: &device) { pointer in
+                formatAndSeedJournal(
+                    on: pointer,
+                    media: media,
+                    digest: digest,
+                    scratch: scratch,
+                    records: journal
+                )
+                let selectorBefore = selectorBytes(
+                    on: pointer.pointee,
+                    media: media
+                )
+                guard var port = RaspberryPi5ABUpdatePort(
+                          borrowing: pointer,
+                          media: media,
+                          scratch: scratch
+                      )
+                else { fail("invalid rescue fixture did not create a port") }
+                var executor = BootUpdateRuntimeExecutor()
+                guard case .recovered(let recovered) =
+                        executor.recoverCurrentBoot(
+                            through: &port,
+                            observation: PlatformBootObservation(
+                                slot: .a,
+                                wasTryBoot: false,
+                                trialCapability: .oneShotAlternateSlot
+                            ),
+                            layout: port.layout
+                        )
+                else { fail("selector-pending fixture did not recover") }
+                expect(
+                    recovered.phase == .selectorCommitPending,
+                    "boot recovery discarded post-health selector intent"
+                )
+                expect(
+                    executor.serviceOnce(
+                        through: &port,
+                        observation: PlatformBootObservation(
+                            slot: .a,
+                            wasTryBoot: false,
+                            trialCapability: .oneShotAlternateSlot
+                        ),
+                        layout: port.layout,
+                        maximumBlockCount: 128
+                    ) == .failure(.selectorCommitRejectedBeforeWrite),
+                    "immutable rescue rejection lost its no-write effect"
+                )
+                expect(
+                    selectorBytes(on: pointer.pointee, media: media)
+                        == selectorBefore,
+                    "immutable rescue rejection modified the selector"
+                )
+                expect(
+                    RaspberryPi5ABBootPolicy.disposition(
+                        for: .selectorCommitRejectedBeforeWrite,
+                        context: .payload(PlatformBootObservation(
+                            slot: .a,
+                            wasTryBoot: false,
+                            trialCapability: .oneShotAlternateSlot
+                        ))
+                    ) == .suspendAndContinue,
+                    "physical pre-write rejection still entered a reset loop"
+                )
             }
         }
     }
@@ -249,7 +399,7 @@ struct RaspberryPi5ABUpdatePortTests {
                 type: .fat32LBA,
                 isBootable: false,
                 range: BlockDeviceRange(
-                    startBlock: 2_056,
+                    startBlock: 2_304,
                     blockCount: slotBlockCount,
                     within: totalBlockCount
                 )!
@@ -259,7 +409,7 @@ struct RaspberryPi5ABUpdatePortTests {
                 type: .swiftOSData,
                 isBootable: false,
                 range: BlockDeviceRange(
-                    startBlock: 2_064,
+                    startBlock: 2_560,
                     blockCount: 32,
                     within: totalBlockCount
                 )!
@@ -271,7 +421,8 @@ struct RaspberryPi5ABUpdatePortTests {
         on pointer: UnsafeMutablePointer<MemoryBlockDevice>,
         media: SwiftOSABMediaPartitions,
         digest: BootImageDigest,
-        scratch: UnsafeMutableRawBufferPointer
+        scratch: UnsafeMutableRawBufferPointer,
+        records: [BootControlRecord]? = nil
     ) {
         guard var data = BorrowedBlockDeviceRegion(
                   borrowing: pointer,
@@ -284,13 +435,18 @@ struct RaspberryPi5ABUpdatePortTests {
                   scratch: scratch
               )
         else { fail("data partition format") }
-        let initial = initialRecord(digest: digest)
-        guard case .committed(_, let sequence) = BootControlJournal.commit(
-                  initial,
-                  to: &data,
-                  scratch: scratch
-              ), sequence == initial.sequence
-        else { fail("seed boot-control journal") }
+        let history = records ?? [initialRecord(digest: digest)]
+        var index = 0
+        while index < history.count {
+            let record = history[index]
+            guard case .committed(_, let sequence) = BootControlJournal.commit(
+                      record,
+                      to: &data,
+                      scratch: scratch
+                  ), sequence == record.sequence
+            else { fail("seed boot-control journal") }
+            index += 1
+        }
     }
 
     private static func initialRecord(
@@ -304,6 +460,127 @@ struct RaspberryPi5ABUpdatePortTests {
             mediaLayoutFingerprint:
                 RaspberryPiABUpdateLayout.mediaLayoutFingerprint
         )!
+    }
+
+    private static func selectorCommitPendingHistory(
+        digest: BootImageDigest
+    ) -> [BootControlRecord] {
+        let initial = initialRecord(digest: digest)
+        let writing = transitioned(initial.beginCandidateWrite(
+            to: .b,
+            generation: 2,
+            digest: digest,
+            blockCount: slotBlockCount,
+            trialToken: 9
+        ))
+        let written = transitioned(writing.recordCandidateProgress(
+            nextBlock: slotBlockCount
+        ))
+        let trialPending = transitioned(written.sealCandidate())
+        let trialBooting = transitioned(trialPending.observeBoot(
+            slot: .b,
+            wasTryBoot: true
+        ))
+        let selectorPending = transitioned(trialBooting.confirmCandidateHealth(
+            slot: .b,
+            generation: 2,
+            digest: digest,
+            trialToken: 9
+        ))
+        return [
+            initial,
+            writing,
+            written,
+            trialPending,
+            trialBooting,
+            selectorPending,
+        ]
+    }
+
+    private static func transitioned(
+        _ result: BootControlTransitionResult
+    ) -> BootControlRecord {
+        guard case .record(let record) = result else {
+            fail("boot-control fixture transition")
+        }
+        return record
+    }
+
+    private static func installSelectorBootSectorWithInvalidRescue(
+        on device: MemoryBlockDevice,
+        media: SwiftOSABMediaPartitions
+    ) {
+        let base = Int(media.selector.range.startBlock) * 512
+        device.bytes[base] = 0xeb
+        device.bytes[base + 1] = 0x3c
+        device.bytes[base + 2] = 0x90
+        writeASCII("SWIFTOS ", on: device, at: base + 3)
+        writeLE16(512, on: device, at: base + 11)
+        device.bytes[base + 13] = 1
+        writeLE16(1, on: device, at: base + 14)
+        device.bytes[base + 16] = 2
+        writeLE16(32, on: device, at: base + 17)
+        writeLE16(2_047, on: device, at: base + 19)
+        device.bytes[base + 21] = 0xf8
+        writeLE16(6, on: device, at: base + 22)
+        writeLE16(63, on: device, at: base + 24)
+        writeLE16(255, on: device, at: base + 26)
+        writeLE32(1, on: device, at: base + 28)
+        device.bytes[base + 36] = 0x80
+        device.bytes[base + 38] = 0x29
+        writeLE32(0x4354_4c31, on: device, at: base + 39)
+        writeASCII("SWIFTOS-CTL", on: device, at: base + 43)
+        writeASCII("FAT12   ", on: device, at: base + 54)
+        device.bytes[base + 510] = 0x55
+        device.bytes[base + 511] = 0xaa
+        // Bytes 64...191 intentionally remain zero. The boot sector is valid,
+        // but the immutable rescue manifest is not, so commit must reject
+        // before touching autoboot.txt's sector.
+    }
+
+    private static func selectorBytes(
+        on device: MemoryBlockDevice,
+        media: SwiftOSABMediaPartitions
+    ) -> [UInt8] {
+        let start = Int(media.selector.range.startBlock) * 512
+        let count = Int(media.selector.range.blockCount) * 512
+        return Array(device.bytes[start..<start + count])
+    }
+
+    private static func writeASCII(
+        _ value: StaticString,
+        on device: MemoryBlockDevice,
+        at offset: Int
+    ) {
+        value.withUTF8Buffer { bytes in
+            var index = 0
+            while index < bytes.count {
+                device.bytes[offset + index] = bytes[index]
+                index += 1
+            }
+        }
+    }
+
+    private static func writeLE16(
+        _ value: UInt16,
+        on device: MemoryBlockDevice,
+        at offset: Int
+    ) {
+        device.bytes[offset] = UInt8(truncatingIfNeeded: value)
+        device.bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+    }
+
+    private static func writeLE32(
+        _ value: UInt32,
+        on device: MemoryBlockDevice,
+        at offset: Int
+    ) {
+        writeLE16(UInt16(truncatingIfNeeded: value), on: device, at: offset)
+        writeLE16(
+            UInt16(truncatingIfNeeded: value >> 16),
+            on: device,
+            at: offset + 2
+        )
     }
 
     private static func fillSlotA(

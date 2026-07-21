@@ -34,7 +34,13 @@ enum RaspberryPiABSelectorInspectionResult: Equatable {
 enum RaspberryPiABSelectorCommitResult: Equatable {
     case committed(RaspberryPiABSelectorState)
     case unchanged(RaspberryPiABSelectorState)
-    case failure(RaspberryPiABSelectorFailure)
+    /// Immutable validation or an input read failed before the mutable policy
+    /// sector was offered to the block device. The existing selector is still
+    /// authoritative, so board policy may leave the prior confirmed slot up.
+    case rejectedBeforeWrite(RaspberryPiABSelectorFailure)
+    /// A selector write may have reached media, or its durability/readback
+    /// could not be proved. No caller may infer which policy firmware will see.
+    case durabilityUncertain(RaspberryPiABSelectorFailure)
 }
 
 /// Strict writer for the deterministic selector produced by the host media
@@ -134,9 +140,9 @@ enum RaspberryPiABSelector {
             ? .defaultA : .defaultB
         guard device.geometry.logicalBlockByteCount == 512,
               device.geometry.logicalBlockCount == partitionBlockCount
-        else { return .failure(.invalidGeometry) }
+        else { return .rejectedBeforeWrite(.invalidGeometry) }
         guard scratch.count >= 1_024, let base = scratch.baseAddress else {
-            return .failure(.invalidScratch)
+            return .rejectedBeforeWrite(.invalidScratch)
         }
         let block = UnsafeMutableRawBufferPointer(start: base, count: 512)
         let second = UnsafeMutableRawBufferPointer(
@@ -148,30 +154,30 @@ enum RaspberryPiABSelector {
             first: block,
             second: second
         ) {
-            return .failure(failure)
+            return .rejectedBeforeWrite(failure)
         }
         if let failure = read(
             &device,
             block: autobootDataBlock,
             into: block
         ) {
-            return .failure(failure)
+            return .rejectedBeforeWrite(failure)
         }
         let desiredPolicy = defaultSlot == .a ? selectorA : selectorB
         if matchesPolicy(block, expected: desiredPolicy) {
             let synchronized = device.synchronize()
             guard synchronized == .success else {
-                return .failure(.synchronize(synchronized))
+                return .durabilityUncertain(.synchronize(synchronized))
             }
             let readback = device.readBlock(
                 at: autobootDataBlock,
                 into: block
             )
             guard readback == .success else {
-                return .failure(.readback(readback))
+                return .durabilityUncertain(.readback(readback))
             }
             guard matchesPolicy(block, expected: desiredPolicy) else {
-                return .failure(.readbackMismatch)
+                return .durabilityUncertain(.readbackMismatch)
             }
             return .unchanged(desired)
         }
@@ -197,17 +203,19 @@ enum RaspberryPiABSelector {
             at: autobootDataBlock,
             from: UnsafeRawBufferPointer(start: base, count: 512)
         )
-        guard write == .success else { return .failure(.write(write)) }
+        guard write == .success else {
+            return .durabilityUncertain(.write(write))
+        }
         let synchronized = device.synchronize()
         guard synchronized == .success else {
-            return .failure(.synchronize(synchronized))
+            return .durabilityUncertain(.synchronize(synchronized))
         }
         let readback = device.readBlock(at: autobootDataBlock, into: block)
         guard readback == .success else {
-            return .failure(.readback(readback))
+            return .durabilityUncertain(.readback(readback))
         }
         guard matchesPolicy(block, expected: desiredPolicy) else {
-            return .failure(.readbackMismatch)
+            return .durabilityUncertain(.readbackMismatch)
         }
         return .committed(desired)
     }

@@ -27,7 +27,7 @@ private struct TestBootUpdateRuntimePort: BootUpdateRuntimePort {
     var failNextJournalCommit = false
     var failNextJournalCommitAfterWrite = false
     var candidateStageSucceeds = true
-    var selectorCommitSucceeds = true
+    var selectorCommitResult = BootUpdateRuntimeSelectorCommitResult.committed
     var recoverySelectorRepair:
         BootUpdateRuntimeRecoverySelectorRepairResult = .repaired
     var peerMirrorSucceeds = true
@@ -92,10 +92,10 @@ private struct TestBootUpdateRuntimePort: BootUpdateRuntimePort {
 
     mutating func commitSelector(
         _ action: BootSelectorCommitAction
-    ) -> Bool {
+    ) -> BootUpdateRuntimeSelectorCommitResult {
         expect(leaseHeld, "selector write escaped the runtime media lease")
         events.append(.selector(action))
-        return selectorCommitSucceeds
+        return selectorCommitResult
     }
 
     mutating func repairSelectorFromRecovery(
@@ -143,9 +143,10 @@ struct BootUpdateRuntimeExecutorTests {
         latchesAnUncertainJournalWriteUntilReboot()
         repairsOnlyAPostHealthSelectorFromRecovery()
         recoversFailedTrialsBeforeFurtherWrites()
+        preservesSelectorCommitEffectThroughTheExecutor()
         promotesThenMirrorsOnlyFromANormalConfirmedBoot()
         failsClosedWhenTheSharedMediaLeaseIsUnavailable()
-        print("boot update runtime executor host tests: 7 groups passed")
+        print("boot update runtime executor host tests: 8 groups passed")
     }
 
     private static func requiresBootRecoveryAndSerializesEveryEffect() {
@@ -414,6 +415,73 @@ struct BootUpdateRuntimeExecutorTests {
                 .release,
             ],
             "rollback recovery escaped the shared media lease"
+        )
+    }
+
+    private static func preservesSelectorCommitEffectThroughTheExecutor() {
+        let layout = makeLayout()
+        let action = BootSelectorCommitAction(defaultSlot: .b)
+
+        var rejectedPort = TestBootUpdateRuntimePort(
+            record: selectorCommitPendingRecord()
+        )
+        rejectedPort.selectorCommitResult = .rejectedBeforeWrite
+        var rejectedExecutor = BootUpdateRuntimeExecutor()
+        guard case .recovered = rejectedExecutor.recoverCurrentBoot(
+                  through: &rejectedPort,
+                  observation: normal(.a),
+                  layout: layout
+              )
+        else { fail("pre-write selector fixture did not recover") }
+        rejectedPort.events = []
+        expect(
+            rejectedExecutor.serviceOnce(
+                through: &rejectedPort,
+                observation: normal(.a),
+                layout: layout,
+                maximumBlockCount: 3
+            ) == .failure(.selectorCommitRejectedBeforeWrite),
+            "pre-write selector rejection became durability ambiguity"
+        )
+        expect(
+            rejectedPort.events == [
+                .acquire,
+                .load,
+                .selector(action),
+                .release,
+            ],
+            "pre-write selector rejection leaked its media lease"
+        )
+
+        var uncertainPort = TestBootUpdateRuntimePort(
+            record: selectorCommitPendingRecord()
+        )
+        uncertainPort.selectorCommitResult = .durabilityUncertain
+        var uncertainExecutor = BootUpdateRuntimeExecutor()
+        guard case .recovered = uncertainExecutor.recoverCurrentBoot(
+                  through: &uncertainPort,
+                  observation: normal(.a),
+                  layout: layout
+              )
+        else { fail("uncertain selector fixture did not recover") }
+        uncertainPort.events = []
+        expect(
+            uncertainExecutor.serviceOnce(
+                through: &uncertainPort,
+                observation: normal(.a),
+                layout: layout,
+                maximumBlockCount: 3
+            ) == .failure(.selectorCommitDurabilityUncertain),
+            "possibly written selector was presented as a safe rejection"
+        )
+        expect(
+            uncertainPort.events == [
+                .acquire,
+                .load,
+                .selector(action),
+                .release,
+            ],
+            "uncertain selector result leaked its media lease"
         )
     }
 

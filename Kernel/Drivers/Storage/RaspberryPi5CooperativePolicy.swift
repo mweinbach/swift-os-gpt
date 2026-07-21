@@ -21,6 +21,34 @@ enum RaspberryPi5CooperativePolicy {
     }
 }
 
+enum RaspberryPi5WatchdogServiceAction: UInt8, Equatable {
+    case programService
+    case suppressDuringTrialProbation
+}
+
+/// Pure policy for the Pi one-shot trial watchdog. Firmware has already given
+/// the candidate one initial timeout window when the watchdog is adopted. No
+/// later cooperative checkpoint may extend that window until the exact
+/// candidate-health transition has become durable in the A/B journal.
+struct RaspberryPi5WatchdogProbationPolicy {
+    private(set) var isTrialProbationActive: Bool
+
+    init(isTryBootCandidate: Bool) {
+        isTrialProbationActive = isTryBootCandidate
+    }
+
+    var serviceAction: RaspberryPi5WatchdogServiceAction {
+        isTrialProbationActive
+            ? .suppressDuringTrialProbation : .programService
+    }
+
+    mutating func releaseAfterDurableCandidateHealth() -> Bool {
+        guard isTrialProbationActive else { return false }
+        isTrialProbationActive = false
+        return true
+    }
+}
+
 /// One-shot marker state kept separate from persistent-record sequencing. A
 /// successful append marker itself enters the retained ring and is flushed on
 /// a later pass, but must never authorize another marker.

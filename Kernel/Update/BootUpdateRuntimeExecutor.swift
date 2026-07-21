@@ -19,6 +19,16 @@ enum BootUpdateRuntimeRecoverySelectorRepairResult: Equatable {
     case failed
 }
 
+/// Effect boundary for a platform selector commit. A validation rejection is
+/// safe only when the port proves that no selector write was attempted. Once a
+/// write may have begun, loss of synchronization or readback is durability
+/// ambiguity and must remain distinct through board reset policy.
+enum BootUpdateRuntimeSelectorCommitResult: Equatable {
+    case committed
+    case rejectedBeforeWrite
+    case durabilityUncertain
+}
+
 /// Full-slot verification is cooperative. A port may hash a bounded number of
 /// blocks and return `inProgress`, but it may report `verified` only after an
 /// independent read of the complete destination has produced this exact
@@ -65,7 +75,9 @@ protocol BootUpdateRuntimePort {
     /// Commits and reads back the platform selector while the same lease still
     /// excludes filesystem/log traffic. A journal failure after this returns
     /// is recoverable because the old selector-commit phase remains durable.
-    mutating func commitSelector(_ action: BootSelectorCommitAction) -> Bool
+    mutating func commitSelector(
+        _ action: BootSelectorCommitAction
+    ) -> BootUpdateRuntimeSelectorCommitResult
 
     /// Recovery-environment repair is narrower than ordinary update service.
     /// The port must independently hash both complete slot ranges against the
@@ -95,7 +107,8 @@ enum BootUpdateRuntimeExecutorFailure: Equatable {
     case orchestrator(BootUpdateOrchestratorFailure)
     case candidateStageFailed
     case candidateVerificationFailed
-    case selectorCommitFailed
+    case selectorCommitRejectedBeforeWrite
+    case selectorCommitDurabilityUncertain
     case recoverySelectorRepairFailed
     case peerMirrorFailed
     case peerMirrorVerificationFailed
@@ -342,8 +355,13 @@ struct BootUpdateRuntimeExecutor {
             )
 
         case .commitSelector(let selector):
-            guard port.commitSelector(selector) else {
-                return .failure(.selectorCommitFailed)
+            switch port.commitSelector(selector) {
+            case .rejectedBeforeWrite:
+                return .failure(.selectorCommitRejectedBeforeWrite)
+            case .durabilityUncertain:
+                return .failure(.selectorCommitDurabilityUncertain)
+            case .committed:
+                break
             }
             return progressed(
                 BootUpdateOrchestrator.recordSelectorCommitted(

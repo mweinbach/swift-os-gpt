@@ -29,7 +29,7 @@ struct RaspberryPiABSelectorTests {
                     defaultSlot: .b,
                     to: &badManifest,
                     scratch: scratch
-                ) == .failure(.malformedRescueManifest),
+                ) == .rejectedBeforeWrite(.malformedRescueManifest),
                 "invalid rescue manifest gained selector-write authority"
             )
             expect(
@@ -47,7 +47,7 @@ struct RaspberryPiABSelectorTests {
                     defaultSlot: .b,
                     to: &badPayload,
                     scratch: scratch
-                ) == .failure(.corruptRescuePayload),
+                ) == .rejectedBeforeWrite(.corruptRescuePayload),
                 "corrupt rescue payload gained selector-write authority"
             )
             expect(
@@ -66,7 +66,7 @@ struct RaspberryPiABSelectorTests {
                     defaultSlot: .b,
                     to: &badFreeSpace,
                     scratch: scratch
-                ) == .failure(.corruptRescuePayload),
+                ) == .rejectedBeforeWrite(.corruptRescuePayload),
                 "nonzero selector free space gained write authority"
             )
             expect(
@@ -186,7 +186,7 @@ struct RaspberryPiABSelectorTests {
                     defaultSlot: .b,
                     to: &device,
                     scratch: scratch
-                ) == .failure(.malformedAllocationTables),
+                ) == .rejectedBeforeWrite(.malformedAllocationTables),
                 "malformed selector metadata gained write authority"
             )
             expect(device.bytes == before, "malformed selector was modified")
@@ -202,7 +202,7 @@ struct RaspberryPiABSelectorTests {
                     defaultSlot: .b,
                     to: &writeFailure,
                     scratch: scratch
-                ) == .failure(.write(.transportFailure)),
+                ) == .durabilityUncertain(.write(.transportFailure)),
                 "selector write failure was hidden"
             )
         }
@@ -215,7 +215,7 @@ struct RaspberryPiABSelectorTests {
                     defaultSlot: .b,
                     to: &syncFailure,
                     scratch: scratch
-                ) == .failure(.synchronize(.transportFailure)),
+                ) == .durabilityUncertain(.synchronize(.transportFailure)),
                 "selector synchronization failure was hidden"
             )
             expect(
@@ -223,7 +223,7 @@ struct RaspberryPiABSelectorTests {
                     defaultSlot: .b,
                     to: &syncFailure,
                     scratch: scratch
-                ) == .failure(.synchronize(.transportFailure)),
+                ) == .durabilityUncertain(.synchronize(.transportFailure)),
                 "cached selector bytes bypassed a failed durability barrier"
             )
             syncFailure.failSynchronization = false

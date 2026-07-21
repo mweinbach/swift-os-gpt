@@ -182,10 +182,38 @@ struct FirmwarePropertyMailboxTests {
         skipsUnrelatedMailboxMessages()
         classifiesPowerStateResponseSemantics()
         classifiesPi5USBPowerHandoff()
+        protectsSharedScratchAfterAmbiguousPowerTransactions()
         rejectsMalformedResponses()
         reportsBoundedTimeouts()
         validatesBuffersPollLimitsAndCacheOwnership()
-        print("firmware property mailbox: 10 groups passed")
+        print("firmware property mailbox: 11 groups passed")
+    }
+
+    private static func protectsSharedScratchAfterAmbiguousPowerTransactions() {
+        expect(
+            RaspberryPiFirmwareMailboxScratchPolicy.disposition(
+                after: .responseTimedOut
+            ) == .poisoned,
+            "firmware-owned timeout buffer was declared reusable"
+        )
+        expect(
+            RaspberryPiFirmwareMailboxScratchPolicy.disposition(
+                after: .cacheInvalidationFailed
+            ) == .poisoned,
+            "incoherent response buffer was declared reusable"
+        )
+        expect(
+            RaspberryPiFirmwareMailboxScratchPolicy.disposition(
+                after: .writeTimedOut
+            ) == .reusable,
+            "pre-write timeout permanently consumed mailbox scratch"
+        )
+        expect(
+            RaspberryPiFirmwareMailboxScratchPolicy.disposition(
+                after: .malformedResponse(.endTag)
+            ) == .reusable,
+            "completed malformed response retained firmware ownership"
+        )
     }
 
     private static func enforcesTryBootPreparationOrdering() {

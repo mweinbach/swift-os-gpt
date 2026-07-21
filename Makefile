@@ -196,6 +196,7 @@ firmware-mailbox-host-test: | $(BUILD_DIR)
 		Kernel/Core/PhysicalBytes.swift \
 		Kernel/Update/RaspberryPiTryBootFirmware.swift \
 		Kernel/Drivers/FirmwarePropertyMailbox.swift \
+		Kernel/Drivers/RaspberryPiFirmwareMailboxScratch.swift \
 		Kernel/Platform/RaspberryPi5DMAScratchLayout.swift \
 		Kernel/Platform/RaspberryPi5USBPowerPolicy.swift \
 		Tests/Host/FirmwarePropertyMailboxTests.swift \
@@ -1030,6 +1031,7 @@ rpi5-ab-update-port-host-test: | $(BUILD_DIR)
 		Kernel/Drivers/USB/USBKernelUpdateSHA256.swift \
 		Kernel/Update/RaspberryPiABSelector.swift \
 		Kernel/Drivers/Storage/RaspberryPi5ABUpdatePort.swift \
+		Kernel/Drivers/Storage/RaspberryPi5ABBootPolicy.swift \
 		Tests/Host/StorageTestSupport.swift \
 		Tests/Host/RaspberryPi5ABUpdatePortTests.swift \
 		-o $(BUILD_DIR)/raspberry-pi-5-ab-update-port-host-tests

@@ -24,6 +24,14 @@ private typealias RaspberryPi5UserFileSystemBootstrap =
     SwiftFSIncrementalVolumeBootstrap<
         RaspberryPi5SharedSDCardBlockDevice
     >
+private typealias RaspberryPi5PhysicalABUpdatePort =
+    RaspberryPi5ABUpdatePort<RaspberryPi5SDCardBlockDevice>
+
+private enum RaspberryPi5ABRuntimeState: UInt8 {
+    case unavailable
+    case pending
+    case resolved
+}
 
 private nonisolated(unsafe) var raspberryPi5SDDeviceAllocation:
     ClassifiedPageAllocationToken?
@@ -53,13 +61,28 @@ enum RaspberryPi5StorageRuntime {
         RaspberryPi5UserFileSystemBootstrap?
     private nonisolated(unsafe) static var userFileSystemBootstrapResolved =
         false
+    private nonisolated(unsafe) static var bootUpdatePort:
+        RaspberryPi5PhysicalABUpdatePort?
+    private nonisolated(unsafe) static var bootUpdateExecutor =
+        BootUpdateRuntimeExecutor()
+    private nonisolated(unsafe) static var bootUpdateContext:
+        PlatformFirmwareBootContext?
+    private nonisolated(unsafe) static var bootPlatform: Platform?
+    private nonisolated(unsafe) static var bootUpdateState =
+        RaspberryPi5ABRuntimeState.unavailable
+    private nonisolated(unsafe) static var pendingCandidateHealth:
+        BootCandidateHealthAction?
+    private nonisolated(unsafe) static var kernelHealthReady = false
+
+    private static let bootUpdateBlockQuantum: UInt64 = 128
 
     /// Board-specific transport type behind the same mounted-provider seam as
     /// QEMU. Callers must enter it only through the serialized storage owner;
     /// copies of its borrowed block-device view alias the one SD controller.
     static var mountedProvider:
         UnsafeMutablePointer<RaspberryPi5UserFileSystemProvider>? {
-        raspberryPi5UserFileSystemProvider
+        guard bootUpdateState == .resolved else { return nil }
+        return raspberryPi5UserFileSystemProvider
     }
 
     static var signedVolumeBootstrapResolved: Bool {
@@ -99,6 +122,8 @@ enum RaspberryPi5StorageRuntime {
             return
         }
         self.console = console
+        bootPlatform = platform
+        bootUpdateContext = platform.firmwareBootContext
         pendingDescription = description
         deferredActivation = gate
         console.write("SWIFTOS:STORAGE_DEFERRED\n")
@@ -128,16 +153,22 @@ enum RaspberryPi5StorageRuntime {
         activeService = service
         report(event)
         if case .superblockReady = event {
-            prepareUserFileSystemBootstrap(from: service)
+            prepareBootUpdateReconciliation(from: service)
         }
     }
 
     /// One recovery block or one durable 48-byte append per cooperative pass.
     static func serviceRecoveryOrFlushOnce() {
-        if RaspberryPi5SwiftFSStoragePolicy.steadyStateAction(
+        let action = RaspberryPi5SwiftFSStoragePolicy.steadyStateAction(
+            bootUpdatePending: bootUpdateState == .pending,
             userFileSystemBootstrapPending:
                 pendingUserFileSystemBootstrap != nil
-        ) == .bootstrapUserFileSystem {
+        )
+        if action == .serviceBootUpdate {
+            serviceBootUpdateOnce()
+            return
+        }
+        if action == .bootstrapUserFileSystem {
             serviceUserFileSystemBootstrapOnce()
             return
         }
@@ -151,6 +182,256 @@ enum RaspberryPi5StorageRuntime {
         )
         activeService = service
         report(event)
+    }
+
+    static func markKernelHealthReady() {
+        kernelHealthReady = true
+    }
+
+    private static func prepareBootUpdateReconciliation(
+        from service: RaspberryPi5PersistentLogService
+    ) {
+        guard let media = service.selectedABMediaPartitions else {
+            bootUpdateState = .resolved
+            console?.write("SWIFTOS:AB_UNAVAILABLE_LEGACY_MEDIA\n")
+            prepareUserFileSystemBootstrap(from: service)
+            return
+        }
+        guard let context = bootUpdateContext else {
+            resolveBootUpdate(
+                marker: "SWIFTOS:AB_DISABLED_BOOT_IDENTITY\n",
+                service: service
+            )
+            return
+        }
+        if case .unsupportedPartition = context {
+            resolveBootUpdate(
+                marker: "SWIFTOS:AB_DISABLED_BOOT_PARTITION\n",
+                service: service
+            )
+            return
+        }
+        guard let device = raspberryPi5SDDevice,
+              let scratch = storageScratchBuffer(),
+              let port = RaspberryPi5PhysicalABUpdatePort(
+                  borrowing: device,
+                  media: media,
+                  scratch: scratch
+              )
+        else {
+            resolveBootUpdate(
+                marker: "SWIFTOS:AB_DISABLED_MEDIA_PORT\n",
+                service: service
+            )
+            return
+        }
+        bootUpdatePort = port
+        bootUpdateExecutor = BootUpdateRuntimeExecutor()
+        pendingCandidateHealth = nil
+        bootUpdateState = .pending
+        console?.write("SWIFTOS:AB_RECONCILIATION_PENDING\n")
+    }
+
+    private static func serviceBootUpdateOnce() {
+        guard bootUpdateState == .pending,
+              var port = bootUpdatePort,
+              let context = bootUpdateContext
+        else { return }
+        var executor = bootUpdateExecutor
+
+        let result: BootUpdateRuntimeExecutorResult
+        switch context.bootUpdateRuntimeContext {
+        case .recovery:
+            result = executor.recoverSelectorFromRecovery(
+                through: &port,
+                context: .recovery,
+                layout: port.layout
+            )
+        case .payload(let observation):
+            if !executor.recoveredCurrentBoot {
+                result = executor.recoverCurrentBoot(
+                    through: &port,
+                    observation: observation,
+                    layout: port.layout
+                )
+            } else {
+                let healthEvidence: BootCandidateHealthAction?
+                if kernelHealthReady,
+                   RaspberryPi5WatchdogRuntime.isTrialProbationActive {
+                    healthEvidence = pendingCandidateHealth
+                } else {
+                    healthEvidence = nil
+                }
+                result = executor.serviceOnce(
+                    through: &port,
+                    observation: observation,
+                    layout: port.layout,
+                    maximumBlockCount: bootUpdateBlockQuantum,
+                    healthEvidence: healthEvidence
+                )
+            }
+        case .unsupported:
+            resolveBootUpdate(
+                marker: "SWIFTOS:AB_DISABLED_BOOT_CONTEXT\n"
+            )
+            return
+        }
+        // The executor has released its exclusive media lease before any
+        // result is interpreted as a reset or filesystem-publication boundary.
+        bootUpdatePort = port
+        bootUpdateExecutor = executor
+        handleBootUpdateResult(result, context: context)
+    }
+
+    private static func handleBootUpdateResult(
+        _ result: BootUpdateRuntimeExecutorResult,
+        context: PlatformFirmwareBootContext
+    ) {
+        switch result {
+        case .recovered:
+            console?.write("SWIFTOS:AB_BOOT_RECOVERED\n")
+        case .releaseAccepted:
+            // No production caller offers a release until a persistent
+            // full-slot transport exists.
+            quarantineAndReset(marker: "SWIFTOS:AB_UNEXPECTED_RELEASE\n")
+        case .progressed(let record):
+            if record.phase == .selectorCommitPending,
+               case .payload(let observation) = context,
+               observation.wasTryBoot {
+                pendingCandidateHealth = nil
+                guard RaspberryPi5WatchdogRuntime
+                    .releaseAfterDurableCandidateHealth() else {
+                    quarantineAndReset(
+                        marker: "SWIFTOS:AB_HEALTH_WATCHDOG_FAILED\n"
+                    )
+                }
+                console?.write("SWIFTOS:AB_CANDIDATE_HEALTH_DURABLE\n")
+            }
+            if record.phase == .stable {
+                resolveBootUpdate(marker: "SWIFTOS:AB_CONVERGED\n")
+            }
+        case .idle:
+            resolveBootUpdate(marker: "SWIFTOS:AB_STABLE\n")
+        case .verificationInProgress:
+            return
+        case .waitingForHealth(let expected):
+            pendingCandidateHealth = expected
+        case .trialResetRequired:
+            prepareTrialReset()
+        case .confirmedResetRequired:
+            resetToDefault(marker: "SWIFTOS:AB_CONFIRMED_RESET\n")
+        case .recoveryResetRequired:
+            resetToDefault(marker: "SWIFTOS:AB_RECOVERY_RESET\n")
+        case .failure(let failure):
+            handleBootUpdateFailure(
+                failure,
+                context: context.bootUpdateRuntimeContext
+            )
+        }
+    }
+
+    private static func handleBootUpdateFailure(
+        _ failure: BootUpdateRuntimeExecutorFailure,
+        context: BootUpdateRuntimeBootContext
+    ) {
+        switch RaspberryPi5ABBootPolicy.disposition(
+            for: failure,
+            context: context
+        ) {
+        case .retry:
+            return
+        case .disableAndContinue:
+            resolveBootUpdate(marker: "SWIFTOS:AB_DISABLED_RUNTIME\n")
+        case .suspendAndContinue:
+            resolveBootUpdate(marker: "SWIFTOS:AB_SUSPENDED_RESUMABLE\n")
+        case .quarantineAndReset:
+            quarantineAndReset(marker: "SWIFTOS:AB_QUARANTINE_RESET\n")
+        }
+    }
+
+    private static func prepareTrialReset() {
+        guard RaspberryPi5FirmwareMailboxScratchRuntime.isReusable else {
+            resolveBootUpdate(marker: "SWIFTOS:AB_TRIAL_MAILBOX_POISONED\n")
+            return
+        }
+        guard let platform = bootPlatform,
+              let resource = platform.firmwareMailbox,
+              let registers = FirmwareMailboxMMIORegisterAccess(
+                  resource: resource
+              ), let scratchAddress = RaspberryPi5DMAScratchLayout
+                  .firmwareMailboxAddress(
+                      pageBaseAddress: AArch64.dmaScratchAddress
+                  ), var mailbox = FirmwarePropertyMailbox(
+                      registers: registers,
+                      cache: AArch64FirmwareMailboxCacheMaintenance(),
+                      bufferCPUAddress: scratchAddress,
+                      bufferPhysicalAddress: scratchAddress,
+                      bufferByteCount: RaspberryPi5DMAScratchLayout
+                          .firmwareMailboxByteCount
+                  )
+        else {
+            resolveBootUpdate(marker: "SWIFTOS:AB_TRIAL_MAILBOX_UNAVAILABLE\n")
+            return
+        }
+        let preparation = RaspberryPiTryBootFirmwareCoordinator.prepareForReset(
+            firmware: &mailbox,
+            maximumPollCount: 100_000
+        )
+        switch preparation {
+        case .armRejected:
+            resolveBootUpdate(marker: "SWIFTOS:AB_TRIAL_ARM_REJECTED\n")
+        case .readyToReset:
+            console?.write("SWIFTOS:AB_TRIAL_RESET\n")
+            RaspberryPi5WatchdogRuntime.resetToDefault(platform: platform)
+        }
+    }
+
+    private static func quarantineAndReset(marker: StaticString) -> Never {
+        bootUpdatePort = nil
+        pendingCandidateHealth = nil
+        console?.write(marker)
+        guard let platform = bootPlatform else {
+            while true { AArch64.waitForEvent() }
+        }
+        RaspberryPi5WatchdogRuntime.resetToDefault(platform: platform)
+    }
+
+    private static func resetToDefault(marker: StaticString) -> Never {
+        bootUpdatePort = nil
+        pendingCandidateHealth = nil
+        console?.write(marker)
+        guard let platform = bootPlatform else {
+            while true { AArch64.waitForEvent() }
+        }
+        RaspberryPi5WatchdogRuntime.resetToDefault(platform: platform)
+    }
+
+    private static func resolveBootUpdate(
+        marker: StaticString,
+        service: RaspberryPi5PersistentLogService? = nil
+    ) {
+        bootUpdatePort = nil
+        pendingCandidateHealth = nil
+        bootUpdateState = .resolved
+        console?.write(marker)
+        guard let service = service ?? activeService else { return }
+        prepareUserFileSystemBootstrap(from: service)
+    }
+
+    private static func storageScratchBuffer()
+        -> UnsafeMutableRawBufferPointer? {
+        let workspace = KernelLinkerLayout.storageScratch
+        guard workspace.start <= UInt64(UInt.max),
+              workspace.length >= 1_024,
+              workspace.length <= UInt64(Int.max),
+              let pointer = UnsafeMutableRawPointer(
+                  bitPattern: UInt(workspace.start)
+              )
+        else { return nil }
+        return UnsafeMutableRawBufferPointer(
+            start: pointer,
+            count: Int(workspace.length)
+        )
     }
 
     private static func initializeTransport() {
@@ -602,6 +883,9 @@ enum RaspberryPi5StorageRuntime {
         pendingDescription = nil
         deferredActivation = nil
         activeService = nil
+        bootUpdatePort = nil
+        bootUpdateState = .unavailable
+        pendingCandidateHealth = nil
         pendingUserFileSystemBootstrap = nil
         releaseUnpublishedUserFileSystemResources()
         raspberryPi5UserFileSystemProvider = nil
@@ -626,6 +910,10 @@ enum RaspberryPi5CooperativeRuntime {
             console: console,
             platform: platform
         )
+    }
+
+    static func markKernelHealthReady() {
+        RaspberryPi5StorageRuntime.markKernelHealthReady()
     }
 
     static func cooperativeServiceHook(

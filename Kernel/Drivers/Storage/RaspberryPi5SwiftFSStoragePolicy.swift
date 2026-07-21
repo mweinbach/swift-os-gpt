@@ -19,8 +19,9 @@ enum RaspberryPi5SwiftFSRegionPlanResult: Equatable {
 }
 
 enum RaspberryPi5SteadyStorageAction: UInt8, Equatable {
-    case bootstrapUserFileSystem = 1
-    case servicePersistentLog = 2
+    case serviceBootUpdate = 1
+    case bootstrapUserFileSystem = 2
+    case servicePersistentLog = 3
 }
 
 /// Pure board policy translating the MBR-selected data partition and signed
@@ -79,9 +80,11 @@ enum RaspberryPi5SwiftFSStoragePolicy {
     /// recovery/appends resume on the following pass, so two aliases of the SD
     /// transport are never entered concurrently by this runtime.
     static func steadyStateAction(
+        bootUpdatePending: Bool,
         userFileSystemBootstrapPending: Bool
     ) -> RaspberryPi5SteadyStorageAction {
-        userFileSystemBootstrapPending
+        if bootUpdatePending { return .serviceBootUpdate }
+        return userFileSystemBootstrapPending
             ? .bootstrapUserFileSystem : .servicePersistentLog
     }
 

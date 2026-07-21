@@ -178,12 +178,21 @@ struct RaspberryPi5SwiftFSStoragePolicyTests {
     private static func serializesFilesystemBootstrapBeforeLogService() {
         expect(
             RaspberryPi5SwiftFSStoragePolicy.steadyStateAction(
+                bootUpdatePending: true,
+                userFileSystemBootstrapPending: true
+            ) == .serviceBootUpdate,
+            "A/B reconciliation did not exclude every storage alias"
+        )
+        expect(
+            RaspberryPi5SwiftFSStoragePolicy.steadyStateAction(
+                bootUpdatePending: false,
                 userFileSystemBootstrapPending: true
             ) == .bootstrapUserFileSystem,
             "pending filesystem bootstrap shared a pass with log I/O"
         )
         expect(
             RaspberryPi5SwiftFSStoragePolicy.steadyStateAction(
+                bootUpdatePending: false,
                 userFileSystemBootstrapPending: false
             ) == .servicePersistentLog,
             "log service did not resume after filesystem bootstrap"
